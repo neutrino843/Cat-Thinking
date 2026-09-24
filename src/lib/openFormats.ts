@@ -1,4 +1,5 @@
  import type { DocData, MindNodeData } from '../types'
+import { richNoteToText } from './sanitizeHtml'
 
 const uid = () =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -45,11 +46,21 @@ export function toMarkdown(doc: DocData): string {
       if (typeof n.task.progress === 'number') parts.push(`${n.task.progress}%`)
       if (parts.length) line += ` \`${parts.join(' · ')}\``
     }
+    // M7-P2：旧单 href 与新多 links 并存，统一降级为多个 [🔗](url) 后缀。
+    // 内部节点链接用 [节点→#node-xxx] 标记，无对应 Markdown 语法但可读。
     if (n.href) line += ` [🔗](${n.href})`
+    if (n.links && n.links.length) {
+      for (const l of n.links) {
+        if (l.kind === 'url' && l.url) line += ` [🔗](${l.url})`
+        else if (l.kind === 'node' && l.nodeId) line += ` [节点→#${l.nodeId}]`
+      }
+    }
     lines.push(line)
-    if (n.note) {
+    // M7-P2：富备注优先（含格式降级为纯文本），其次旧纯文本 note
+    const noteText = n.richNote?.html ? richNoteToText(n.richNote.html) : n.note
+    if (noteText) {
       const noteIndent = '  '.repeat(depth + 1)
-      for (const nl of n.note.split('\n')) lines.push(`${noteIndent}> ${nl}`)
+      for (const nl of noteText.split('\n')) lines.push(`${noteIndent}> ${nl}`)
     }
     for (const cid of n.children) {
       const c = doc.nodes[cid]

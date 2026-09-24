@@ -1324,4 +1324,185 @@ body {
   color: var(--accent);
 }
 
+/* ===== M7-P2 链接区 ===== */
+
+.msz-np-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.msz-np-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.msz-np-link-go {
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+  font-family: var(--font-body);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msz-np-link-go:hover:not(:disabled) {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.msz-np-link-go:disabled {
+  cursor: not-allowed;
+  color: var(--ink-soft);
+  opacity: 0.6;
+}
+
+.msz-np-link.dead {
+  border-color: var(--line);
+  background: var(--panel-2);
+}
+
+.msz-np-empty {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.msz-np-link-mode {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.msz-np-tab {
+  flex: 1;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-body);
+  border-bottom: 2px solid transparent;
+}
+
+.msz-np-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.msz-np-link-add {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.msz-np-link-add .msz-np-input {
+  flex: 1;
+}
+
+.msz-np-note-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  opacity: 0.85;
+}
+
+/* ===== M7-P2 富文本备注编辑器 ===== */
+
+.msz-note-editor {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  overflow: hidden;
+}
+
+.msz-ne-toolbar {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.msz-ne-btn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: var(--font-body);
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.msz-ne-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--line);
+}
+
+.msz-ne-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.msz-ne-editable {
+  min-height: 60px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--ink);
+  line-height: 1.5;
+  outline: none;
+}
+
+.msz-ne-editable:focus {
+  background: var(--sel-bg);
+}
+
+.msz-ne-editable:empty::before {
+  content: attr(data-placeholder);
+  color: var(--ink-soft);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.msz-ne-editable ul,
+.msz-ne-editable ol {
+  margin: 4px 0;
+  padding-left: 22px;
+}
+
+.msz-ne-editable blockquote {
+  margin: 4px 0;
+  padding: 2px 10px;
+  border-left: 3px solid var(--accent-soft);
+  color: var(--ink-soft);
+}
+
+.msz-ne-editable a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 

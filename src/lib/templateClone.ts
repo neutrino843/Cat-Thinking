@@ -8,7 +8,7 @@ const uid = () =>
 /**
  * 从模板文档克隆出一篇全新文档（M5 自定义模板 / 模板复用）：
  * - 文档 id 与全部节点 id 重新生成；
- * - parent / children / task.deps[].from 同步重映射，依赖不悬空；
+ * - parent / children / task.deps[].from / links[].nodeId 同步重映射，依赖与内部链接不悬空；
  * - 折叠状态重置为展开；createdAt/updatedAt 刷新。
  * 输入文档不被修改。
  */
@@ -19,12 +19,26 @@ export function cloneFromTemplate(src: DocData): DocData {
   const nodes: Record<string, MindNodeData> = {}
   for (const [oldId, n] of Object.entries(src.nodes)) {
     const id = idMap.get(oldId)!
+    // M7-P2：内部节点链接 nodeId 重映射；目标不在本模板内则丢弃该链接（不悬空）
+    let links = n.links
+    if (links && links.length) {
+      links = links
+        .map((l) =>
+          l.kind === 'node' && l.nodeId
+            ? idMap.has(l.nodeId)
+              ? { ...l, nodeId: idMap.get(l.nodeId)! }
+              : null
+            : l,
+        )
+        .filter((l): l is NonNullable<typeof l> => !!l)
+    }
     nodes[id] = {
       ...n,
       id,
       parent: n.parent ? (idMap.get(n.parent) ?? null) : null,
       children: n.children.map((c) => idMap.get(c)).filter((x): x is string => !!x),
       collapsed: false,
+      ...(links && links.length ? { links } : {}),
       ...(n.task
         ? {
             task: {

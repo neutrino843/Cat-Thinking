@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { DocData, NodeTag } from '../types'
+import type { DocData, NodeLink, NodeTag } from '../types'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { worldHolder } from '../store/refs'
@@ -83,6 +83,7 @@ interface NodeProps {
   n: LaidNode
   text: string
   note: string | undefined
+  links: NodeLink[] | undefined
   tags: NodeTag[] | undefined
   icons: string[] | undefined
   theme: Theme
@@ -98,7 +99,7 @@ interface NodeProps {
 }
 
 const NodeView = memo(function NodeView({
-  n, text, note, tags, icons, theme, sketch, selected, match, hovered, dx, dy, focusable, onDown, onEdit,
+  n, text, note, links, tags, icons, theme, sketch, selected, match, hovered, dx, dy, focusable, onDown, onEdit,
 }: NodeProps) {
   const seed = hashSeed(n.id)
   const d = useMemo(
@@ -157,13 +158,31 @@ const NodeView = memo(function NodeView({
         >
           {text || ' '}
         </text>
-        {note && (
-          <text
-            x={n.x + n.w - 12} y={n.y + n.h / 2} dominantBaseline="central" textAnchor="end"
-            fontSize={11} fill={n.level === 0 ? theme.rootText : theme.inkSoft} style={{ pointerEvents: 'none' }}
-          >
-            ✎
-          </text>
+        {/* M7-P2：备注或富备注 ✎ 指示符（在节点右缘） */}
+        {(note || links) && (
+          <g style={{ pointerEvents: 'none' }}>
+            {note && (
+              <text
+                x={n.x + n.w - 12} y={n.y + n.h / 2} dominantBaseline="central" textAnchor="end"
+                fontSize={11} fill={n.level === 0 ? theme.rootText : theme.inkSoft}
+              >
+                ✎
+              </text>
+            )}
+            {links && links.length > 0 && (
+              <text
+                x={n.x + n.w - (note ? 28 : 12)}
+                y={n.y + n.h / 2}
+                dominantBaseline="central"
+                textAnchor="end"
+                fontSize={10}
+                fill={n.level === 0 ? theme.rootText : theme.inkSoft}
+                aria-label={`${links.length} 个链接`}
+              >
+                🔗
+              </text>
+            )}
+          </g>
         )}
         {/* M7：图标（文字左侧，如有） */}
         {icons && icons.length > 0 && (
@@ -537,7 +556,8 @@ export default function Canvas({ query }: { query: string }) {
                 key={n.id}
                 n={n}
                 text={doc.nodes[n.id]?.text ?? ''}
-                note={doc.nodes[n.id]?.note}
+                note={doc.nodes[n.id]?.note || doc.nodes[n.id]?.richNote?.html || undefined}
+                links={doc.nodes[n.id]?.links}
                 tags={doc.nodes[n.id]?.tags}
                 icons={doc.nodes[n.id]?.icons}
                 theme={theme}
