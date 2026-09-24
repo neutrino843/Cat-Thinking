@@ -59,7 +59,7 @@ describe('cloneFromTemplate 模板克隆', () => {
     expect(dst.nodes[dst.rootId].collapsed).toBe(false)
     expect(dst.createdAt).toBeTypeOf('number')
     expect(dst.updatedAt).toBeTypeOf('number')
-    expect(dst.version).toBe(1)
+    expect(dst.version).toBe(2)
   })
 
   it('不修改源文档', () => {

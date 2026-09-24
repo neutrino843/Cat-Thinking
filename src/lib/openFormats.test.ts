@@ -212,7 +212,7 @@ describe('toGanttCSV', () => {
 
   it('空文档不崩（仅表头）', () => {
     const doc: DocData = {
-      version: 1,
+      version: 2,
       id: 'empty',
       title: '空',
       rootId: 'nope',

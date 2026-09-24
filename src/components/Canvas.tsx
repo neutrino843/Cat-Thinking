@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { DocData } from '../types'
+import type { DocData, NodeTag } from '../types'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { worldHolder } from '../store/refs'
@@ -7,9 +7,22 @@ import { computeLayout, type LaidEdge, type LaidNode } from '../lib/layout'
 import { getTheme, FONT_HAND, FONT_BODY, type Theme } from '../lib/theme'
 import { cubicPts, hashSeed, roundedRectPts, sketchPath } from '../lib/sketch'
 import { buildSlides, presentDoc } from '../lib/presentation'
+import { renderIconPath } from '../data/icons'
 
 const JT = [0, 1.4, 2.6]
 const PS = [1, 2, 2]
+
+/** M7 标签色板（与 NodeTag.color 对应） */
+const TAG_COLORS: Record<string, string> = {
+  red: '#e53935',
+  orange: '#fb8c00',
+  amber: '#fdd835',
+  green: '#43a047',
+  teal: '#00897b',
+  blue: '#1e88e5',
+  violet: '#8e24aa',
+  gray: '#9e9e9e',
+}
 
 interface View {
   tx: number
@@ -70,6 +83,8 @@ interface NodeProps {
   n: LaidNode
   text: string
   note: string | undefined
+  tags: NodeTag[] | undefined
+  icons: string[] | undefined
   theme: Theme
   sketch: 0 | 1 | 2
   selected: boolean
@@ -83,7 +98,7 @@ interface NodeProps {
 }
 
 const NodeView = memo(function NodeView({
-  n, text, note, theme, sketch, selected, match, hovered, dx, dy, focusable, onDown, onEdit,
+  n, text, note, tags, icons, theme, sketch, selected, match, hovered, dx, dy, focusable, onDown, onEdit,
 }: NodeProps) {
   const seed = hashSeed(n.id)
   const d = useMemo(
@@ -149,6 +164,37 @@ const NodeView = memo(function NodeView({
           >
             ✎
           </text>
+        )}
+        {/* M7：图标（文字左侧，如有） */}
+        {icons && icons.length > 0 && (
+          <g transform={`translate(${n.x + 11},${n.y + n.h / 2 - 7})`} style={{ pointerEvents: 'none' }}>
+            {icons.slice(0, 3).map((iconId, i) => {
+              const path = renderIconPath(iconId)
+              if (!path) return null
+              return (
+                <path
+                  key={iconId + i}
+                  d={path}
+                  transform={`translate(${i * 15},0) scale(0.58)`}
+                  fill="none"
+                  stroke={n.level === 0 ? theme.rootText : theme.inkSoft}
+                  strokeWidth={3.4}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              )
+            })}
+          </g>
+        )}
+        {/* M7：标签色点（文字右侧） */}
+        {tags && tags.length > 0 && (
+          <g style={{ pointerEvents: 'none' }}>
+            {tags.slice(0, 4).map((t, i) => {
+              const tagColor = TAG_COLORS[t.color] ?? TAG_COLORS.gray
+              const tx = n.x + n.w - 8 - (tags.length - 1 - i) * 14
+              return <circle key={t.id} cx={tx} cy={n.y + n.h / 2} r={3.5} fill={tagColor} opacity={0.85} />
+            })}
+          </g>
         )}
         {n.hasChildren && n.collapsed && (
           <g
@@ -492,6 +538,8 @@ export default function Canvas({ query }: { query: string }) {
                 n={n}
                 text={doc.nodes[n.id]?.text ?? ''}
                 note={doc.nodes[n.id]?.note}
+                tags={doc.nodes[n.id]?.tags}
+                icons={doc.nodes[n.id]?.icons}
                 theme={theme}
                 sketch={sketch}
                 selected={selection.includes(n.id)}

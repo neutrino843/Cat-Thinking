@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DocMeta } from '../types'
+import NodePanel from './NodePanel'
 import {
   emptyTrash,
   deleteTemplate,
@@ -366,6 +367,8 @@ export default function Sidebar() {
           </>
         )}
       </div>
+      {/* M7：选中单节点时显示富内容编辑面板 */}
+      <NodePanel />
     </aside>
   )
 }

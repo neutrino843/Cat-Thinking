@@ -35,7 +35,7 @@ export function buildFixture(rootDef: TreeDef = {}, layout: DocData['layout'] = 
   }
   const rootId = mk(rootDef, null)
   const now = 1758400000000
-  return { version: 1, id: 'doc-test', title: '测试文档', rootId, layout, nodes, createdAt: now, updatedAt: now }
+  return { version: 2, id: 'doc-test', title: '测试文档', rootId, layout, nodes, createdAt: now, updatedAt: now }
 }
 
 /** 常用结构：root → a → a1；root → b */

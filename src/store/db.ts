@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie'
 import type { DocData, DocMeta } from '../types'
 import { cloneFromTemplate } from '../lib/templateClone'
+import { migrateDoc } from '../lib/migrate'
 
 export interface StoredDoc {
   id: string
@@ -37,10 +38,22 @@ export interface TrashMeta {
   deletedAt: number
 }
 
+/** Blob 存储条目（M7-P1 建表，P3 使用）：图片/附件二进制数据 */
+export interface StoredBlob {
+  id: string
+  /** 所属文档 id（用于文档删除时联动清理） */
+  docId: string
+  /** 关联节点 id（可选，图片可挂节点） */
+  nodeId?: string
+  blob: Blob
+  createdAt: number
+}
+
 class MSZDB extends Dexie {
   docs!: Table<StoredDoc, string>
   templates!: Table<StoredTemplate, string>
   trash!: Table<StoredTrash, string>
+  blobs!: Table<StoredBlob, string>
   constructor() {
     super('maosizhi')
     this.version(1).stores({ docs: 'id, updatedAt' })
@@ -51,6 +64,13 @@ class MSZDB extends Dexie {
       docs: 'id, updatedAt',
       templates: 'id, createdAt',
       trash: 'id, deletedAt',
+    })
+    // M7：新增 blobs 表（图片/附件二进制存储），仅增量加表，老库自动升级
+    this.version(4).stores({
+      docs: 'id, updatedAt',
+      templates: 'id, createdAt',
+      trash: 'id, deletedAt',
+      blobs: 'id, docId, nodeId',
     })
   }
 }
@@ -70,7 +90,9 @@ export async function loadDoc(id: string): Promise<DocData | null> {
   const s = await db.docs.get(id)
   if (!s) return null
   try {
-    return JSON.parse(s.payload) as DocData
+    const raw = JSON.parse(s.payload) as DocData | { version: 1 } & DocData
+    // M7：v1 → v2 懒迁移（不改盘直到首次编辑保存）
+    return migrateDoc(raw as DocData)
   } catch (e) {
     // 修 F-3：payload 损坏不可向上抛未处理 rejection；返回 null 由调用方 fallback
     console.error(`[猫思之] 文档 ${id} 的数据已损坏，无法读取`, e)

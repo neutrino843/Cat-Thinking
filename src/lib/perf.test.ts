@@ -33,7 +33,7 @@ function bigDoc(target: number, withTasks: boolean): DocData {
   }
   const rootId = mk(null, 0)
   const now = Date.now()
-  return { version: 1, id: 'big', title: '性能', rootId, layout: 'logic', nodes, createdAt: now, updatedAt: now }
+  return { version: 2, id: 'big', title: '性能', rootId, layout: 'logic', nodes, createdAt: now, updatedAt: now }
 }
 
 describe('性能：大图（PRD 目标 1000+ 节点）', () => {

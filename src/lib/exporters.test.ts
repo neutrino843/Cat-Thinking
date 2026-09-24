@@ -6,7 +6,7 @@ import type { DocData } from '../types'
 describe('导入校验 parseImported', () => {
   it('合法 JSON 文档可解析并补齐版本号', () => {
     const d = parseImported(JSON.stringify(simpleFixture()))
-    expect(d.version).toBe(1)
+    expect(d.version).toBe(2)
     expect(d.nodes[d.rootId]).toBeDefined()
   })
 

@@ -210,7 +210,7 @@ export function parseMarkdown(md: string, fallbackTitle = '未命名导图'): Do
 
   const now = Date.now()
   return {
-    version: 1,
+    version: 2,
     id: uid(),
     title,
     rootId,

@@ -178,7 +178,7 @@ function validateDoc(d: unknown): DocData {
     }
   }
 
-  return { ...(o as unknown as DocData), version: 1 }
+  return { ...(o as unknown as DocData), version: 2 }
 }
 
 /**

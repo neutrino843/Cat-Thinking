@@ -100,7 +100,7 @@ export const useDoc = create<DocState>((set, get) => {
   }
 
   return {
-    doc: { version: 1, id: '', title: '', rootId: '', layout: 'logic', nodes: {}, createdAt: 0, updatedAt: 0 },
+    doc: { version: 2, id: '', title: '', rootId: '', layout: 'logic', nodes: {}, createdAt: 0, updatedAt: 0 },
     selection: [],
     editing: null,
     clipboard: null,
