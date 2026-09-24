@@ -49,7 +49,23 @@ function save(key: string, v: string) {
   }
 }
 
-/** 减少动效初始值：用户显式设置优先，否则跟随系统 */
+/** 读取手绘档位：仅接受 0/1/2（注意 0 是合法值，不能用 || 回退——修 F-1） */
+function loadSketch(): SketchLevel {
+  try {
+    const raw = localStorage.getItem('msz.sketch')
+    if (raw === null) return 1
+    const v = Number(raw)
+    return v === 0 || v === 1 || v === 2 ? v : 1
+  } catch {
+    return 1
+  }
+}
+
+/**
+ * 减少动效初始值：用户显式设置（msz.reduceMotion）优先；未设置过才跟随系统。
+ * 设计取舍（L-2）：一旦用户手动选择即持久化，之后系统 prefers-reduced-motion 变化
+ * 不再自动跟随——显式选择优先于系统默认；用户可再次手动切换。
+ */
 function initReduceMotion(): boolean {
   try {
     const v = localStorage.getItem('msz.reduceMotion')
@@ -73,7 +89,7 @@ try {
 
 export const useSettings = create<SettingsState>((set) => ({
   dark: loadBool('msz.dark', false),
-  sketch: (Number(localStorage.getItem('msz.sketch') ?? 1) as SketchLevel) || 1,
+  sketch: loadSketch(),
   view: (localStorage.getItem('msz.view') as ViewKind) || 'mind',
   ganttScale: ((localStorage.getItem('msz.ganttScale') as GanttScale) || 'day'),
   sidebar: loadBool('msz.sidebar', true),

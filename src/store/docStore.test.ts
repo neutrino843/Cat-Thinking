@@ -130,6 +130,21 @@ describe('docStore 撤销重做', () => {
     expect(doc().nodes[a].text).toBe('a-xyz')
   })
 
+  it('F-7：连续输入（commit:false）不清空已有 future，与 upd「不动历史」契约一致', () => {
+    const { a } = ids()
+    get().beginEdit()
+    get().setText(a, 'a-edit')
+    get().undo()
+    expect(get().future).toHaveLength(1)
+    // 契约：commit:false 期间不得改动 past/future（旧实现会把 future 清空）
+    get().setText(a, 'a-again')
+    expect(get().future).toHaveLength(1)
+    expect(doc().nodes[a].text).toBe('a-again')
+    // redo 仍可回到撤销点
+    get().redo()
+    expect(doc().nodes[a].text).toBe('a-edit')
+  })
+
   it('甘特拖拽（commit:false）整体只占一步历史', () => {
     const { a } = ids()
     const t = todayISO()

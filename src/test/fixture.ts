@@ -5,6 +5,8 @@ const nid = (p?: string) => `n${seq++}`
 
 export interface TreeDef {
   text?: string
+  note?: string
+  href?: string
   task?: MindNodeData['task']
   collapsed?: boolean
   children?: TreeDef[]
@@ -21,6 +23,8 @@ export function buildFixture(rootDef: TreeDef = {}, layout: DocData['layout'] = 
       parent,
       children: [],
       text: def.text ?? id,
+      ...(def.note ? { note: def.note } : {}),
+      ...(def.href ? { href: def.href } : {}),
       ...(def.task ? { task: JSON.parse(JSON.stringify(def.task)) } : {}),
       ...(def.collapsed ? { collapsed: true } : {}),
     }

@@ -193,6 +193,15 @@ export default function Canvas({ query }: { query: string }) {
   const [hover, setHover] = useState<string | null>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
 
+  /* 组件存活标记：拖拽进行中若切视图/卸载，命令式 window 监听据此自我清理（修 F-8） */
+  const aliveRef = useRef(true)
+  useEffect(
+    () => () => {
+      aliveRef.current = false
+    },
+    [],
+  )
+
   const matches = useMemo(() => {
     const set = new Set<string>()
     const q = query.trim()
@@ -219,7 +228,9 @@ export default function Canvas({ query }: { query: string }) {
     return next
   }, [doc, matches])
 
-  /* 演示模式：派生裁剪文档（presenting 优先于搜索），绝不可写回 store */
+  /* 演示模式：派生裁剪文档，绝不可写回 store。
+   * 优先级（L-5）：presenting → presentDoc 裁剪；否则 viewDoc（搜索临时展开）。
+   * msz:fit 等基于 layoutRef 的操作作用于此 renderDoc，与 store.doc 区分。 */
   const slides = useMemo(() => buildSlides(doc), [doc])
   const renderDoc = useMemo(
     () => (presenting ? presentDoc(doc, Math.min(slide, slides.length - 1)) : viewDoc),
@@ -331,8 +342,15 @@ export default function Canvas({ query }: { query: string }) {
     const sx = e.clientX
     const sy = e.clientY
     const v0 = viewRef.current
-    const onMove = (ev: PointerEvent) =>
+    const onMove = (ev: PointerEvent) => {
+      // 修 F-8：组件已卸载则自我清理，不再 setState
+      if (!aliveRef.current) {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        return
+      }
       setView({ ...v0, tx: v0.tx + ev.clientX - sx, ty: v0.ty + ev.clientY - sy })
+    }
     const onUp = () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
@@ -353,8 +371,10 @@ export default function Canvas({ query }: { query: string }) {
       if (e.button !== 0) return
       e.stopPropagation()
       if (useSettings.getState().presenting) return
+      // 修 F-6：区分 additive（shift/ctrl/meta）选择，抬起时不进入编辑
+      const additive = e.shiftKey || e.ctrlKey || e.metaKey
       const st = useDoc.getState()
-      if (e.shiftKey || e.ctrlKey || e.metaKey) st.select([id], true)
+      if (additive) st.select([id], true)
       else if (!st.selection.includes(id)) st.select([id])
 
       const subs = new Set<string>()
@@ -366,6 +386,12 @@ export default function Canvas({ query }: { query: string }) {
       let dy = 0
 
       const onMove = (ev: PointerEvent) => {
+        // 修 F-8：卸载后自我清理
+        if (!aliveRef.current) {
+          window.removeEventListener('pointermove', onMove)
+          window.removeEventListener('pointerup', onUp)
+          return
+        }
         if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 4) moved = true
         if (!moved) return
         const k = viewRef.current.k
@@ -391,13 +417,15 @@ export default function Canvas({ query }: { query: string }) {
       const onUp = () => {
         window.removeEventListener('pointermove', onMove)
         window.removeEventListener('pointerup', onUp)
+        // 关键：先取命中目标再清空（旧代码先置 null 后读取，reparent 永不触发）
+        const target = hoverRef.current
         setDrag(null)
         setHover(null)
         hoverRef.current = null
         if (moved) {
-          const t = hoverRef.current
-          if (t) useDoc.getState().reparent(id, t)
-        } else {
+          if (target) useDoc.getState().reparent(id, target)
+        } else if (!additive) {
+          // 修 F-6：additive 选择不进入编辑
           const s2 = useDoc.getState()
           if (s2.selection.length === 1 && s2.selection[0] === id) beginEditAt(id)
         }

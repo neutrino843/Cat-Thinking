@@ -202,6 +202,44 @@ body {
   flex: 1;
 }
 
+/* ===== 备份提醒横幅 ===== */
+.backup-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 6px 16px;
+  background: var(--warn-bg, #fdf6e3);
+  border-bottom: 1px solid var(--warn-border, #e8d8a0);
+  font-size: 13px;
+  color: var(--ink, #3a352e);
+}
+.backup-text { flex: 1; }
+.backup-actions { display: flex; gap: 8px; }
+.bbtn {
+  border: 1px solid var(--ink-soft, #9a9184);
+  background: transparent;
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink, #3a352e);
+}
+.bbtn:hover { background: var(--hover-bg, rgba(0,0,0,0.06)); }
+.bbtn.primary {
+  background: var(--accent, #c9743a);
+  color: #fff;
+  border-color: var(--accent, #c9743a);
+}
+.bbtn.primary:hover { opacity: 0.9; }
+[data-theme='dark'] .backup-banner {
+  --warn-bg: #3a3328;
+  --warn-border: #5a4e3a;
+  --ink: #e8e0d4;
+  --ink-soft: #9a9184;
+}
+[data-theme='dark'] .bbtn:hover { background: rgba(255,255,255,0.08); }
+
 /* ===== 主区 ===== */
 
 .main {
@@ -375,6 +413,95 @@ body {
 .sb-priv {
   font-size: 11px;
   color: var(--ink-soft);
+}
+
+/* ===== 侧栏 · 回收站（M6） ===== */
+
+.sb-trash-list {
+  padding: 4px 8px;
+}
+
+.sb-trash-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.sb-trash-item {
+  cursor: default;
+  background: rgba(0, 0, 0, 0.02);
+  border-style: dotted;
+}
+
+[data-theme='dark'] .sb-trash-item {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.sb-trash-item .sb-name {
+  color: var(--ink-soft);
+}
+
+.sb-act {
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0.6;
+  padding: 0 4px;
+}
+
+.sb-trash-item:hover .sb-act {
+  opacity: 1;
+}
+
+.sb-act:hover {
+  color: var(--accent);
+}
+
+.sb-trash-btn {
+  border: 1.5px dashed var(--line);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-family: var(--font-body);
+  padding: 4px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.sb-trash-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.tbtn.danger {
+  color: #c0392b;
+  border-color: #c0392b;
+}
+
+.tbtn.danger:hover {
+  background: #c0392b;
+  color: #fff;
+}
+
+.tbtn.danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--ink-soft);
+  border-color: var(--line);
+}
+
+[data-theme='dark'] .tbtn.danger {
+  color: #e57373;
+  border-color: #e57373;
+}
+
+[data-theme='dark'] .tbtn.danger:hover {
+  background: #c0392b;
+  color: #fff;
 }
 
 /* ===== 画布 ===== */

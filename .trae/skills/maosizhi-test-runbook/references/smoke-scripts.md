@@ -336,3 +336,84 @@
 })()
 ```
 预期 same0=true、same2=true。**切勿用 path.getBBox() 比对**——path 描线本身带档位抖动。
+
+## 16. 回收站往返（M6）
+```js
+// 16a. 软删当前文档（confirm 需先挂自动接受：page.on('dialog') 或浏览器侧 window.confirm=()=>true）
+(() => {
+  window.confirm = () => true;
+  document.querySelector('.sb-item.active .sb-del[title="删除"]')?.click();
+  return { trashLabel: document.querySelector('.sb-trash-btn')?.textContent?.trim() };
+  // 预期 '🗑 回收站 (1)'
+})()
+
+// 16b. 切回收站视图 → 看到 1 条
+// 浏览器动作：点击 button.sb-trash-btn，wait 400，再 evaluate：
+(() => ({
+  items: document.querySelectorAll('.sb-trash-item').length,
+  hasRestore: !!document.querySelector('.sb-trash-item .sb-act[title="还原"]'),
+  hasPurge: !!document.querySelector('.sb-trash-item .sb-del[title="永久删除"]'),
+}))()
+// 预期 items=1、两个 true
+
+// 16c. 还原
+(() => {
+  document.querySelector('.sb-trash-item .sb-act[title="还原"]')?.click();
+  return 'clicked';
+})()
+// 浏览器动作：点「← 返回」(button[aria-label="返回文档库"]) wait 400
+// evaluate 断言：document.querySelectorAll('.sb-list:not(.sb-trash-list) .sb-item').length === 2
+
+// 16d. 再软删 → 永久删（confirm 已被覆盖为 true）
+// 浏览器动作：.sb-item.active .sb-del 点击 → .sb-trash-btn 切视图
+(() => {
+  document.querySelector('.sb-trash-item .sb-del[title="永久删除"]')?.click();
+  return document.querySelector('.sb-trash-empty')?.textContent?.trim();
+  // 预期 '回收站为空'
+})()
+```
+
+## 17. Markdown / CSV 导出入口（M6）
+```js
+// 产物内容由 Playwright e2e/markdown.spec.ts 与单测 openFormats 覆盖；
+// 冒烟只验证菜单与点击不报错。浏览器动作：点开 details.tmenu summary，wait 300
+(() =>
+  [...document.querySelectorAll('details.tmenu .tmenu-pop button')].map((b) => b.textContent?.trim()),
+)()
+// 预期 5 项：JSON（完整数据）/ Markdown（.md）/ 甘特任务表（.csv）/ SVG（…）/ PNG（…）
+
+// 点击 Markdown 项触发浏览器下载（browser_use 不断言文件；console 应零 error）
+// Sidebar 导入入口 accept 检查：
+(() => document.querySelector('input[type=file]')?.getAttribute('accept'))()
+// 预期含 .json 与 .md,.markdown
+```
+
+## 18. BackupBanner 超期提醒（M6）
+```js
+// 18a. 造超期（evaluate 同步）
+(() => {
+  localStorage.setItem('msz.lastBackupAt', String(Date.now() - 15 * 86400000));
+  localStorage.removeItem('msz.backupSnoozeUntil');
+  return localStorage.getItem('msz.lastBackupAt');
+})()
+// 浏览器动作：navigate reload，wait 2000
+// snapshot 断言：.backup-banner[role=alert] 文本含「上次完整备份已超过 14 天」
+
+// 18b. 「3 天后提醒」：浏览器动作点 .backup-banner button.bbtn（含该文本）
+// wait 300 后 evaluate：
+(() => ({
+  bannerGone: !document.querySelector('.backup-banner'),
+  snoozeFuture: Number(localStorage.getItem('msz.backupSnoozeUntil')) > Date.now(),
+}))()
+// 预期两个 true
+
+// 18c. 超期后点「导出 JSON 备份」
+// evaluate 造超期（同 18a）→ navigate reload wait 2000 → 点 button.bbtn.primary
+// 浏览器可能弹出下载（忽略文件），wait 300 后 evaluate：
+(() => ({
+  bannerGone: !document.querySelector('.backup-banner'),
+  backupFresh: Date.now() - Number(localStorage.getItem('msz.lastBackupAt')) < 60000,
+}))()
+// 预期两个 true
+```
+

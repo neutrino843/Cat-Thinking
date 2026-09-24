@@ -62,7 +62,9 @@ export default function Outline() {
 
   useEffect(() => {
     if (editing?.source === 'outline') {
-      const el = document.querySelector<HTMLInputElement>(`input[data-oid="${editing.id}"]`)
+      // 修 S-5：转义 id 中的反斜杠/双引号，避免属性选择器注入/选择失败
+      const safe = editing.id.replace(/["\\]/g, (m) => '\\' + m)
+      const el = document.querySelector<HTMLInputElement>(`input[data-oid="${safe}"]`)
       if (el) {
         el.focus()
         el.select()

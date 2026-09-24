@@ -90,8 +90,20 @@ function buildCmds(): Cmd[] {
       },
     },
     { id: 'exp-json', label: '导出 JSON', run: () => void exportCurrent('json') },
+    { id: 'exp-md', label: '导出 Markdown', run: () => void exportCurrent('md') },
+    { id: 'exp-csv', label: '导出甘特任务表 CSV', run: () => void exportCurrent('csv') },
     { id: 'exp-svg', label: '导出 SVG', run: () => void exportCurrent('svg') },
     { id: 'exp-png', label: '导出 PNG', run: () => void exportCurrent('png') },
+    {
+      id: 'trash-open',
+      label: '打开回收站',
+      run: () => window.dispatchEvent(new Event('msz:trash-open')),
+    },
+    {
+      id: 'trash-empty',
+      label: '清空回收站',
+      run: () => window.dispatchEvent(new Event('msz:trash-empty')),
+    },
   ]
 }
 

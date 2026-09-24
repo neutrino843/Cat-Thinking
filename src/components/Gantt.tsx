@@ -10,9 +10,10 @@ import {
   type GanttModel,
   type GanttScale,
 } from '../lib/gantt'
-import { addDays, diffDays, isWeekend, monthKey, todayISO, weekStart } from '../lib/date'
+import { addDays, diffDays, isWeekend, monthKey, parseISO, todayISO, weekStart } from '../lib/date'
 import { getTheme, type Theme } from '../lib/theme'
 import { ganttHolder } from '../store/refs'
+import type { DocData, TaskData } from '../types'
 import TaskEditor from './TaskEditor'
 
 const SCALES: { id: GanttScale; label: string }[] = [
@@ -22,7 +23,7 @@ const SCALES: { id: GanttScale; label: string }[] = [
 ]
 
 /** 每个顶层分支的颜色索引 */
-function branchColors(doc: ReturnType<typeof useDoc.getState>['doc']): Map<string, number> {
+function branchColors(doc: DocData): Map<string, number> {
   const map = new Map<string, number>()
   const walk = (id: string, color: number) => {
     map.set(id, color)
@@ -38,7 +39,9 @@ function headerTicks(model: GanttModel, scale: GanttScale) {
   if (scale === 'day') {
     for (let i = 0; i < model.dayCount; i++) {
       const d = addDays(model.day0, i)
-      ticks.push({ x: i * model.pxPerDay, label: String(Number(d.slice(8))), sub: '日一二三四五六'[new Date(d).getDay()] })
+      // 修 F-2：用 parseISO 本地解析；new Date('YYYY-MM-DD') 按 UTC 解析，
+      // 在 UTC- 时区（如美洲）会让星期索引整体错位
+      ticks.push({ x: i * model.pxPerDay, label: String(Number(d.slice(8))), sub: '日一二三四五六'[parseISO(d).getDay()] })
     }
   } else if (scale === 'week') {
     for (let i = 0; i < model.dayCount; i += 7) {
@@ -81,10 +84,26 @@ export default function Gantt() {
   const edges = useMemo(() => depEdges(doc), [doc])
   const ticks = useMemo(() => headerTicks(model, scale), [model, scale])
   const months = useMemo(() => monthBoundaries(model), [model])
+  // 修 P-5：周末底纹只随 model 变化重算，不再每次渲染重新 Array.from+filter
+  const weekends = useMemo(
+    () =>
+      Array.from({ length: model.dayCount }, (_, i) => i).filter((i) =>
+        isWeekend(addDays(model.day0, i)),
+      ),
+    [model],
+  )
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const syncing = useRef(false)
+  /* 存活标记：拖拽中切视图/卸载时，window 监听自我清理（修 F-8） */
+  const aliveRef = useRef(true)
+  useEffect(
+    () => () => {
+      aliveRef.current = false
+    },
+    [],
+  )
 
   const height = HEADER_H + model.rows.length * ROW_H
   const today = todayISO()
@@ -119,6 +138,12 @@ export default function Gantt() {
     const oEnd = task.end ?? task.start
     let moved = false
     const onMove = (ev: PointerEvent) => {
+      // 修 F-8：卸载后自我清理
+      if (!aliveRef.current) {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        return
+      }
       const dx = ev.clientX - startX
       const delta = Math.round(dx / model.pxPerDay)
       if (!moved && Math.abs(dx) > 3) moved = true
@@ -126,7 +151,11 @@ export default function Gantt() {
       if (task.milestone || mode === 'move') {
         st.setTask(id, { start: addDays(oStart, delta), ...(task.milestone ? {} : { end: addDays(oEnd, delta) }) }, false)
       } else {
-        st.setTask(id, { start: oStart, end: addDays(oEnd, Math.max(0, delta)) }, false)
+        // 修 F-5：允许负 delta 向左缩短工期（旧代码 Math.max(0, delta) 永远只能延长），
+        // 但 end 不得早于 start：缩短量上限为原 end 与 start 的天数差
+        const maxShrink = -diffDays(oStart, oEnd)
+        const endDelta = Math.max(maxShrink, delta)
+        st.setTask(id, { start: oStart, end: addDays(oEnd, endDelta) }, false)
       }
     }
     const onUp = () => {
@@ -215,12 +244,10 @@ export default function Gantt() {
           <rect x={0} y={0} width={model.width} height={height} fill={theme.paper} />
 
           {/* 周末底纹 */}
-          {Array.from({ length: model.dayCount }, (_, i) => addDays(model.day0, i))
-            .filter((d) => isWeekend(d))
-            .map((d) => {
-              const i = diffDays(model.day0, d)
-              return <rect key={d} x={i * model.pxPerDay} y={0} width={model.pxPerDay} height={height} fill={theme.grid} opacity={0.55} />
-            })}
+          {weekends.map((i) => {
+            const d = addDays(model.day0, i)
+            return <rect key={d} x={i * model.pxPerDay} y={0} width={model.pxPerDay} height={height} fill={theme.grid} opacity={0.55} />
+          })}
 
           {/* 行分隔线 */}
           {model.rows.map((r, i) => (
@@ -243,7 +270,7 @@ export default function Gantt() {
               key={i}
               x={t.x + model.pxPerDay / 2}
               y={scale === 'day' ? 32 : 30}
-              fontSize={scale === 'day' ? 10 : 10}
+              fontSize={10}
               textAnchor="middle"
               fill={theme.inkSoft}
             >
@@ -284,7 +311,8 @@ export default function Gantt() {
             const tg = barGeom(tr.task, tr.y, model)
             const sx = fg.milestone ? fg.x + fg.size / 2 : fg.x + fg.w
             const sy = (fg.milestone ? fg.y + fg.size / 2 : fg.y + fg.h / 2)
-            const ex = tg.milestone ? tg.x : tg.x
+            // 修 C-2：里程碑与普通条的箭头终点 x 相同（tg.x），删除恒等三元
+            const ex = tg.x
             const ey = tg.milestone ? tg.y + tg.size / 2 : tg.y + tg.h / 2
             const back = ex < sx
             const mx = sx + (back ? -10 : 14)
@@ -339,7 +367,7 @@ export default function Gantt() {
 
 interface BarProps {
   id: string
-  task: NonNullable<ReturnType<typeof useDoc.getState>['doc']['nodes'][string]['task']>
+  task: TaskData
   rowY: number
   model: GanttModel
   color: string

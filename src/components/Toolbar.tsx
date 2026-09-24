@@ -169,6 +169,8 @@ export default function Toolbar({ query, setQuery }: Props) {
         <summary className="tbtn">导出 ▾</summary>
         <div className="tmenu-pop">
           <button onClick={() => exportCurrent('json')}>JSON（完整数据）</button>
+          <button onClick={() => exportCurrent('md')}>Markdown（.md）</button>
+          <button onClick={() => exportCurrent('csv')}>甘特任务表（.csv）</button>
           <button onClick={() => exportCurrent('svg')}>
             SVG（{view === 'gantt' ? '甘特图' : '思维导图'}）
           </button>

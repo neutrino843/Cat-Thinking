@@ -16,9 +16,13 @@ export interface Slide {
 /** 先序遍历节点 id；演示忽略文档中的 collapsed 状态 */
 function preorder(doc: DocData): string[] {
   const order: string[] = []
+  // 修 L-4：seen 防环。校验过的文档必无环，但导入/历史脏数据若 children 成环，
+  // 递归会直接爆栈（buildSlides 在渲染期调用），此处防御性终止。
+  const seen = new Set<string>()
   const walk = (id: string) => {
     const n = doc.nodes[id]
-    if (!n) return
+    if (!n || seen.has(id)) return
+    seen.add(id)
     order.push(id)
     for (const c of n.children) walk(c)
   }

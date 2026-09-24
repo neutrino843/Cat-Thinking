@@ -261,3 +261,65 @@ M5 实施期间未产生产品缺陷（0 个 Major/Minor）。两起「验证失
 - **M5 四项范围（演示模式 / 主题打磨 / 自定义模板 / 可访问性）全部交付并通过 C1–C5 检查点**；55/55 单测、tsc、生产构建、四档浏览器实测全部通过，控制台零 error。
 - 新增核心纯逻辑（presentation、templateClone）覆盖率 100%；总体语句覆盖 91.19%→92.56%；包体 293→302 KB（+9 KB，gzip +2.7 KB），符合手绘增量预算。
 - M1–M4 回归无缺陷，并补齐了 M4 遗留的键盘撤销/重做 E2E 欠账。MVP 可日常使用的功能面在 M5 收口；后续重点转向 R-1/R-4 数据安全 E2E 与真机性能采样（R-3）。
+
+---
+
+# M6 测试章节 · 数据安全与开放（含 Playwright E2E 基建）
+
+> 计划依据：[M6_plan.md](file:///d:/猫思之/.trae/documents/M6_plan.md)；进度报告：[M6_progress_report.md](file:///d:/猫思之/.trae/documents/M6_progress_report.md)
+> 执行时间：2026-09-23 ~ 2026-09-23；检查点 C1–C5 全部通过。
+
+## M6-1 自动化测试：94 / 94 通过（0 失败）
+
+- 命令：`npx vitest run` → 11 个测试文件、**94/94 全绿**；`npx tsc --noEmit` → 0 错。
+- 新增纯逻辑测试：[openFormats.test.ts](file:///d:/猫思之/src/lib/openFormats.test.ts)（MD/CSV/文件名清洗，含往返、2/4 空格与 Tab 缩进、引用、转义、BOM、空内容）、[backup.test.ts](file:///d:/猫思之/src/lib/backup.test.ts)（无文档/snooze/从未备份/超期四判定）；[exporters.test.ts](file:///d:/猫思之/src/lib/exporters.test.ts) 3→13 用例（文件名清洗、.md 分流、validateDoc 非法结构）。
+- db.ts Dexie 操作按项目铁律不写 Vitest 单测（happy-dom 无 IndexedDB），由 Playwright 覆盖。
+- 覆盖率：`npx vitest run --coverage` → **语句 93.06%**（基线 92.56%，↑0.50pp）、分支 86.19%、函数 85.10%；新纯库 openFormats/backup 行覆盖 100%。
+
+## M6-2 Playwright E2E：4 / 4 通过（连续两遍，retries 0）
+
+- 基建：[playwright.config.ts](file:///d:/猫思之/playwright.config.ts) 仅 chromium；独立端口 5174（`vite --port 5174 --strictPort`，与日常 5173 隔离）；workers=1、retries=0（失败即真问题）；`npm run e2e` / `npm run e2e:install` 已加入 scripts，不并入 `npm test`。
+- 公共工具 [e2e/helpers.ts](file:///d:/猫思之/e2e/helpers.ts)：`resetStore`（导航到同源静态页清 localStorage + 删 IndexedDB，规避连接 blocked 与初始化竞态）、`selectNode`（真实鼠标「微拖拽」实现只选中不编辑）。
+
+| Spec | 覆盖链路 | 结清风险 | 结果 |
+|---|---|---|---|
+| [crash-recovery.spec.ts](file:///d:/猫思之/e2e/crash-recovery.spec.ts) | 改标题/节点 → 自动保存 → reload → 内容仍在 | **R-4** | ✓ |
+| [export-json.spec.ts](file:///d:/猫思之/e2e/export-json.spec.ts) | 拦截 download，解析产物断言 title/rootId/节点结构 | **R-1** | ✓ |
+| [trash.spec.ts](file:///d:/猫思之/e2e/trash.spec.ts) | 软删→回收站→还原→再删→永久删→刷新持久 | M6 回收站 | ✓ |
+| [markdown.spec.ts](file:///d:/猫思之/e2e/markdown.spec.ts) | 导出 .md 断言标题/层级；再导入断言节点恢复 | MD 往返 | ✓ |
+
+两遍运行 8.7s / 8.8s，无 flaky。
+
+## M6-3 浏览器实测（Chromium，全部当日实测）
+
+- C2 回收站：v2→v3 Dexie 老库升级无损；删除→回收站(含计数)→还原→永久删→清空；30 天清扫（注入 deletedAt 造数，sweepTrash 启动执行）；Palette trash-open/trash-empty 命令。
+- C3 开放格式：文件名非法字符清洗、MD 导出内容、CSV 列与 BOM/转义、JSON 导出写 msz.lastBackupAt、.md 导入分流。
+- BackupBanner 专项（9/9 PASS）：造 15 天前时间戳→reload 出现 role=alert 横幅→「3 天后提醒」横幅消失且 snoozeUntil 为未来（1790425342440）→再造 20 天超期→「导出 JSON 备份」后横幅消失且 lastBackupAt 更新为当前（1790166115152 → 1790166155152 量级新值）；导出菜单含 5 项（JSON/MD/CSV/SVG/PNG）。全程 console error = 0。
+
+## M6-4 缺陷与处理
+
+| 编号 | 问题 | 处理 |
+|---|---|---|
+| BUG-M6-1 | React StrictMode（dev）双 effect 下，App 初始化「空库才建 welcome」存在 check-then-act 竞态，空库首启建两篇文档（P5 E2E 实测暴露） | [App.tsx](file:///d:/猫思之/src/App.tsx) 改模块级单飞 promise（initPromise），初始化幂等；回归在 trash.spec 初始计数断言 |
+| S-1（M5 审核） | 导出文件名未清洗非法字符 | sanitizeFileName 统一接入全部导出 |
+| S-3（M5 审核） | JSON 导入无结构校验 | validateDoc 全量校验（rootId/parent↔children/deps 指向/task 字段类型），中文报错 |
+| C-5（M5 审核） | PNG 导出 getContext('2d')! 非空断言 | 改 fallback throw 中文提示 |
+
+## M6-5 构建与包体
+
+- `npm run build`（tsc + vite）通过：JS **313.36 KB**（gzip **106.19 KB**）、CSS 15.17 KB（gzip 3.79 KB）；73 modules，1.19s。
+- 较 M5（305.67/103.65）+7.7 KB（gzip +2.5 KB）：回收站/横幅 UI + 初始化单飞；Playwright 仅 devDep 不进产物。
+- `npm audit`：critical/high 均在 devDeps（happy-dom/esbuild/vitest），按既定结论不做 audit fix --force（破坏 Vite5 兼容）；新增 @playwright/test 无运行时依赖。
+
+## M6-6 残余风险（M6 增量）
+
+- Playwright 目前仅 chromium 单浏览器、4 条关键链路；SVG 节点拖拽换父/甘特拖拽尚无 E2E（依赖合成事件稳定性，列入后续）。
+- 未做项维持冻结：OPML/PDF/XMind、版本历史、本地加密、甘特 SS/FF/SF、真机 FPS（R-3）、演示多端全屏（R-7）、屏幕阅读器真人走查（R-8）。
+- MD 往返仅保证本应用导出格式的严格子集；任意外部 .md 按 best-effort 解析，JSON 仍是唯一无损格式（文案已说明）。
+
+## M6-7 结论
+
+- **M6 五项范围（回收站 / 备份提醒 / Markdown 往返 / 甘特 CSV / Playwright E2E 基建）全部交付，C1–C5 检查点全部通过**：94/94 单测、4/4 E2E 两遍稳定、tsc 0 错、覆盖率 93.06%、构建通过、浏览器实测零 error。
+- 结清测试报告长期挂账 **R-1（导出产物校验）与 R-4（崩溃恢复端到端）**；顺带修复 M5 审核 S-1/S-3/C-5 与 P5 新发现的 StrictMode 初始化竞态。
+- 下一步进入 M7：节点表达力（富内容：备注/超链接/图片/标签/图标/附件）方向立项。
+

@@ -91,7 +91,9 @@ export const useDoc = create<DocState>((set, get) => {
   ) => {
     set((s) => ({
       past: opts.commit === false ? s.past : [...s.past.slice(-199), snap(s.doc)],
-      future: [],
+      // commit:false＝连续文本输入：保留 redo 链（beginEdit 已在编辑开始时清 future），
+      // 修 F-7：撤销后直接输入不再误丢 future
+      future: opts.commit === false ? s.future : [],
       doc: { ...s.doc, nodes, updatedAt: Date.now() },
       ...extra,
     }))
@@ -294,7 +296,7 @@ export const useDoc = create<DocState>((set, get) => {
           ...n,
           id: idMap.get(oldId)!,
           parent: n.parent && idMap.has(n.parent) ? idMap.get(n.parent)! : null,
-          children: n.children.map((c) => idMap.get(c)!).filter(Boolean),
+          children: n.children.map((c) => idMap.get(c)).filter((c): c is string => !!c),
         }
       }
       const t = nodes[target]

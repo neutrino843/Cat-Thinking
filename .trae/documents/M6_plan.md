@@ -126,3 +126,4 @@ interface StoredTrash { id; title; createdAt; updatedAt; deletedAt; payload }
 - TodoWrite 维护 P1–P6 六阶段任务，每阶段完成带 summary 记录实测证据。
 - 每道检查点（C1–C5）必须有可复现命令/浏览器实测输出，证据写入 TEST_REPORT M6 章节。
 - 任何对本计划的实质性范围变更，暂停执行并重新征得确认后再继续。
+上传到github仓库，地址是https://github.com/neutrino843/Cat-Thinking
