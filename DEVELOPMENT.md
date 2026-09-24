@@ -178,12 +178,41 @@ export function migrateDoc(doc: DocDataV1 | DocData): DocData {
 
 ### P2：备注富文本 + 多链接
 
-> **状态：待实施**
+> **状态：已完成**（commit 963fcdc，2026-09-24）
 
-- 轻量 contentEditable 编辑器（bold/italic/list/link）
-- sanitizeHtml 白名单净化（防 XSS）
-- 多链接列表（外部 URL + 内部节点引用跳转）
-- 旧 href 迁移为 links[0]（P1 已完成模型层）
+#### 阶段目标
+为节点备注提供轻量富文本编辑（粗体/斜体/列表/链接/引用），并通过白名单净化防止 XSS；支持每节点多链接（外部 URL + 内部节点引用跳转）。
+
+#### 实现步骤
+1. **sanitizeHtml.ts 白名单净化器**：允许 b/i/u/strong/em/ul/ol/li/a/br/p/blockquote；两道防线——正则预剥离 script/style/iframe/object/embed 等危险子树（兼容 happy-dom DOMParser 对内嵌 script 的不稳定处理），DOMParser 递归属性剥离 + 协议白名单（http(s)/mailto/#node- 内部锚点）；A 标签外部链接自动补 target=_blank + rel=noopener noreferrer。
+2. **sanitizeHtml.test.ts**：23 个注入样例测试（on* 事件、javascript:/data:/vbscript: 协议、script/style/iframe/svg 整树丢弃、非白名单 unwrap 保留文本、白名单内标签递归净化、最终输出绝不出现 javascript: 字面）。
+3. **richNoteToText**：富备注 → 纯文本降级（BR/P→换行、LI→行首、A→文本+[链接](url)），供 toMarkdown 导出与搜索索引使用。
+4. **NoteEditor.tsx**：contentEditable + document.execCommand 轻量编辑器（B/I/U/列表/链接/引用），Ctrl+B/I/L 快捷键；输出始终经 sanitizeHtml 净化后写回 store；链接插入校验 http(s) 或 #node- 锚点；零第三方依赖（不引 Quill/TipTap）。
+5. **NodePanel.tsx 新增两分区**：
+   - 链接区：外部 URL / 内部节点 tab 切换；内部链接点击复用 msz:center 事件居中跳转 + select；目标节点已删除时标灰禁用（gotoLink dead 处理）。
+   - 备注区：NoteEditor 富文本；旧纯 note 自动转义为 `<p>...</p>` 作为初值，richNote 优先。
+6. **Canvas.tsx**：节点右缘 ✎ 指示符现在识别 richNote.html（不仅 note）；新增 🔗 链接指示符（links.length > 0 时显示）。
+7. **openFormats.ts toMarkdown 降级**：多链接输出 `[🔗](url)`（外部）与 `[节点→#nodeId]`（内部）；备注优先 richNote（经 richNoteToText）再回退纯 note。
+8. **templateClone.ts**：克隆模板时内部节点链接 nodeId 重映射；目标不在模板内则丢弃该链接不悬空。
+
+#### 关键代码
+- sanitizeHtml 双防线（src/lib/sanitizeHtml.ts）：正则预剥离 + DOM 递归净化
+- NoteEditor commit 净化回写（src/components/NoteEditor.tsx）：raw → sanitize → 若与 DOM 不同则回写避免脏数据停留
+- NodePanel gotoLink 复用 msz:center（src/components/NodePanel.tsx）：内部链接跳转零新基建
+
+#### 遇到的问题及解决方案
+- **happy-dom DOMParser 对内嵌 `<script>` 处理不稳定**：直接解析 `<p>前<script>...</script>后</p>` 会导致整段内容丢失。解决：在 DOMParser 前加正则预剥离危险标签整棵子树，DOM 层再做属性/协议净化，双防线既兼容测试环境又防绕过。
+- **happy-dom HTMLIFrameElement 解析时触发网络请求**：`<iframe src="x">` 会让 happy-dom 尝试 fetch。同样由正则预剥离解决。
+- **PowerShell 不支持 heredoc**：git commit 多行消息用多个 `-m` 参数替代 `<<'EOF'`。
+- **Vite dev server 默认绑 IPv6**：`--host 127.0.0.1` 强制 IPv4，Playwright baseURL 也改 127.0.0.1。
+- **browser_use 代理 click 不触发 pointerdown**：Canvas 选中逻辑在 onPointerDown，浏览器代理只发 click 事件无法选中节点（非代码缺陷）；Playwright 的 click() 触发完整 pointer 序列所以 E2E 通过。
+
+#### 测试结果
+- tsc 0 错误
+- 137/137 单测全绿（新增 23 个 sanitizeHtml 测试：20 sanitize + 3 richNoteToText）
+- 覆盖率 94.44%（语句）/ 86.07%（分支）
+- 4/4 Playwright E2E 全绿
+- 生产构建 329.78KB / gzip 111.87KB（P2 较 P1 增量 +8.78KB / +2.87KB gzip，远低于 M7 总预算 +12KB gzip）
 
 ---
 
