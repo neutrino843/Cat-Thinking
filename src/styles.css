@@ -274,31 +274,53 @@ body {
 }
 
 .tpl-menu {
+  position: relative;
   display: flex;
   flex-direction: column;
   margin: 0 10px 6px;
   border: 1.6px dashed var(--ink-soft);
   border-radius: 10px;
-  overflow: hidden;
+  overflow: visible;
 }
 
-.tpl-menu button {
+.tpl-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px dashed var(--line);
+}
+
+.tpl-row:last-of-type {
+  border-bottom: none;
+}
+
+.tpl-row > button:first-child {
+  flex: 1;
   text-align: left;
   font-size: 13px;
   padding: 7px 12px;
   background: transparent;
   border: none;
-  border-bottom: 1px dashed var(--line);
   color: var(--ink);
   cursor: pointer;
 }
 
-.tpl-menu button:last-child {
-  border-bottom: none;
+.tpl-row > button:first-child:hover {
+  background: var(--sel-bg);
 }
 
-.tpl-menu button:hover {
-  background: var(--sel-bg);
+.tpl-export {
+  background: transparent;
+  border: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 14px;
+  opacity: 0.5;
+}
+
+.tpl-export:hover {
+  opacity: 1;
+  color: var(--accent);
 }
 
 .tpl-group-label {
@@ -313,6 +335,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
 }
 
 .tpl-custom-name {
@@ -333,6 +356,35 @@ body {
 
 .tpl-custom:hover .tpl-custom-del {
   opacity: 0.85;
+}
+
+/* M7-P5：模板预览弹层（从菜单右侧弹出） */
+.tpl-pop {
+  position: absolute;
+  left: 100%;
+  top: 8px;
+  margin-left: 10px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  z-index: 20;
+}
+
+.tpl-pop-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 6px;
+  text-align: center;
+}
+
+.tpl-pop-count {
+  font-size: 10px;
+  color: var(--ink-soft);
+  margin-top: 4px;
+  text-align: center;
 }
 
 .sb-list {

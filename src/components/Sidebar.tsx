@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import type { DocMeta } from '../types'
+import type { DocData, DocMeta } from '../types'
 import NodePanel from './NodePanel'
+import TemplateThumbnail from './TemplateThumbnail'
 import {
   emptyTrash,
   deleteTemplate,
@@ -20,7 +21,9 @@ import {
 import { buildDoc, findTpl, TEMPLATES } from '../data/templates'
 import { cloneDocBlobs, cloneFromTemplate } from '../lib/templateClone'
 import { parseImported } from '../lib/exporters'
+import { exportTemplate, importTemplateFile } from '../lib/templateIO'
 import { useDoc } from '../store/docStore'
+import { useSettings } from '../store/settings'
 
 type View = 'library' | 'trash'
 
@@ -44,7 +47,11 @@ export default function Sidebar() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [view, setView] = useState<View>('library')
   const activeId = useDoc((s) => s.doc.id)
+  const dark = useSettings((s) => s.dark)
+  /** M7-P5：悬停预览的模板（{name, doc}），null 表示不显示 */
+  const [preview, setPreview] = useState<{ name: string; doc: DocData } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const tplFileRef = useRef<HTMLInputElement>(null)
 
   const refresh = async () => setMetas(await listDocs())
   const refreshTrash = async () => setTrash(await listTrash().catch(() => []))
@@ -106,6 +113,33 @@ export default function Sidebar() {
     useDoc.getState().loadDoc(d)
     setMenuOpen(false)
     refresh()
+  }
+
+  /** M7-P5：悬停显示内置模板预览（按需 buildDoc，节点数少 <2ms） */
+  const hoverBuiltin = (tplId: string) => setPreview({ name: findTpl(tplId).name, doc: buildDoc(findTpl(tplId)) })
+  /** M7-P5：悬停显示自定义模板预览 */
+  const hoverCustom = (t: CustomTemplate) => setPreview({ name: t.name, doc: t.doc })
+  const leavePreview = () => setPreview(null)
+
+  /** M7-P5：导出内置模板为 .msz-tpl */
+  const exportBuiltin = async (e: React.MouseEvent, tplId: string) => {
+    e.stopPropagation()
+    const tpl = findTpl(tplId)
+    await exportTemplate(tpl.name, buildDoc(tpl))
+  }
+  /** M7-P5：导出自定义模板为 .msz-tpl */
+  const exportCustom = async (e: React.MouseEvent, t: CustomTemplate) => {
+    e.stopPropagation()
+    await exportTemplate(t.name, t.doc)
+  }
+  /** M7-P5：导入 .msz-tpl 模板文件 */
+  const importTpl = async (file: File) => {
+    try {
+      await importTemplateFile(file)
+      window.dispatchEvent(new Event('msz:templates-changed'))
+    } catch (err) {
+      alert('导入模板失败：' + (err as Error).message)
+    }
   }
 
   const removeCustom = async (e: React.MouseEvent, id: string) => {
@@ -235,16 +269,44 @@ export default function Sidebar() {
         <div className="tpl-menu">
           <div className="tpl-group-label">内置模板</div>
           {TEMPLATES.map((t) => (
-            <button key={t.id} onClick={() => create(t.id)}>
-              {t.name}
-            </button>
+            <div
+              key={t.id}
+              className="tpl-row"
+              onMouseEnter={() => hoverBuiltin(t.id)}
+              onMouseLeave={leavePreview}
+            >
+              <button onClick={() => create(t.id)}>{t.name}</button>
+              <button
+                className="tpl-export"
+                title="导出为 .msz-tpl 模板文件"
+                aria-label={`导出模板 ${t.name}`}
+                onClick={(e) => void exportBuiltin(e, t.id)}
+              >
+                ⤓
+              </button>
+            </div>
           ))}
           {customs.length > 0 && (
             <>
               <div className="tpl-group-label">我的模板</div>
               {customs.map((t) => (
-                <button key={t.id} className="tpl-custom" onClick={() => createFromCustom(t)}>
-                  <span className="tpl-custom-name">{t.name}</span>
+                <div
+                  key={t.id}
+                  className="tpl-row"
+                  onMouseEnter={() => hoverCustom(t)}
+                  onMouseLeave={leavePreview}
+                >
+                  <button className="tpl-custom" onClick={() => createFromCustom(t)}>
+                    <span className="tpl-custom-name">{t.name}</span>
+                  </button>
+                  <button
+                    className="tpl-export"
+                    title="导出为 .msz-tpl 模板文件"
+                    aria-label={`导出模板 ${t.name}`}
+                    onClick={(e) => void exportCustom(e, t)}
+                  >
+                    ⤓
+                  </button>
                   <span
                     className="tpl-custom-del"
                     role="button"
@@ -254,9 +316,16 @@ export default function Sidebar() {
                   >
                     ✕
                   </span>
-                </button>
+                </div>
               ))}
             </>
+          )}
+          {preview && (
+            <div className="tpl-pop">
+              <div className="tpl-pop-name">{preview.name}</div>
+              <TemplateThumbnail doc={preview.doc} dark={dark} w={150} h={110} />
+              <div className="tpl-pop-count">{Object.keys(preview.doc.nodes).length} 个节点</div>
+            </div>
           )}
         </div>
       )}
@@ -347,6 +416,9 @@ export default function Sidebar() {
             <button className="tbtn" onClick={() => fileRef.current?.click()}>
               导入文件
             </button>
+            <button className="tbtn" onClick={() => tplFileRef.current?.click()} title="导入 .msz-tpl 模板文件">
+              导入模板
+            </button>
             <button
               className="sb-trash-btn"
               onClick={() => setView('trash')}
@@ -363,6 +435,17 @@ export default function Sidebar() {
               onChange={(e) => {
                 const f = e.target.files?.[0]
                 if (f) importFile(f)
+                e.target.value = ''
+              }}
+            />
+            <input
+              ref={tplFileRef}
+              type="file"
+              accept=".msz-tpl,application/json"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) importTpl(f)
                 e.target.value = ''
               }}
             />

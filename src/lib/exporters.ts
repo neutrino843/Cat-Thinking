@@ -22,7 +22,7 @@ export function download(name: string, blob: Blob) {
 }
 
 /** M7-P3：blob → dataURL；分块拼接避免 fromCharCode 一次性传入超大 TypedArray 溢出 */
-async function blobToDataURL(blob: Blob): Promise<string> {
+export async function blobToDataURL(blob: Blob): Promise<string> {
   const buf = await blob.arrayBuffer()
   const bytes = new Uint8Array(buf)
   let binary = ''
@@ -34,7 +34,7 @@ async function blobToDataURL(blob: Blob): Promise<string> {
 }
 
 /** M7-P3：收集文档中所有 blobId（去重） */
-function collectBlobIds(doc: DocData): string[] {
+export function collectBlobIds(doc: DocData): string[] {
   const ids = new Set<string>()
   for (const n of Object.values(doc.nodes)) {
     if (n.images) for (const im of n.images) ids.add(im.blobId)
@@ -164,7 +164,7 @@ export async function exportPNG(input: ExportInput, scale = 2) {
  * 检查项：顶层字段类型；rootId 指向存在；每个节点 id/parent/children/text 字段类型；
  * parent↔children 双向一致；deps.from 指向存在；非法字段直接拒绝。
  */
-function validateDoc(d: unknown): DocData {
+export function validateDoc(d: unknown): DocData {
   if (!d || typeof d !== 'object') throw new Error('不是有效的猫思之文档')
   const o = d as Record<string, unknown>
   if (typeof o.id !== 'string' || typeof o.title !== 'string' || typeof o.rootId !== 'string') {

@@ -3,6 +3,12 @@ import type { DocData, MindNodeData } from '../types'
 interface TplNode {
   text: string
   note?: string
+  /** M7-P5：标签色示范（color 用色板 key） */
+  tags?: { text: string; color: string }[]
+  /** M7-P5：内置图标 id 集合（须为 data/icons.ts 中存在的 id） */
+  icons?: string[]
+  /** M7-P5：任务/里程碑示范 */
+  task?: { start?: string; end?: string; milestone?: boolean }
   children?: TplNode[]
 }
 
@@ -68,9 +74,9 @@ export const TEMPLATES: Tpl[] = [
     root: {
       text: '《书名》读书笔记',
       children: [
-        { text: '核心观点', children: [{ text: '观点 1' }, { text: '观点 2' }] },
-        { text: '金句摘录', children: [{ text: '「……」—— 第 x 章' }] },
-        { text: '行动启发', children: [{ text: '我可以尝试……' }] },
+        { text: '核心观点', tags: [{ text: '观点', color: 'blue' }], children: [{ text: '观点 1' }, { text: '观点 2' }] },
+        { text: '金句摘录', tags: [{ text: '金句', color: 'amber' }], children: [{ text: '「……」—— 第 x 章' }] },
+        { text: '行动启发', icons: ['flag'], children: [{ text: '我可以尝试……' }] },
         { text: '疑问与延伸', children: [{ text: '作者没有回答……' }] },
       ],
     },
@@ -82,8 +88,12 @@ export const TEMPLATES: Tpl[] = [
       text: '项目名',
       children: [
         { text: '目标', children: [{ text: '可量化的目标 1' }, { text: '可量化的目标 2' }] },
-        { text: '里程碑', children: [{ text: 'M1 原型' }, { text: 'M2 内测' }, { text: 'M3 发布' }] },
-        { text: '风险', children: [{ text: '技术风险' }, { text: '时间风险' }] },
+        { text: '里程碑', children: [
+          { text: 'M1 原型', task: { milestone: true } },
+          { text: 'M2 内测', task: { milestone: true } },
+          { text: 'M3 发布', task: { milestone: true } },
+        ] },
+        { text: '风险', tags: [{ text: '风险', color: 'red' }], children: [{ text: '技术风险' }, { text: '时间风险' }] },
         { text: '待办', children: [{ text: '需求梳理' }, { text: '技术选型' }, { text: '排期' }] },
       ],
     },
@@ -96,8 +106,10 @@ export const TEMPLATES: Tpl[] = [
       children: [
         { text: '与会人', children: [{ text: '张三' }, { text: '李四' }] },
         { text: '议题', children: [{ text: '议题 1：结论与待办' }, { text: '议题 2：结论与待办' }] },
-        { text: '决议', children: [{ text: '决定 1' }] },
-        { text: '行动项', children: [{ text: '负责人 + 事项 + 截止时间' }] },
+        { text: '决议', icons: ['check'], children: [{ text: '决定 1' }] },
+        { text: '行动项', tags: [{ text: '待办', color: 'green' }], children: [
+          { text: '负责人 + 事项 + 截止时间', task: { start: '2026-09-29', end: '2026-10-05' } },
+        ] },
       ],
     },
   },
@@ -120,10 +132,10 @@ export const TEMPLATES: Tpl[] = [
     root: {
       text: 'SWOT',
       children: [
-        { text: 'S 优势', children: [{ text: '…' }] },
-        { text: 'W 劣势', children: [{ text: '…' }] },
-        { text: 'O 机会', children: [{ text: '…' }] },
-        { text: 'T 威胁', children: [{ text: '…' }] },
+        { text: 'S 优势', tags: [{ text: '内部', color: 'green' }], children: [{ text: '…' }] },
+        { text: 'W 劣势', tags: [{ text: '内部', color: 'red' }], children: [{ text: '…' }] },
+        { text: 'O 机会', tags: [{ text: '外部', color: 'blue' }], children: [{ text: '…' }] },
+        { text: 'T 威胁', tags: [{ text: '外部', color: 'orange' }], children: [{ text: '…' }] },
       ],
     },
   },
@@ -145,6 +157,9 @@ export function buildDoc(tpl: Tpl): DocData {
       children: [],
       text: tn.text,
       ...(tn.note ? { note: tn.note } : {}),
+      ...(tn.tags ? { tags: tn.tags.map((t) => ({ id: uid(), ...t })) } : {}),
+      ...(tn.icons ? { icons: tn.icons } : {}),
+      ...(tn.task ? { task: tn.task } : {}),
       ...(level > 0 ? { color } : {}),
     }
     if (parent) nodes[parent].children.push(id)
