@@ -56,6 +56,15 @@ export function toMarkdown(doc: DocData): string {
       }
     }
     lines.push(line)
+    // M7-P3：图片/附件以 Markdown 形式附加（缩进与列表项对齐）
+    if (n.images && n.images.length) {
+      const imgIndent = '  '.repeat(depth + 1)
+      for (const im of n.images) lines.push(`${imgIndent}![图片](${im.w}×${im.h})`)
+    }
+    if (n.attachments && n.attachments.length) {
+      const attIndent = '  '.repeat(depth + 1)
+      for (const att of n.attachments) lines.push(`${attIndent}> 📎 ${att.name}（${att.size} 字节）`)
+    }
     // M7-P2：富备注优先（含格式降级为纯文本），其次旧纯文本 note
     const noteText = n.richNote?.html ? richNoteToText(n.richNote.html) : n.note
     if (noteText) {

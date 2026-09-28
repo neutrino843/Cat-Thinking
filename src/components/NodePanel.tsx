@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDoc } from '../store/docStore'
 import { ICONS } from '../data/icons'
-import type { NodeLink, NodeTag } from '../types'
+import type { Attachment, NodeImage, NodeLink, NodeTag } from '../types'
 import { sanitizeHtml } from '../lib/sanitizeHtml'
+import { getBlob, saveBlob } from '../store/db'
+import { getBlobURL, revokeBlobURL } from '../lib/blobUrl'
 import NoteEditor from './NoteEditor'
 
 /** 标签色板选项 */
@@ -36,9 +38,14 @@ export default function NodePanel() {
   const [linkUrl, setLinkUrl] = useState('')
   const [linkNode, setLinkNode] = useState('')
   const [linkMode, setLinkMode] = useState<'url' | 'node'>('url')
+  const imgInputRef = useRef<HTMLInputElement>(null)
+  const attInputRef = useRef<HTMLInputElement>(null)
+  const [croppingId, setCroppingId] = useState<string | null>(null)
 
   const selId = selection.length === 1 ? selection[0] : null
   const node = selId ? doc.nodes[selId] : null
+  void croppingId
+  void setCroppingId
 
   // 备注富文本初值：优先 richNote.html；其次纯 note 串转义为段落
   const richHtml = useMemo(() => {
@@ -65,6 +72,8 @@ export default function NodePanel() {
   const tags = node.tags ?? []
   const icons = node.icons ?? []
   const links = node.links ?? []
+  const images = node.images ?? []
+  const attachments = node.attachments ?? []
 
   function addTag() {
     const text = tagInput.trim()
@@ -125,6 +134,93 @@ export default function NodePanel() {
 
   function setRichNote(html: string) {
     setNode(selId!, { richNote: { html } })
+  }
+
+  /* ---- M7-P3：图片方法 ---- */
+  async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file || !selId) return
+    try {
+      const blobId = await saveBlob(selId, file)
+      const url = URL.createObjectURL(file)
+      const img = new Image()
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res()
+        img.onerror = () => rej(new Error('图片解码失败'))
+        img.src = url
+      })
+      const w = img.naturalWidth || img.width
+      const h = img.naturalHeight || img.height
+      URL.revokeObjectURL(url)
+      setNode(selId, { images: [...images, { id: genId(), blobId, w, h }] })
+    } catch (err) {
+      window.alert('图片上传失败：' + (err as Error).message)
+    }
+    e.target.value = ''
+  }
+
+  function removeImage(id: string) {
+    const im = images.find((i) => i.id === id)
+    if (im) revokeBlobURL(im.blobId)
+    setNode(selId!, { images: images.filter((i) => i.id !== id) })
+  }
+
+  function setImageSize(id: string, w: number, h: number) {
+    setNode(selId!, { images: images.map((i) => (i.id === id ? { ...i, w, h } : i)) })
+  }
+
+  function setImageCrop(id: string, crop: { x: number; y: number; w: number; h: number }) {
+    setNode(selId!, { images: images.map((i) => (i.id === id ? { ...i, crop } : i)) })
+  }
+
+  /* ---- M7-P3：附件方法 ---- */
+  async function onPickAttachment(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file || !selId) return
+    try {
+      const blobId = await saveBlob(selId, file)
+      setNode(selId, {
+        attachments: [
+          ...attachments,
+          { id: genId(), blobId, name: file.name, size: file.size, mime: file.type || 'application/octet-stream' },
+        ],
+      })
+    } catch (err) {
+      window.alert('附件上传失败：' + (err as Error).message)
+    }
+    e.target.value = ''
+  }
+
+  function removeAttachment(id: string) {
+    const at = attachments.find((a) => a.id === id)
+    if (at) revokeBlobURL(at.blobId)
+    setNode(selId!, { attachments: attachments.filter((a) => a.id !== id) })
+  }
+
+  async function previewAttachment(att: Attachment) {
+    try {
+      const url = await getBlobURL(att.blobId)
+      window.open(url)
+    } catch {
+      window.alert('附件预览失败')
+    }
+  }
+
+  async function downloadAttachment(att: Attachment) {
+    const blob = await getBlob(att.blobId)
+    if (!blob) return
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = att.name
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 3000)
+  }
+
+  function fmtSize(n: number): string {
+    if (n < 1024) return n + ' B'
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+    return (n / 1024 / 1024).toFixed(1) + ' MB'
   }
 
   return (
@@ -321,6 +417,82 @@ export default function NodePanel() {
         <NoteEditor html={richHtml} onChange={setRichNote} />
         <div className="msz-np-note-hint">支持加粗 / 斜体 / 列表 / 链接 / 引用</div>
       </div>
+
+      {/* 图片区（M7-P3） */}
+      <div className="msz-np-section">
+        <div className="msz-np-label">图片</div>
+        <input
+          type="file"
+          accept="image/*"
+          ref={imgInputRef}
+          style={{ display: 'none' }}
+          onChange={onPickImage}
+        />
+        <button className="msz-np-add-btn" onClick={() => imgInputRef.current?.click()}>
+          上传图片
+        </button>
+        <div className="msz-np-img-list">
+          {images.map((im) => (
+            <ImageThumb key={im.id} image={im} onRemove={() => removeImage(im.id)} />
+          ))}
+        </div>
+      </div>
+
+      {/* 附件区（M7-P3） */}
+      <div className="msz-np-section">
+        <div className="msz-np-label">附件</div>
+        <input
+          type="file"
+          ref={attInputRef}
+          style={{ display: 'none' }}
+          onChange={onPickAttachment}
+        />
+        <button className="msz-np-add-btn" onClick={() => attInputRef.current?.click()}>
+          上传附件
+        </button>
+        <div className="msz-np-att-list">
+          {!attachments.length && <div className="msz-np-empty">暂无附件</div>}
+          {attachments.map((att) => (
+            <div className="msz-np-att-item" key={att.id}>
+              <span className="msz-np-att-name">{att.name}</span>
+              <span>{fmtSize(att.size)}</span>
+              <button onClick={() => void previewAttachment(att)}>预览</button>
+              <button onClick={() => void downloadAttachment(att)}>下载</button>
+              <button onClick={() => removeAttachment(att.id)}>×</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * M7-P3：图片缩略图（HTML <img>，区别于画布的 SVG <image>）。
+ * 异步从 IndexedDB 取出 blob 并显示，附带尺寸信息与删除按钮。
+ */
+function ImageThumb({ image, onRemove }: { image: NodeImage; onRemove: () => void }) {
+  const [url, setUrl] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    getBlobURL(image.blobId)
+      .then((u) => {
+        if (!cancelled) setUrl(u)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [image.blobId])
+  return (
+    <div className="msz-np-img-thumb">
+      <img src={url ?? ''} alt="" width={60} />
+      <span>
+        {image.w}×{image.h}
+      </span>
+      <button onClick={onRemove} aria-label="删除图片">
+        ×
+      </button>
     </div>
   )
 }

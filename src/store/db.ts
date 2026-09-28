@@ -1,7 +1,10 @@
 import Dexie, { type Table } from 'dexie'
 import type { DocData, DocMeta } from '../types'
-import { cloneFromTemplate } from '../lib/templateClone'
+import { cloneDocBlobs, cloneFromTemplate } from '../lib/templateClone'
 import { migrateDoc } from '../lib/migrate'
+
+/** 文档附件总量上限（64MB）：上传/校验时累加 blobs 表同 docId 总字节，超出拒绝 */
+export const BLOB_QUOTA_BYTES = 64 * 1024 * 1024
 
 export interface StoredDoc {
   id: string
@@ -111,7 +114,55 @@ export async function saveDoc(doc: DocData): Promise<void> {
 }
 
 export async function deleteDoc(id: string): Promise<void> {
-  await db.docs.delete(id)
+  await db.transaction('rw', db.docs, db.blobs, async () => {
+    await db.docs.delete(id)
+    await deleteBlobsByDoc(id)
+  })
+}
+
+/* ---------------- Blob 存储（M7-P3） ---------------- */
+
+/** 生成 blob id：与 uid 同模式，crypto.randomUUID 优先 */
+function genBlobId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2) + Date.now().toString(36)
+}
+
+/**
+ * 保存 blob：写入前校验文档 blob 总量是否超 64MB 配额。
+ * 超限抛中文 Error；否则 put 新条目并返回 id。
+ */
+export async function saveBlob(docId: string, blob: Blob, nodeId?: string): Promise<string> {
+  const all = await db.blobs.where('docId').equals(docId).toArray()
+  const total = all.reduce((s, b) => s + b.blob.size, 0)
+  if (total + blob.size > BLOB_QUOTA_BYTES) {
+    throw new Error(`文档附件总量超限（${BLOB_QUOTA_BYTES / 1024 / 1024}MB）`)
+  }
+  const id = genBlobId()
+  await db.blobs.put({ id, docId, nodeId, blob, createdAt: Date.now() })
+  return id
+}
+
+/** 取单个 blob 二进制；未找到返回 undefined */
+export async function getBlob(blobId: string): Promise<Blob | undefined> {
+  const row = await db.blobs.get(blobId)
+  return row?.blob
+}
+
+/** 替换/写入 blob（给定 id），用于导入恢复 */
+export async function putBlob(id: string, docId: string, blob: Blob, nodeId?: string): Promise<void> {
+  await db.blobs.put({ id, docId, nodeId, blob, createdAt: Date.now() })
+}
+
+/** 删除单个 blob */
+export async function deleteBlob(blobId: string): Promise<void> {
+  await db.blobs.delete(blobId)
+}
+
+/** 按文档 id 批量删除 blob（删除/还原文档时联动清理） */
+export async function deleteBlobsByDoc(docId: string): Promise<void> {
+  await db.blobs.where('docId').equals(docId).delete()
 }
 
 /* ---------------- 回收站（M6） ---------------- */
@@ -158,7 +209,7 @@ export async function listTrash(): Promise<TrashMeta[]> {
  * 保留原标题/原时间戳。返回还原后的文档 id（用于 App 定位）。
  */
 export async function restoreDoc(id: string): Promise<string | null> {
-  return await db.transaction('rw', db.docs, db.trash, async () => {
+  return await db.transaction('rw', db.docs, db.trash, db.blobs, async () => {
     const t = await db.trash.get(id)
     if (!t) return null
     const existing = await db.docs.get(id)
@@ -166,7 +217,8 @@ export async function restoreDoc(id: string): Promise<string | null> {
     let payload = t.payload
     if (existing) {
       const doc = JSON.parse(t.payload) as DocData
-      const cloned = cloneFromTemplate(doc)
+      const { doc: cloned, blobMap } = cloneFromTemplate(doc)
+      await cloneDocBlobs(t.id, cloned.id, blobMap, getBlob, putBlob)
       cloned.title = t.title
       cloned.createdAt = t.createdAt
       cloned.updatedAt = t.updatedAt
@@ -187,12 +239,19 @@ export async function restoreDoc(id: string): Promise<string | null> {
 
 /** 永久删除单条 */
 export async function purgeDoc(id: string): Promise<void> {
-  await db.trash.delete(id)
+  await db.transaction('rw', db.trash, db.blobs, async () => {
+    await deleteBlobsByDoc(id)
+    await db.trash.delete(id)
+  })
 }
 
 /** 清空回收站 */
 export async function emptyTrash(): Promise<void> {
-  await db.trash.clear()
+  await db.transaction('rw', db.trash, db.blobs, async () => {
+    const all = await db.trash.toArray()
+    for (const t of all) await deleteBlobsByDoc(t.id)
+    await db.trash.clear()
+  })
 }
 
 /** 启动清扫：删除 deletedAt 超过 retentionDays 的条目（fire-and-forget 调用） */
@@ -230,12 +289,17 @@ export async function saveTemplate(name: string, doc: DocData): Promise<string> 
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2) + Date.now().toString(36)
-  await db.templates.put({ id, name, createdAt: Date.now(), payload: JSON.stringify(doc) })
+  const { doc: cloned, blobMap } = cloneFromTemplate(doc)
+  await cloneDocBlobs(doc.id, id, blobMap, getBlob, putBlob)
+  await db.templates.put({ id, name, createdAt: Date.now(), payload: JSON.stringify(cloned) })
   return id
 }
 
 export async function deleteTemplate(id: string): Promise<void> {
-  await db.templates.delete(id)
+  await db.transaction('rw', db.templates, db.blobs, async () => {
+    await deleteBlobsByDoc(id)
+    await db.templates.delete(id)
+  })
 }
 
 export const LAST_KEY = 'msz.lastDoc'

@@ -5,8 +5,13 @@ import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { ganttHolder, worldHolder } from '../store/refs'
 import { parseMarkdown, sanitizeFileName, toGanttCSV, toMarkdown } from './openFormats'
+import { getBlob } from '../store/db'
+import { getCachedBlobURL } from './blobUrl'
 
 const LAST_BACKUP_KEY = 'msz.lastBackupAt'
+
+/** M7-P3：blob → dataURL 转换的尺寸上限（>2MB 不内嵌，避免 JSON 体积爆炸） */
+const DATAURL_MAX_BYTES = 2 * 1024 * 1024
 
 export function download(name: string, blob: Blob) {
   const a = document.createElement('a')
@@ -16,10 +21,69 @@ export function download(name: string, blob: Blob) {
   setTimeout(() => URL.revokeObjectURL(a.href), 3000)
 }
 
-export function exportJSON(doc: DocData) {
+/** M7-P3：blob → dataURL；分块拼接避免 fromCharCode 一次性传入超大 TypedArray 溢出 */
+async function blobToDataURL(blob: Blob): Promise<string> {
+  const buf = await blob.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  const CHUNK = 0x8000
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[])
+  }
+  return 'data:' + blob.type + ';base64,' + btoa(binary)
+}
+
+/** M7-P3：收集文档中所有 blobId（去重） */
+function collectBlobIds(doc: DocData): string[] {
+  const ids = new Set<string>()
+  for (const n of Object.values(doc.nodes)) {
+    if (n.images) for (const im of n.images) ids.add(im.blobId)
+    if (n.attachments) for (const at of n.attachments) ids.add(at.blobId)
+  }
+  return [...ids]
+}
+
+/**
+ * M7-P3：把 SVG 中的 blob: URL 替换为 dataURL，使导出的 SVG/PNG 自包含可移植。
+ * 仅替换缓存中已存在的 objectURL（即画布渲染过的图片）；未渲染的图片跳过。
+ */
+async function embedBlobImages(html: string, doc: DocData): Promise<string> {
+  let out = html
+  for (const blobId of collectBlobIds(doc)) {
+    const cached = getCachedBlobURL(blobId)
+    if (!cached) continue
+    const blob = await getBlob(blobId)
+    if (!blob || blob.size > DATAURL_MAX_BYTES) continue
+    const dataURL = await blobToDataURL(blob)
+    out = out.split(cached).join(dataURL)
+  }
+  return out
+}
+
+export async function exportJSON(doc: DocData) {
+  // M7-P3：把 blob 内嵌为 _blobs map，导出文件自包含可跨设备恢复
+  const _blobs: Record<string, { dataURL: string; type: string; name?: string }> = {}
+  for (const blobId of collectBlobIds(doc)) {
+    const blob = await getBlob(blobId)
+    if (!blob || blob.size > DATAURL_MAX_BYTES) continue
+    const dataURL = await blobToDataURL(blob)
+    // 查找附件名（若有）
+    let name: string | undefined
+    for (const n of Object.values(doc.nodes)) {
+      if (n.attachments) {
+        const at = n.attachments.find((a) => a.blobId === blobId)
+        if (at) {
+          name = at.name
+          break
+        }
+      }
+    }
+    _blobs[blobId] = { dataURL, type: blob.type, ...(name ? { name } : {}) }
+  }
+  const payload = { ...doc, _blobs }
   download(
     `${sanitizeFileName('猫思之-' + doc.title)}.json`,
-    new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' }),
+    new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
   )
   // JSON 是唯一无损格式，导出成功即视为一次完整备份（修审核 R-1）
   try {
@@ -183,15 +247,18 @@ function validateDoc(d: unknown): DocData {
 
 /**
  * 解析导入内容：按扩展名分流（修审核 S-3）。
- * - .json：JSON.parse + 结构校验
+ * - .json：JSON.parse + 结构校验；剥离 _blobs 单独返回（M7-P3 由调用方落盘）
  * - .md / .markdown：parseMarkdown（容错兜底）
  * - filename 缺省（如剪贴板粘贴 JSON）：按 JSON 解析
  */
-export function parseImported(text: string, filename?: string): DocData {
+export function parseImported(
+  text: string,
+  filename?: string,
+): { doc: DocData; blobs: Record<string, { dataURL: string; type: string; name?: string }> } {
   const ext = filename ? filename.toLowerCase().replace(/^.*\./, '') : ''
   if (ext === 'md' || ext === 'markdown') {
     const fallback = filename ? filename.replace(/\.[^.]+$/, '') : '未命名导图'
-    return parseMarkdown(text, fallback)
+    return { doc: parseMarkdown(text, fallback), blobs: {} }
   }
   // 默认按 JSON 处理
   let d: unknown
@@ -200,14 +267,19 @@ export function parseImported(text: string, filename?: string): DocData {
   } catch (e) {
     throw new Error('不是有效的 JSON 文档：' + (e as Error).message)
   }
-  return validateDoc(d)
+  const o = d as Record<string, unknown>
+  const blobs = (o._blobs as Record<string, { dataURL: string; type: string; name?: string }>) ?? {}
+  const doc = validateDoc(d)
+  // _blobs 不进入文档本体
+  delete (doc as unknown as Record<string, unknown>)._blobs
+  return { doc, blobs }
 }
 
 /** 从当前应用状态导出（先取消选择以获得干净画面） */
 export async function exportCurrent(kind: 'json' | 'svg' | 'png' | 'md' | 'csv') {
   const doc = useDoc.getState().doc
   if (kind === 'json') {
-    exportJSON(doc)
+    await exportJSON(doc)
     return
   }
   if (kind === 'md') {
@@ -242,7 +314,9 @@ export async function exportCurrent(kind: 'json' | 'svg' | 'png' | 'md' | 'csv')
     return
   }
   const worldHTML = worldHolder.current?.innerHTML ?? ''
-  const input: ExportInput = { worldHTML, doc, dark: useSettings.getState().dark }
+  // M7-P3：把 blob: URL 替换为 dataURL，使 SVG/PNG 自包含可移植
+  const embedded = await embedBlobImages(worldHTML, doc)
+  const input: ExportInput = { worldHTML: embedded, doc, dark: useSettings.getState().dark }
   if (kind === 'svg') exportSVG(input)
   else await exportPNG(input)
 }

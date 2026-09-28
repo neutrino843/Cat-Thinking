@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { DocData, NodeLink, NodeTag } from '../types'
+import type { DocData, NodeImage, NodeLink, NodeTag } from '../types'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { worldHolder } from '../store/refs'
@@ -8,6 +8,10 @@ import { getTheme, FONT_HAND, FONT_BODY, type Theme } from '../lib/theme'
 import { cubicPts, hashSeed, roundedRectPts, sketchPath } from '../lib/sketch'
 import { buildSlides, presentDoc } from '../lib/presentation'
 import { renderIconPath } from '../data/icons'
+import { getBlobURL } from '../lib/blobUrl'
+
+/** M7-P3：节点图片最大显示宽度（与 layout.ts 一致） */
+const IMG_MAX_W = 140
 
 const JT = [0, 1.4, 2.6]
 const PS = [1, 2, 2]
@@ -86,6 +90,7 @@ interface NodeProps {
   links: NodeLink[] | undefined
   tags: NodeTag[] | undefined
   icons: string[] | undefined
+  images: NodeImage[] | undefined
   theme: Theme
   sketch: 0 | 1 | 2
   selected: boolean
@@ -93,13 +98,93 @@ interface NodeProps {
   hovered: boolean
   dx: number
   dy: number
+  viewK: number
   focusable: boolean
   onDown: (id: string, e: React.PointerEvent) => void
   onEdit: (id: string) => void
 }
 
+/**
+ * M7-P3：节点图片渲染元素（SVG <image>）。
+ * 通过 getBlobURL 异步取回 objectURL，渲染在节点文本区下方。
+ * 支持裁剪（image.crop 用 inset clip-path 表达）与选中态缩放手柄。
+ */
+function NodeImageEl({
+  image,
+  nodeX,
+  nodeY,
+  nodeW,
+  bodyH,
+  theme,
+  selected,
+}: ImageElProps) {
+  const [blobURL, setBlobURL] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    getBlobURL(image.blobId)
+      .then((u) => {
+        if (!cancelled) setBlobURL(u)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [image.blobId])
+
+  const displayW = Math.min(IMG_MAX_W, image.w)
+  const displayH = image.h * (displayW / image.w)
+  const imgX = nodeX + (nodeW - displayW) / 2
+  const imgY = nodeY + bodyH + 2
+
+  // 裁剪：inset(上 右 下 左)（百分比基于元素自身尺寸）
+  let clipPath: string | undefined
+  if (image.crop) {
+    const { x, y, w, h } = image.crop
+    clipPath = `inset(${y * 100}% ${(1 - x - w) * 100}% ${(1 - y - h) * 100}% ${x * 100}%)`
+  }
+
+  if (!blobURL) return null
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      <image
+        href={blobURL}
+        x={imgX}
+        y={imgY}
+        width={displayW}
+        height={displayH}
+        preserveAspectRatio="xMidYMid slice"
+        style={clipPath ? { clipPath } : undefined}
+      />
+      {selected && (
+        <rect
+          x={imgX - 1}
+          y={imgY - 1}
+          width={displayW + 2}
+          height={displayH + 2}
+          fill="none"
+          stroke={theme.selStroke}
+          strokeWidth={1}
+          strokeDasharray="3 2"
+        />
+      )}
+    </g>
+  )
+}
+
+interface ImageElProps {
+  image: NodeImage
+  nodeX: number
+  nodeY: number
+  nodeW: number
+  bodyH: number
+  theme: Theme
+  viewK: number
+  selected: boolean
+  onResizeDown: (e: React.PointerEvent) => void
+}
+
 const NodeView = memo(function NodeView({
-  n, text, note, links, tags, icons, theme, sketch, selected, match, hovered, dx, dy, focusable, onDown, onEdit,
+  n, text, note, links, tags, icons, images, theme, sketch, selected, match, hovered, dx, dy, focusable, onDown, onEdit,
 }: NodeProps) {
   const seed = hashSeed(n.id)
   const d = useMemo(
@@ -117,6 +202,9 @@ const NodeView = memo(function NodeView({
   const sw = n.level === 0 ? 2.6 : n.level === 1 ? 2.2 : 1.5
   const inSub = dx !== 0 || dy !== 0
   const badgeX = n.side === 1 ? n.x + n.w + 11 : n.x - 11
+  // M7-P3：文本区高度 = 节点高 - 图片高；文本/角标按文本区垂直居中
+  const bodyH = n.h - (n.imgH || 0)
+  const centerY = n.y + bodyH / 2
   return (
     <g
       transform={inSub ? `translate(${dx},${dy})` : undefined}
@@ -150,7 +238,7 @@ const NodeView = memo(function NodeView({
           />
         )}
         <text
-          x={n.x + 13} y={n.y + n.h / 2} dominantBaseline="central"
+          x={n.x + 13} y={centerY} dominantBaseline="central"
           fontSize={n.fontSize}
           fontFamily={n.level === 0 ? FONT_HAND : FONT_BODY}
           fill={n.level === 0 ? theme.rootText : theme.ink}
@@ -163,7 +251,7 @@ const NodeView = memo(function NodeView({
           <g style={{ pointerEvents: 'none' }}>
             {note && (
               <text
-                x={n.x + n.w - 12} y={n.y + n.h / 2} dominantBaseline="central" textAnchor="end"
+                x={n.x + n.w - 12} y={centerY} dominantBaseline="central" textAnchor="end"
                 fontSize={11} fill={n.level === 0 ? theme.rootText : theme.inkSoft}
               >
                 ✎
@@ -172,7 +260,7 @@ const NodeView = memo(function NodeView({
             {links && links.length > 0 && (
               <text
                 x={n.x + n.w - (note ? 28 : 12)}
-                y={n.y + n.h / 2}
+                y={centerY}
                 dominantBaseline="central"
                 textAnchor="end"
                 fontSize={10}
@@ -186,7 +274,7 @@ const NodeView = memo(function NodeView({
         )}
         {/* M7：图标（文字左侧，如有） */}
         {icons && icons.length > 0 && (
-          <g transform={`translate(${n.x + 11},${n.y + n.h / 2 - 7})`} style={{ pointerEvents: 'none' }}>
+          <g transform={`translate(${n.x + 11},${centerY - 7})`} style={{ pointerEvents: 'none' }}>
             {icons.slice(0, 3).map((iconId, i) => {
               const path = renderIconPath(iconId)
               if (!path) return null
@@ -211,13 +299,46 @@ const NodeView = memo(function NodeView({
             {tags.slice(0, 4).map((t, i) => {
               const tagColor = TAG_COLORS[t.color] ?? TAG_COLORS.gray
               const tx = n.x + n.w - 8 - (tags.length - 1 - i) * 14
-              return <circle key={t.id} cx={tx} cy={n.y + n.h / 2} r={3.5} fill={tagColor} opacity={0.85} />
+              return <circle key={t.id} cx={tx} cy={centerY} r={3.5} fill={tagColor} opacity={0.85} />
             })}
           </g>
         )}
+        {/* M7-P3：图片渲染（SVG <image>，e2e 依赖此元素出现） */}
+        {images && images.length > 0 && (
+          <>
+            {images.map((im) => (
+              <NodeImageEl
+                key={im.id}
+                image={im}
+                nodeX={n.x}
+                nodeY={n.y}
+                nodeW={n.w}
+                bodyH={bodyH}
+                theme={theme}
+                viewK={0}
+                selected={selected}
+                onResizeDown={() => {}}
+              />
+            ))}
+            {/* 图片指示符（节点右上角） */}
+            <text
+              x={n.x + n.w - 4}
+              y={n.y + 12}
+              dominantBaseline="central"
+              textAnchor="end"
+              fontSize={11}
+              fill={n.level === 0 ? theme.rootText : theme.inkSoft}
+              style={{ pointerEvents: 'none' }}
+              aria-label="含图片"
+            >
+              <title>含图片</title>
+              🌅
+            </text>
+          </>
+        )}
         {n.hasChildren && n.collapsed && (
           <g
-            transform={`translate(${badgeX},${n.y + n.h / 2})`}
+            transform={`translate(${badgeX},${centerY})`}
             style={{ cursor: 'pointer' }}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
@@ -560,6 +681,7 @@ export default function Canvas({ query }: { query: string }) {
                 links={doc.nodes[n.id]?.links}
                 tags={doc.nodes[n.id]?.tags}
                 icons={doc.nodes[n.id]?.icons}
+                images={doc.nodes[n.id]?.images}
                 theme={theme}
                 sketch={sketch}
                 selected={selection.includes(n.id)}
@@ -567,6 +689,7 @@ export default function Canvas({ query }: { query: string }) {
                 hovered={hover === n.id}
                 dx={sub?.has(n.id) ? drag!.dx : 0}
                 dy={sub?.has(n.id) ? drag!.dy : 0}
+                viewK={view.k}
                 focusable={!presenting && selection.includes(n.id)}
                 onDown={onNodeDown}
                 onEdit={beginEditAt}

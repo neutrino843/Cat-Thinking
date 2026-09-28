@@ -1505,4 +1505,39 @@ body {
   text-decoration: underline;
 }
 
+/* ---- M7-P3 图片/附件 ---- */
+.msz-np-att-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 12px;
+}
+.msz-np-att-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msz-np-img-thumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+.msz-np-img-thumb img {
+  width: 48px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+.msz-np-img-list {
+  margin-top: 4px;
+}
+.msz-np-att-list {
+  margin-top: 4px;
+}
+
 

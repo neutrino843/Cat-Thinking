@@ -5,7 +5,7 @@ import type { DocData } from '../types'
 
 describe('导入校验 parseImported', () => {
   it('合法 JSON 文档可解析并补齐版本号', () => {
-    const d = parseImported(JSON.stringify(simpleFixture()))
+    const { doc: d } = parseImported(JSON.stringify(simpleFixture()))
     expect(d.version).toBe(2)
     expect(d.nodes[d.rootId]).toBeDefined()
   })
@@ -20,7 +20,7 @@ describe('导入校验 parseImported', () => {
 
   it('.md 扩展名走 Markdown 解析', () => {
     const md = `# 标题\n\n- 一级\n  - 二级\n- 兄弟\n`
-    const d = parseImported(md, '笔记.md')
+    const { doc: d } = parseImported(md, '笔记.md')
     expect(d.title).toBe('标题')
     const root = d.nodes[d.rootId]
     expect(root.children.length).toBe(2)
@@ -29,19 +29,19 @@ describe('导入校验 parseImported', () => {
   })
 
   it('.markdown 扩展名同样走 Markdown 解析', () => {
-    const d = parseImported(`# X\n\n- a\n`, 'x.MARKDOWN')
+    const { doc: d } = parseImported(`# X\n\n- a\n`, 'x.MARKDOWN')
     expect(d.title).toBe('X')
     expect(d.nodes[d.rootId].children.length).toBe(1)
   })
 
   it('缺省文件名按 JSON 解析（向后兼容旧调用方式）', () => {
-    const d = parseImported(JSON.stringify(simpleFixture()))
+    const { doc: d } = parseImported(JSON.stringify(simpleFixture()))
     expect(d.nodes[d.rootId]).toBeDefined()
   })
 
   it('.md 文件名作为 fallbackTitle 兜底', () => {
     // 无 H1 的 Markdown，文件名作为标题
-    const d = parseImported('- 仅列表项\n  - 子\n', '我的笔记.md')
+    const { doc: d } = parseImported('- 仅列表项\n  - 子\n', '我的笔记.md')
     expect(d.title).toBe('我的笔记')
   })
 
@@ -69,7 +69,7 @@ describe('导入校验 parseImported', () => {
     const aId = base.nodes[rootId].children[0]
     base.nodes[base.nodes[rootId].children[1]].task!.deps![0].from = aId
     void ids
-    const d = parseImported(JSON.stringify(base))
+    const { doc: d } = parseImported(JSON.stringify(base))
     expect(d.nodes[aId]).toBeDefined()
     expect(d.nodes[d.nodes[rootId].children[1]].task?.deps?.[0].from).toBe(aId)
   })
@@ -124,6 +124,18 @@ describe('导入校验 parseImported', () => {
     bNode.task!.deps![0] = { from: aId, type: 'XX' as 'FS' }
     void ids
     expect(() => parseImported(JSON.stringify(base))).toThrow(/task\.deps\.type/)
+  })
+
+  /* ---------- M7-P3：_blobs 剥离 ---------- */
+
+  it('M7-P3：JSON 含 _blobs 时剥离并单独返回', () => {
+    const base = simpleFixture()
+    const payload = { ...base, _blobs: { b1: { dataURL: 'data:text/plain;base64,AA==', type: 'text/plain' } } }
+    const { doc, blobs } = parseImported(JSON.stringify(payload))
+    expect(doc.version).toBe(2)
+    expect((doc as unknown as Record<string, unknown>)._blobs).toBeUndefined()
+    expect(blobs.b1).toBeDefined()
+    expect(blobs.b1.dataURL).toBe('data:text/plain;base64,AA==')
   })
 
   /* ---------- S-2：SVG 导出标记净化 ---------- */

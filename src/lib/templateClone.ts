@@ -9,12 +9,22 @@ const uid = () =>
  * 从模板文档克隆出一篇全新文档（M5 自定义模板 / 模板复用）：
  * - 文档 id 与全部节点 id 重新生成；
  * - parent / children / task.deps[].from / links[].nodeId 同步重映射，依赖与内部链接不悬空；
+ * - 图片/附件的 blobId 通过 blobMap 重映射（旧→新），由 cloneDocBlobs 落盘新 blob；
  * - 折叠状态重置为展开；createdAt/updatedAt 刷新。
- * 输入文档不被修改。
+ * 输入文档不被修改。返回克隆文档与 blobId 重映射表。
  */
-export function cloneFromTemplate(src: DocData): DocData {
+export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<string, string> } {
   const idMap = new Map<string, string>()
   for (const oldId of Object.keys(src.nodes)) idMap.set(oldId, uid())
+  const blobMap = new Map<string, string>()
+  const remapBlob = (oldId: string): string => {
+    let nid = blobMap.get(oldId)
+    if (!nid) {
+      nid = uid()
+      blobMap.set(oldId, nid)
+    }
+    return nid
+  }
 
   const nodes: Record<string, MindNodeData> = {}
   for (const [oldId, n] of Object.entries(src.nodes)) {
@@ -32,6 +42,15 @@ export function cloneFromTemplate(src: DocData): DocData {
         )
         .filter((l): l is NonNullable<typeof l> => !!l)
     }
+    // M7-P3：图片/附件 blobId 重映射
+    let images = n.images
+    if (images && images.length) {
+      images = images.map((im) => ({ ...im, blobId: remapBlob(im.blobId) }))
+    }
+    let attachments = n.attachments
+    if (attachments && attachments.length) {
+      attachments = attachments.map((at) => ({ ...at, blobId: remapBlob(at.blobId) }))
+    }
     nodes[id] = {
       ...n,
       id,
@@ -39,6 +58,8 @@ export function cloneFromTemplate(src: DocData): DocData {
       children: n.children.map((c) => idMap.get(c)).filter((x): x is string => !!x),
       collapsed: false,
       ...(links && links.length ? { links } : {}),
+      ...(images && images.length ? { images } : {}),
+      ...(attachments && attachments.length ? { attachments } : {}),
       ...(n.task
         ? {
             task: {
@@ -54,11 +75,33 @@ export function cloneFromTemplate(src: DocData): DocData {
 
   const now = Date.now()
   return {
-    ...src,
-    id: uid(),
-    rootId: idMap.get(src.rootId) ?? src.rootId,
-    nodes,
-    createdAt: now,
-    updatedAt: now,
+    doc: {
+      ...src,
+      id: uid(),
+      rootId: idMap.get(src.rootId) ?? src.rootId,
+      nodes,
+      createdAt: now,
+      updatedAt: now,
+    },
+    blobMap,
+  }
+}
+
+/**
+ * M7-P3：克隆文档的 blob 二进制（配合 cloneFromTemplate 的 blobMap）。
+ * 对每个 [oldId, newId]：从源文档取 blob，按新 id 写入目标文档。
+ * 由调用方注入 getBlobFn/putBlobFn 以避免本模块依赖 IndexedDB（便于测试）。
+ */
+export async function cloneDocBlobs(
+  _srcDocId: string,
+  dstDocId: string,
+  blobMap: Map<string, string>,
+  getBlobFn: (id: string) => Promise<Blob | undefined>,
+  putBlobFn: (id: string, docId: string, blob: Blob, nodeId?: string) => Promise<void>,
+): Promise<void> {
+  for (const [oldId, newId] of blobMap) {
+    const blob = await getBlobFn(oldId)
+    if (!blob) continue
+    await putBlobFn(newId, dstDocId, blob)
   }
 }

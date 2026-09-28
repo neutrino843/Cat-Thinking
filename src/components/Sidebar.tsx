@@ -4,19 +4,21 @@ import NodePanel from './NodePanel'
 import {
   emptyTrash,
   deleteTemplate,
+  getBlob,
   listDocs,
   listTemplates,
   listTrash,
   loadDoc,
   moveToTrash,
   purgeDoc,
+  putBlob,
   restoreDoc,
   saveDoc,
   type CustomTemplate,
   type TrashMeta,
 } from '../store/db'
 import { buildDoc, findTpl, TEMPLATES } from '../data/templates'
-import { cloneFromTemplate } from '../lib/templateClone'
+import { cloneDocBlobs, cloneFromTemplate } from '../lib/templateClone'
 import { parseImported } from '../lib/exporters'
 import { useDoc } from '../store/docStore'
 
@@ -95,8 +97,11 @@ export default function Sidebar() {
   }
 
   const createFromCustom = async (t: CustomTemplate) => {
-    const d = cloneFromTemplate(t.doc)
+    const { doc: d, blobMap } = cloneFromTemplate(t.doc)
     d.title = t.name
+    await cloneDocBlobs(t.doc.id, d.id, blobMap, getBlob, (id, docId, blob, nodeId) =>
+      putBlob(id, docId, blob, nodeId),
+    )
     await saveDoc(d)
     useDoc.getState().loadDoc(d)
     setMenuOpen(false)
@@ -156,8 +161,18 @@ export default function Sidebar() {
 
   const importFile = async (file: File) => {
     try {
-      const d = parseImported(await file.text(), file.name)
+      const { doc: d, blobs } = parseImported(await file.text(), file.name)
       await saveDoc(d)
+      // M7-P3：把 JSON 中的 _blobs dataURL 还原为 Blob 并写入 IndexedDB
+      for (const [blobId, meta] of Object.entries(blobs)) {
+        try {
+          const res = await fetch(meta.dataURL)
+          const blob = await res.blob()
+          await putBlob(blobId, d.id, blob)
+        } catch {
+          /* 单个 blob 还原失败不阻断导入 */
+        }
+      }
       useDoc.getState().loadDoc(d)
       refresh()
     } catch (e) {

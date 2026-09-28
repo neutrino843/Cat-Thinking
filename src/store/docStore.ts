@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { DocData, LayoutKind, MindNodeData, TaskData } from '../types'
 import { wouldCreateCycle } from '../lib/gantt'
 import { clampRange } from '../lib/date'
+import { revokeAllBlobURLs, revokeBlobURL } from '../lib/blobUrl'
 
 export interface Clip {
   nodes: Record<string, MindNodeData>
@@ -35,7 +36,7 @@ interface DocState {
   addSibling: (id: string, source?: 'canvas' | 'outline') => void
   removeNodes: (ids: string[]) => void
   setText: (id: string, text: string) => void
-  setNode: (id: string, patch: Partial<MindNodeData>) => void
+  setNode: (id: string, patch: Partial<MindNodeData>, commit?: boolean) => void
   toggleCollapse: (id: string) => void
   reparent: (id: string, targetId: string) => void
   moveOrder: (id: string, dir: -1 | 1) => void
@@ -107,7 +108,10 @@ export const useDoc = create<DocState>((set, get) => {
     past: [],
     future: [],
 
-    loadDoc: (d) => set({ doc: d, selection: [], editing: null, past: [], future: [] }),
+    loadDoc: (d) => {
+      revokeAllBlobURLs()
+      set({ doc: d, selection: [], editing: null, past: [], future: [] })
+    },
 
     setTitle: (t) =>
       set((s) => ({ doc: { ...s.doc, title: t, updatedAt: Date.now() } })),
@@ -156,6 +160,15 @@ export const useDoc = create<DocState>((set, get) => {
         collectSub(s.doc.nodes, id).forEach((x) => kill.add(x))
       }
       if (!kill.size) return
+      // M7-P3：收集被删除节点的 blobId（基于删除前快照），删除后释放其 objectURL 缓存。
+      // 注意：blob 本体保留于 IndexedDB 以支持撤销恢复。
+      const revokeIds: string[] = []
+      for (const id of kill) {
+        const kn = s.doc.nodes[id]
+        if (!kn) continue
+        if (kn.images) for (const im of kn.images) revokeIds.push(im.blobId)
+        if (kn.attachments) for (const at of kn.attachments) revokeIds.push(at.blobId)
+      }
       const nodes = { ...s.doc.nodes }
       const parents = new Set(
         [...kill].map((i) => nodes[i]?.parent).filter((p): p is string => !!p && !kill.has(p)),
@@ -165,6 +178,7 @@ export const useDoc = create<DocState>((set, get) => {
         if (pn) nodes[p] = { ...pn, children: pn.children.filter((c) => !kill.has(c)) }
       }
       for (const k of kill) delete nodes[k]
+      for (const bid of revokeIds) revokeBlobURL(bid)
       upd(nodes, { selection: [], editing: null })
     },
 
@@ -175,11 +189,11 @@ export const useDoc = create<DocState>((set, get) => {
       upd({ ...s.doc.nodes, [id]: { ...n, text } }, {}, { commit: false })
     },
 
-    setNode: (id, patch) => {
+    setNode: (id, patch, commit = true) => {
       const s = get()
       const n = s.doc.nodes[id]
       if (!n) return
-      upd({ ...s.doc.nodes, [id]: { ...n, ...patch } })
+      upd({ ...s.doc.nodes, [id]: { ...n, ...patch } }, {}, { commit })
     },
 
     toggleCollapse: (id) => {
