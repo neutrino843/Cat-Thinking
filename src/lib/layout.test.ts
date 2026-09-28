@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { DocData } from '../types'
 import { computeLayout } from '../lib/layout'
 import { simpleFixture, buildFixture } from '../test/fixture'
 
@@ -80,5 +81,136 @@ describe('布局算法', () => {
     const r = computeLayout(simpleFixture())
     expect(r.bounds.w).toBeGreaterThan(0)
     expect(r.bounds.h).toBeGreaterThan(0)
+  })
+
+  /* ---------- M7-P4 新布局 ---------- */
+
+  it('org：根在顶部、所有子节点向下展开、同层水平排布', () => {
+    const doc = simpleFixture('org')
+    const r = computeLayout(doc)
+    const root = r.nodes.get(doc.rootId)!
+    // 所有非根节点 y 严格大于根 y（向下展开）
+    for (const [id, n] of r.nodes) {
+      if (id === doc.rootId) continue
+      expect(n.y).toBeGreaterThan(root.y)
+    }
+    // 一级分支（a、b）同 y（同层）
+    const a = doc.nodes[doc.rootId].children[0]
+    const b = doc.nodes[doc.rootId].children[1]
+    expect(r.nodes.get(a)!.y).toBe(r.nodes.get(b)!.y)
+    // 根居中：cx=0 → root.x = -root.w/2
+    expect(root.x).toBeCloseTo(-root.w / 2, 5)
+    // 兄弟 x 区间不重叠
+    const la = [a, b].map((id) => r.nodes.get(id)!)
+    expect(la[0].x + la[0].w).toBeLessThanOrEqual(la[1].x)
+  })
+
+  it('fishbone：根在最左、一级分支 y 上下交替', () => {
+    const doc = simpleFixture('fishbone')
+    const r = computeLayout(doc)
+    const root = r.nodes.get(doc.rootId)!
+    const SPINE_Y = root.h / 2
+    // 根 x 最小（所有节点 x >= root.x）
+    for (const n of r.nodes.values()) {
+      expect(n.x).toBeGreaterThanOrEqual(root.x)
+    }
+    // 一级分支 y 上下交替：一个在脊线上、一个在下
+    const [a, b] = doc.nodes[doc.rootId].children
+    const ay = r.nodes.get(a)!.y
+    const by = r.nodes.get(b)!.y
+    expect(ay).toBeLessThan(SPINE_Y) // 上斜
+    expect(by).toBeGreaterThan(SPINE_Y) // 下斜
+    // 一级分支 side 上下相反
+    expect(r.nodes.get(a)!.side).toBe(-1)
+    expect(r.nodes.get(b)!.side).toBe(1)
+  })
+
+  it('timeline：无 task 时按 DFS 序兜底、上下交错', () => {
+    const doc = simpleFixture('timeline')
+    const r = computeLayout(doc)
+    // DFS 序：a → a1 → b（simpleFixture 结构）
+    const [a, b] = doc.nodes[doc.rootId].children
+    const a1 = doc.nodes[a].children[0]
+    const na = r.nodes.get(a)!
+    const na1 = r.nodes.get(a1)!
+    const nb = r.nodes.get(b)!
+    // x 严格递增（按 DFS 序）
+    expect(na.x).toBeLessThan(na1.x)
+    expect(na1.x).toBeLessThan(nb.x)
+    // 上下交错：side 集合含 1 与 -1
+    const sides = new Set([na.side, na1.side, nb.side])
+    expect(sides.has(1)).toBe(true)
+    expect(sides.has(-1)).toBe(true)
+    // 所有非根节点 level=1（扁平化）
+    for (const [id, n] of r.nodes) {
+      if (id === doc.rootId) continue
+      expect(n.level).toBe(1)
+    }
+  })
+
+  it('timeline：有 task.start 时按日期排序', () => {
+    const doc = buildFixture(
+      {
+        text: 'root',
+        children: [
+          { text: 'late', task: { start: '2026-12-31' } },
+          { text: 'early', task: { start: '2026-01-01' } },
+          { text: 'mid', task: { start: '2026-06-15' } },
+        ],
+      },
+      'timeline',
+    )
+    const r = computeLayout(doc)
+    const [late, early, mid] = doc.nodes[doc.rootId].children
+    const nEarly = r.nodes.get(early)!
+    const nMid = r.nodes.get(mid)!
+    const nLate = r.nodes.get(late)!
+    expect(nEarly.x).toBeLessThan(nMid.x)
+    expect(nMid.x).toBeLessThan(nLate.x)
+  })
+
+  it('节点数守恒：同一文档五种布局返回相同 nodes.size', () => {
+    const layouts: DocData['layout'][] = ['logic', 'tree', 'org', 'fishbone', 'timeline']
+    const sizes = layouts.map((l) => computeLayout(simpleFixture(l)).nodes.size)
+    // simpleFixture 4 个节点（root/a/a1/b），无折叠
+    expect(new Set(sizes).size).toBe(1)
+    expect(sizes[0]).toBe(4)
+  })
+
+  it('三新布局：bounds 包含所有节点、兄弟节点不重叠', () => {
+    const layouts: DocData['layout'][] = ['org', 'fishbone', 'timeline']
+    for (const l of layouts) {
+      const doc = simpleFixture(l)
+      const r = computeLayout(doc)
+      // bounds 包含所有节点
+      for (const n of r.nodes.values()) {
+        expect(n.x).toBeGreaterThanOrEqual(r.bounds.x - 0.01)
+        expect(n.y).toBeGreaterThanOrEqual(r.bounds.y - 0.01)
+        expect(n.x + n.w).toBeLessThanOrEqual(r.bounds.x + r.bounds.w + 0.01)
+        expect(n.y + n.h).toBeLessThanOrEqual(r.bounds.y + r.bounds.h + 0.01)
+      }
+      // 一级兄弟节点不重叠（org/fishbone 同层；timeline 上下交错天然不重叠）
+      if (l !== 'timeline') {
+        const [a, b] = doc.nodes[doc.rootId].children
+        const na = r.nodes.get(a)!
+        const nb = r.nodes.get(b)!
+        const overlap = !(na.x + na.w <= nb.x || nb.x + nb.w <= na.x)
+        expect(overlap).toBe(false)
+      }
+    }
+  })
+
+  it('折叠：org/fishbone/timeline 三布局均正确隐藏后代', () => {
+    const layouts: DocData['layout'][] = ['org', 'fishbone', 'timeline']
+    for (const l of layouts) {
+      const doc = simpleFixture(l)
+      const a = doc.nodes[doc.rootId].children[0]
+      doc.nodes[a].collapsed = true
+      const r = computeLayout(doc)
+      const a1 = doc.nodes[a].children[0]
+      expect(r.nodes.has(a1)).toBe(false)
+      expect(r.nodes.get(a)!.hidden).toBe(1)
+      expect(r.nodes.get(a)!.collapsed).toBe(true)
+    }
   })
 })

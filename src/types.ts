@@ -1,5 +1,5 @@
-/** 布局种类。M7-P4 将扩展 'org' | 'fishbone' | 'timeline'，当前仅 logic/tree */
-export type LayoutKind = 'logic' | 'tree'
+/** 布局种类：logic（逻辑图）/ tree（树形图）/ org（组织架构图）/ fishbone（鱼骨图）/ timeline（时间轴） */
+export type LayoutKind = 'logic' | 'tree' | 'org' | 'fishbone' | 'timeline'
 
 /** 甘特任务字段（M4 启用，模型先行预留） */
 export interface TaskData {

@@ -44,6 +44,9 @@ function buildCmds(): Cmd[] {
     { id: 'fit', label: '适应窗口', run: () => window.dispatchEvent(new Event('msz:fit')) },
     { id: 'layout-logic', label: '切换为逻辑图', run: () => d().setLayout('logic') },
     { id: 'layout-tree', label: '切换为树形图', run: () => d().setLayout('tree') },
+    { id: 'layout-org', label: '切换为组织架构图', run: () => d().setLayout('org') },
+    { id: 'layout-fishbone', label: '切换为鱼骨图', run: () => d().setLayout('fishbone') },
+    { id: 'layout-timeline', label: '切换为时间轴', run: () => d().setLayout('timeline') },
     { id: 'view-mind', label: '切换到思维导图视图', run: () => s().setView('mind') },
     { id: 'view-gantt', label: '切换到甘特图视图', run: () => s().setView('gantt') },
     {

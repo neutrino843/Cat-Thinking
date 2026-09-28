@@ -96,6 +96,9 @@ export default function Toolbar({ query, setQuery }: Props) {
           >
             <option value="logic">逻辑图</option>
             <option value="tree">树形图</option>
+            <option value="org">组织架构</option>
+            <option value="fishbone">鱼骨图</option>
+            <option value="timeline">时间轴</option>
           </select>
           <select
             className="tsel"
