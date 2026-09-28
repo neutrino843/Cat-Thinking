@@ -27,7 +27,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npx vite --port 5174 --strictPort',
+    command: 'npx vite --port 5174 --strictPort --host 127.0.0.1',
     port: 5174,
     reuseExistingServer: false,
     timeout: 60_000,
