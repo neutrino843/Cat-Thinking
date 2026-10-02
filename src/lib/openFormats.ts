@@ -6,13 +6,12 @@ const uid = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2) + Date.now().toString(36)
 
-const DAY = 86400000
-
 /**
  * 文件名清洗：去除 \\ / : * ? " < > | 与控制字符，首尾空白裁剪；
  * 空名回退「未命名导图」。新老导出统一使用，避免非法文件名触发浏览器降级。
  */
 export function sanitizeFileName(name: string): string {
+  // eslint-disable-next-line no-control-regex -- 有意剔除文件名中的控制字符
   const cleaned = name.replace(/[\\/:*?"<>|]/g, '').replace(/[\x00-\x1f]/g, '').trim()
   return cleaned || '未命名导图'
 }
@@ -112,7 +111,6 @@ export function parseMarkdown(md: string, fallbackTitle = '未命名导图'): Do
   const lines = md.split(/\r?\n/)
   let title = fallbackTitle
   let i = 0
-  let foundTitle = false
 
   // 跳过空行直到首个 H1 或首个非空行
   for (; i < lines.length; i++) {
@@ -121,7 +119,6 @@ export function parseMarkdown(md: string, fallbackTitle = '未命名导图'): Do
     const h1 = raw.match(/^#\s+(.+?)\s*$/)
     if (h1) {
       title = h1[1].trim() || fallbackTitle
-      foundTitle = true
       i++
       break
     }
@@ -182,7 +179,7 @@ export function parseMarkdown(md: string, fallbackTitle = '未命名导图'): Do
       for (const seg of taskM[2].split('·').map((s) => s.trim())) {
         const range = seg.match(new RegExp(`^${DATE_RE}\\s*→\\s*${DATE_RE}$`))
         const startOnly = seg.match(new RegExp(`^${DATE_RE}\\s*→$`))
-        const endOnly = seg.match(`^→\\s*${DATE_RE}$`)
+        const endOnly = seg.match(new RegExp(`^→\\s*${DATE_RE}$`))
         const prog = seg.match(/^(\d+)%$/)
         if (range) {
           item.task.start = range[1]

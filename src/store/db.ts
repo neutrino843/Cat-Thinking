@@ -254,11 +254,18 @@ export async function emptyTrash(): Promise<void> {
   })
 }
 
-/** 启动清扫：删除 deletedAt 超过 retentionDays 的条目（fire-and-forget 调用） */
+/** 启动清扫：删除 deletedAt 超过 retentionDays 的条目（fire-and-forget 调用）。
+ * 修审计 M-1：旧实现只删 trash 条目不删关联 blob，导致超期文档的二进制数据永久泄漏；
+ * 现在事务内同步清理 blobs。 */
 export async function sweepTrash(retentionDays = 30): Promise<void> {
   const cutoff = Date.now() - retentionDays * DAY_MS
-  const stale = await db.trash.where('deletedAt').below(cutoff).toArray()
-  await Promise.all(stale.map((t) => db.trash.delete(t.id)))
+  await db.transaction('rw', db.trash, db.blobs, async () => {
+    const stale = await db.trash.where('deletedAt').below(cutoff).toArray()
+    for (const t of stale) {
+      await deleteBlobsByDoc(t.id)
+      await db.trash.delete(t.id)
+    }
+  })
 }
 
 /* ---------------- 自定义模板（M5） ---------------- */

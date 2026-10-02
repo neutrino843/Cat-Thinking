@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { exportCurrent } from '../lib/exporters'
@@ -110,22 +110,22 @@ function buildCmds(): Cmd[] {
   ]
 }
 
+/** 命令表只依赖 store 的惰性 getter，与组件生命周期无关——模块级构建一次即可（修审计 M-10） */
+const CMDS = buildCmds()
+
 export default function Palette() {
   const open = useSettings((s) => s.paletteOpen)
+  if (!open) return null
+  // 关闭时卸载、打开时全新挂载：查询串/选中索引自然归零，
+  // 替代旧实现「open 变化时在 effect 里同步 setState 重置」（修审计 M-10）
+  return <PaletteDialog />
+}
+
+function PaletteDialog() {
   const setPalette = useSettings((s) => s.setPalette)
   const [q, setQ] = useState('')
   const [idx, setIdx] = useState(0)
-  const cmds = useMemo(buildCmds, [])
-  const filtered = cmds.filter((c) => !q || c.label.toLowerCase().includes(q.toLowerCase()))
-
-  useEffect(() => {
-    if (open) {
-      setQ('')
-      setIdx(0)
-    }
-  }, [open])
-
-  if (!open) return null
+  const filtered = CMDS.filter((c) => !q || c.label.toLowerCase().includes(q.toLowerCase()))
 
   return (
     <div

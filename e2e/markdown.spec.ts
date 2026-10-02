@@ -57,7 +57,7 @@ test('MD 导出-导入往返一致', async ({ page }) => {
   expect(indentA).toBe(indentB)
 
   // —— 导入该 .md：导入后 loadDoc，新文档 active ——
-  await page.locator('input[type=file][accept*="json"]').setInputFiles(savePath)
+  await page.locator('input[type=file][accept*=".json"]').setInputFiles(savePath)
   await expect(page.locator('input.doc-title')).toHaveValue('MD往返测试')
   await expect(page.locator('svg')).toContainText('子节点A')
   await expect(page.locator('svg')).toContainText('子节点B')

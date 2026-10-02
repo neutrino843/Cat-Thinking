@@ -1,7 +1,7 @@
 import type { DocData, MindNodeData } from '../types'
 
 let seq = 0
-const nid = (p?: string) => `n${seq++}`
+const nid = () => `n${seq++}`
 
 export interface TreeDef {
   text?: string

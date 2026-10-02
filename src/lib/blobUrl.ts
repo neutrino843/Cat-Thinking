@@ -20,10 +20,15 @@ export function getBlobURL(blobId: string): Promise<string> {
     if (!blob) throw new Error('blob not found: ' + blobId)
     const url = URL.createObjectURL(blob)
     urlCache.set(blobId, url)
-    inflight.delete(blobId)
     return url
   })()
   inflight.set(blobId, p)
+  // 修审计 M-2：成功或失败都清掉 inflight——旧实现失败时缓存 rejected promise，
+  // 后续调用永远拿到同一个 rejection，无法重试
+  p.then(
+    () => inflight.delete(blobId),
+    () => inflight.delete(blobId),
+  )
   return p
 }
 

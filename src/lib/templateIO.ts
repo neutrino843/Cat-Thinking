@@ -63,7 +63,7 @@ export async function importTemplateFile(file: File): Promise<void> {
   try {
     obj = JSON.parse(text)
   } catch (e) {
-    throw new Error('不是有效的模板文件：' + (e as Error).message)
+    throw new Error('不是有效的模板文件：' + (e as Error).message, { cause: e })
   }
   if (!obj || typeof obj !== 'object') throw new Error('不是有效的模板文件')
   const o = obj as Record<string, unknown>

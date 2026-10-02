@@ -89,7 +89,7 @@ function countAll(nodes: DocData['nodes'], id: string): number {
  * 每张图按 Math.min(IMG_MAX_W, img.w) 等比缩放，行间 6px 间距；
  * 无图片返回 0。
  */
-function imagesExtraH(images: NodeImage[] | undefined, _nodeW: number): number {
+function imagesExtraH(images: NodeImage[] | undefined): number {
   if (!images || !images.length) return 0
   let h = 0
   for (const img of images) {
@@ -104,7 +104,7 @@ function measure(text: string, level: number, hasNote: boolean, images?: NodeIma
   const fs = level === 0 ? 24 : level === 1 ? 16 : 14
   const tw = measureText(text, fs) + (hasNote ? 18 : 0)
   const w = Math.max(level === 0 ? 100 : 60, tw + PADX * 2)
-  const imgH = imagesExtraH(images, w)
+  const imgH = imagesExtraH(images)
   const h = (level === 0 ? 52 : fs + PADY * 2) + imgH
   return { w, h, fs, imgH }
 }
@@ -294,7 +294,6 @@ function placeOrg(
   const totalW = wt.kids.reduce((s, k) => s + k.subW, 0) + GY * (wt.kids.length - 1)
   let x = cx - totalW / 2
   const ay = top + wt.h
-  let i = 0
   for (const k of wt.kids) {
     const kcx = x + k.subW / 2
     const ky = top + wt.h + GY_TOP
@@ -309,7 +308,6 @@ function placeOrg(
     })
     placeOrg(doc, k, kcx, ky, level + 1, kColor, colorOf, out, edges)
     x += k.subW + GY
-    i++
   }
 }
 

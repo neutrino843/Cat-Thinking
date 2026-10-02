@@ -186,12 +186,11 @@ export default function Gantt() {
       if (listRef.current) listRef.current.scrollTop = Math.max(0, top)
       if (scrollRef.current) scrollRef.current.scrollTop = Math.max(0, top)
       const t = doc.nodes[id]?.task
-      if (t?.start) {
-        scrollRef.current &&
-          (scrollRef.current.scrollLeft = Math.max(
-            0,
-            diffDays(model.day0, t.start) * model.pxPerDay - 120,
-          ))
+      if (t?.start && scrollRef.current) {
+        scrollRef.current.scrollLeft = Math.max(
+          0,
+          diffDays(model.day0, t.start) * model.pxPerDay - 120,
+        )
       }
     }
     window.addEventListener('msz:gantt-find', h)
@@ -219,7 +218,8 @@ export default function Gantt() {
               title={r.task ? '编辑任务' : '把该节点变为任务（设日期）'}
               onClick={(e) => {
                 e.stopPropagation()
-                r.task ? setEditorId(r.id) : makeTask(r.id)
+                if (r.task) setEditorId(r.id)
+                else makeTask(r.id)
               }}
             >
               {r.task ? '📅' : '＋'}
@@ -250,7 +250,7 @@ export default function Gantt() {
           })}
 
           {/* 行分隔线 */}
-          {model.rows.map((r, i) => (
+          {model.rows.map((r) => (
             <line key={r.id} x1={0} x2={model.width} y1={r.y + ROW_H} y2={r.y + ROW_H} stroke={theme.grid} strokeWidth={1} opacity={0.7} />
           ))}
 

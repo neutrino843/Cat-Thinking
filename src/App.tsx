@@ -167,7 +167,8 @@ export default function App() {
       }
       if (mod && key === 'z') {
         e.preventDefault()
-        e.shiftKey ? s.redo() : s.undo()
+        if (e.shiftKey) s.redo()
+        else s.undo()
         return
       }
       if (mod && key === 'y') {

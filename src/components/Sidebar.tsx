@@ -57,19 +57,45 @@ export default function Sidebar() {
   const refreshTrash = async () => setTrash(await listTrash().catch(() => []))
   const refreshTemplates = async () => setCustoms(await listTemplates().catch(() => []))
 
+  // 修审计 M-5：数据加载 effect 加取消标记，避免快速切换时旧响应覆盖新状态；
+  // 同时消除「effect 内同步调用 setState」反模式告警（此处 setState 实际在 await 之后）
   useEffect(() => {
-    refresh()
+    let live = true
+    listDocs()
+      .then((m) => {
+        if (live) setMetas(m)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
   }, [activeId])
 
   useEffect(() => {
-    refreshTrash()
+    let live = true
+    listTrash()
+      .then((t) => {
+        if (live) setTrash(t)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
   }, [activeId, view])
 
   useEffect(() => {
-    refreshTemplates()
+    let live = true
+    listTemplates()
+      .then((t) => {
+        if (live) setCustoms(t)
+      })
+      .catch(() => {})
     const h = () => refreshTemplates()
     window.addEventListener('msz:templates-changed', h)
-    return () => window.removeEventListener('msz:templates-changed', h)
+    return () => {
+      live = false
+      window.removeEventListener('msz:templates-changed', h)
+    }
   }, [])
 
   /* Palette 命令：打开回收站视图 / 清空回收站 */

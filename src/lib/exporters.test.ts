@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { parseImported, exportSVG } from './exporters'
+import { parseImported, exportSVG, validateDoc } from './exporters'
 import { simpleFixture, buildFixture } from '../test/fixture'
-import type { DocData } from '../types'
+import type { DocData, MindNodeData } from '../types'
 
 describe('导入校验 parseImported', () => {
   it('合法 JSON 文档可解析并补齐版本号', () => {
@@ -37,6 +37,61 @@ describe('导入校验 parseImported', () => {
   it('缺省文件名按 JSON 解析（向后兼容旧调用方式）', () => {
     const { doc: d } = parseImported(JSON.stringify(simpleFixture()))
     expect(d.nodes[d.rootId]).toBeDefined()
+  })
+
+  /* ---------- 审计新增：H-1 导入净化 + M-9 深度上限 ---------- */
+
+  it('H-1：导入的 richNote.html 经白名单净化（script/on* 被剥离）', () => {
+    const f = simpleFixture()
+    const rid = f.rootId
+    ;(f.nodes[rid] as MindNodeData).richNote = {
+      html: '<p onclick="alert(1)">正常<b>加粗</b></p><script>alert(2)</script><img src=x onerror="alert(3)">',
+    }
+    const d = validateDoc(JSON.parse(JSON.stringify(f)))
+    const html = d.nodes[rid].richNote!.html
+    expect(html).toContain('正常')
+    expect(html).toContain('<b>加粗</b>')
+    expect(html).not.toMatch(/script|onclick|onerror|<img/i)
+  })
+
+  it('H-1：导入的 links 中 javascript: 协议被剔除，http(s) 与内部锚点保留', () => {
+    const f = simpleFixture()
+    const rid = f.rootId
+    ;(f.nodes[rid] as MindNodeData).links = [
+      { id: 'l1', kind: 'url', url: 'javascript:alert(1)' },
+      { id: 'l2', kind: 'url', url: 'https://example.com' },
+      { id: 'l3', kind: 'node', nodeId: 'n1' },
+      { id: 'l4', kind: 'url', url: 'data:text/html,<script>alert(1)</script>' },
+    ]
+    const d = validateDoc(JSON.parse(JSON.stringify(f)))
+    const links = d.nodes[rid].links!
+    expect(links.map((l) => l.id)).toEqual(['l2', 'l3'])
+  })
+
+  it('H-1：非法 richNote 结构被剔除而不抛错', () => {
+    const f = simpleFixture()
+    const rid = f.rootId
+    ;(f.nodes[rid] as unknown as Record<string, unknown>).richNote = { html: 42 }
+    const d = validateDoc(JSON.parse(JSON.stringify(f)))
+    expect(d.nodes[rid].richNote).toBeUndefined()
+  })
+
+  it('M-9：超深嵌套（>2000 层）被拒绝，防递归布局栈溢出', () => {
+    // 构造 2001 层链
+    const nodes: Record<string, MindNodeData> = {}
+    let prev = 'r'
+    nodes.r = { id: 'r', parent: null, children: [], text: 'root' }
+    for (let i = 1; i <= 2001; i++) {
+      const id = 'n' + i
+      nodes[id] = { id, parent: prev, children: [], text: id }
+      nodes[prev].children.push(id)
+      prev = id
+    }
+    const doc: DocData = {
+      version: 2, id: 'deep', title: 'deep', rootId: 'r', layout: 'logic',
+      nodes, createdAt: 0, updatedAt: 0,
+    }
+    expect(() => validateDoc(JSON.parse(JSON.stringify(doc)))).toThrow(/深度/)
   })
 
   it('.md 文件名作为 fallbackTitle 兜底', () => {

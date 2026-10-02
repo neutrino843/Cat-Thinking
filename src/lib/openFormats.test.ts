@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sanitizeFileName, toMarkdown, parseMarkdown, toGanttCSV } from './openFormats'
 import { buildFixture } from '../test/fixture'
-import type { DocData, MindNodeData } from '../types'
+import type { DocData } from '../types'
 
 describe('sanitizeFileName', () => {
   it('去除非法字符与控制字符', () => {

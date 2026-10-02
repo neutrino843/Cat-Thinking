@@ -118,6 +118,7 @@ function NodeImageEl({
   theme,
   selected,
 }: ImageElProps) {
+  // 修审计 M-6：裁剪/缩放交互在 P3 未落地，接口已精简掉无用的 viewK/onResizeDown
   const [blobURL, setBlobURL] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -178,9 +179,7 @@ interface ImageElProps {
   nodeW: number
   bodyH: number
   theme: Theme
-  viewK: number
   selected: boolean
-  onResizeDown: (e: React.PointerEvent) => void
 }
 
 const NodeView = memo(function NodeView({
@@ -315,9 +314,7 @@ const NodeView = memo(function NodeView({
                 nodeW={n.w}
                 bodyH={bodyH}
                 theme={theme}
-                viewK={0}
                 selected={selected}
-                onResizeDown={() => {}}
               />
             ))}
             {/* 图片指示符（节点右上角） */}
@@ -374,7 +371,10 @@ export default function Canvas({ query }: { query: string }) {
   const worldRef = useRef<SVGGElement>(null)
   const [view, setView] = useState<View>({ tx: 80, ty: 80, k: 1 })
   const viewRef = useRef(view)
-  viewRef.current = view
+  // 修审计 M-3：ref 不在渲染期写入（React 并发/StrictMode 下渲染可重放），改到 effect 同步
+  useEffect(() => {
+    viewRef.current = view
+  }, [view])
   const hoverRef = useRef<string | null>(null)
   const [hover, setHover] = useState<string | null>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
@@ -425,7 +425,10 @@ export default function Canvas({ query }: { query: string }) {
 
   const layoutRes = useMemo(() => computeLayout(renderDoc), [renderDoc])
   const layoutRef = useRef(layoutRes)
-  layoutRef.current = layoutRes
+  // 修审计 M-3：同上，渲染期只读不写 ref
+  useEffect(() => {
+    layoutRef.current = layoutRes
+  }, [layoutRes])
 
   useEffect(() => {
     worldHolder.current = worldRef.current
@@ -597,8 +600,11 @@ export default function Canvas({ query }: { query: string }) {
             }
           }
         }
-        hoverRef.current = best
-        setHover(best)
+        // 修审计 L-6：命中目标未变化时不触发 setState，避免拖拽中每帧重渲染
+        if (best !== hoverRef.current) {
+          hoverRef.current = best
+          setHover(best)
+        }
       }
       const onUp = () => {
         window.removeEventListener('pointermove', onMove)
@@ -620,23 +626,6 @@ export default function Canvas({ query }: { query: string }) {
       window.addEventListener('pointerup', onUp)
     },
     [beginEditAt, toWorld],
-  )
-
-  /* 文本编辑浮层 */
-  const [editVal, setEditVal] = useState('')
-  useEffect(() => {
-    if (editing && editing.source === 'canvas') {
-      setEditVal(useDoc.getState().doc.nodes[editing.id]?.text ?? '')
-    }
-  }, [editing])
-  const commitEdit = useCallback(
-    (cancel = false) => {
-      if (!editing) return
-      const s = useDoc.getState()
-      if (!cancel) s.setText(editing.id, editVal.replace(/\n+/g, ' '))
-      s.setEditing(null)
-    },
-    [editing, editVal],
   )
 
   const editingNode = editing && editing.source === 'canvas' ? layoutRes.nodes.get(editing.id) : null
@@ -699,35 +688,68 @@ export default function Canvas({ query }: { query: string }) {
         </g>
       </svg>
       <div className="paper-noise" aria-hidden="true" />
-      {editingNode && (
-        <textarea
-          className="node-editor"
-          autoFocus
-          value={editVal}
-          onChange={(e) => setEditVal(e.target.value)}
-          onBlur={() => commitEdit()}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              commitEdit()
-            } else if (e.key === 'Escape') {
-              e.preventDefault()
-              commitEdit(true)
-            }
-          }}
-          style={{
-            left: editingNode.x * view.k + view.tx,
-            top: editingNode.y * view.k + view.ty,
-            width: Math.max(80, editingNode.w * view.k),
-            height: Math.max(30, editingNode.h * view.k),
-            fontSize: editingNode.fontSize * view.k,
-            color: theme.ink,
-            background: theme.nodeFill,
-            borderColor: theme.selStroke,
-            zIndex: 5,
-          }}
+      {editingNode && editing && (
+        <NodeTextEditor
+          key={editing.id}
+          id={editing.id}
+          laid={editingNode}
+          view={view}
+          theme={theme}
         />
       )}
     </div>
+  )
+}
+
+/**
+ * 画布内联文本编辑器（修审计 M-4）。
+ * 以 key=editing.id 重挂载获得干净初值，替代旧实现「effect 里同步 setState 初始化 editVal」
+ * 的级联渲染模式。Enter 提交 / Shift+Enter 换行（实际换行会在提交时归一为空格）/ Esc 取消。
+ */
+function NodeTextEditor({
+  id,
+  laid,
+  view,
+  theme,
+}: {
+  id: string
+  laid: LaidNode
+  view: View
+  theme: Theme
+}) {
+  const [val, setVal] = useState(() => useDoc.getState().doc.nodes[id]?.text ?? '')
+  const commit = (cancel: boolean) => {
+    const s = useDoc.getState()
+    if (!cancel) s.setText(id, val.replace(/\n+/g, ' '))
+    s.setEditing(null)
+  }
+  return (
+    <textarea
+      className="node-editor"
+      autoFocus
+      value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={() => commit(false)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault()
+          commit(false)
+        } else if (e.key === 'Escape') {
+          e.preventDefault()
+          commit(true)
+        }
+      }}
+      style={{
+        left: laid.x * view.k + view.tx,
+        top: laid.y * view.k + view.ty,
+        width: Math.max(80, laid.w * view.k),
+        height: Math.max(30, laid.h * view.k),
+        fontSize: laid.fontSize * view.k,
+        color: theme.ink,
+        background: theme.nodeFill,
+        borderColor: theme.selStroke,
+        zIndex: 5,
+      }}
+    />
   )
 }

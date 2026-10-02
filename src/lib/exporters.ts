@@ -5,6 +5,7 @@ import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { ganttHolder, worldHolder } from '../store/refs'
 import { parseMarkdown, sanitizeFileName, toGanttCSV, toMarkdown } from './openFormats'
+import { sanitizeHtml } from './sanitizeHtml'
 import { getBlob } from '../store/db'
 import { getCachedBlobURL } from './blobUrl'
 
@@ -139,30 +140,60 @@ export function exportSVG(input: ExportInput) {
   )
 }
 
-export async function exportPNG(input: ExportInput, scale = 2) {
+/** 思维导图 PNG 导出：构建 SVG 后复用 rasterize（修审计 L-5：消除与 rasterize 的重复实现） */
+export async function exportPNG(input: ExportInput) {
   const { svg, w, h } = buildSVG(input)
-  const img = new Image()
-  const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
-  await new Promise<void>((res, rej) => {
-    img.onload = () => res()
-    img.onerror = () => rej(new Error('SVG 渲染失败'))
-    img.src = url
-  })
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.round(w * scale)
-  canvas.height = Math.round(h * scale)
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas 2D 上下文不可用，无法导出 PNG')
-  ctx.scale(scale, scale)
-  ctx.drawImage(img, 0, 0, w, h)
-  const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/png'))
-  if (blob) download(`${sanitizeFileName('猫思之-' + input.doc.title)}.png`, blob)
+  await rasterize(svg, w, h, input.doc.title)
+}
+
+/** 导入防御：节点树最大深度（防恶意/损坏文件深层嵌套打爆递归布局栈） */
+const MAX_IMPORT_DEPTH = 2000
+
+/** 节点链接 url 协议白名单（与 sanitizeHtml 的 safeHref 对齐；#node- 为内部锚点） */
+function safeLinkUrl(url: unknown): url is string {
+  if (typeof url !== 'string') return false
+  return /^https?:\/\//i.test(url) || url.startsWith('#')
+}
+
+/**
+ * 净化单个节点的富内容字段（修审计 H-1：导入文件可携带恶意 richNote.html，
+ * NoteEditor 信任 prop 直写 innerHTML → 存储型 XSS；在导入边界统一净化）。
+ * 原位修改通过基础校验的节点对象。
+ */
+function sanitizeImportedNode(n: Record<string, unknown>): void {
+  // richNote.html 必须过白名单净化
+  if (n.richNote !== undefined) {
+    if (!n.richNote || typeof n.richNote !== 'object') {
+      delete n.richNote
+    } else {
+      const html = (n.richNote as Record<string, unknown>).html
+      if (typeof html !== 'string' || !html) delete n.richNote
+      else n.richNote = { html: sanitizeHtml(html) }
+    }
+  }
+  // links：剔除非 http(s)/# 锚点的 url（防 javascript: 协议跳转）
+  if (n.links !== undefined) {
+    if (!Array.isArray(n.links)) {
+      delete n.links
+    } else {
+      n.links = n.links.filter((l): l is Record<string, unknown> => {
+        if (!l || typeof l !== 'object') return false
+        const r = l as Record<string, unknown>
+        if (r.kind === 'url') return safeLinkUrl(r.url)
+        if (r.kind === 'node') return typeof r.nodeId === 'string'
+        return false
+      })
+      if (!(n.links as unknown[]).length) delete n.links
+    }
+  }
 }
 
 /**
  * 结构校验：JSON 导入时确认是合法的 DocData（修审核 S-3）。
  * 检查项：顶层字段类型；rootId 指向存在；每个节点 id/parent/children/text 字段类型；
- * parent↔children 双向一致；deps.from 指向存在；非法字段直接拒绝。
+ * parent↔children 双向一致（单父 + 双向一致 ⇒ 必为森林，不存在环）；
+ * deps.from 指向存在；树深不超 MAX_IMPORT_DEPTH；富内容字段净化（H-1）。
+ * 非法字段直接拒绝。
  */
 export function validateDoc(d: unknown): DocData {
   if (!d || typeof d !== 'object') throw new Error('不是有效的猫思之文档')
@@ -216,6 +247,8 @@ export function validateDoc(d: unknown): DocData {
         }
       }
     }
+    // 修审计 H-1：富内容字段（richNote/links）在导入边界净化，杜绝存储型 XSS
+    sanitizeImportedNode(n)
   }
 
   // parent↔children 双向一致性
@@ -242,6 +275,18 @@ export function validateDoc(d: unknown): DocData {
     }
   }
 
+  // 深度上限：防超深嵌套在递归布局（layout.build）处栈溢出（修审计 M-9）
+  {
+    const stack: [string, number][] = [[o.rootId, 1]]
+    while (stack.length) {
+      const [id, depth] = stack.pop()!
+      if (depth > MAX_IMPORT_DEPTH) throw new Error(`节点树深度超过上限 ${MAX_IMPORT_DEPTH}`)
+      for (const c of (nodeMap[id] as Record<string, unknown>).children as string[]) {
+        stack.push([c, depth + 1])
+      }
+    }
+  }
+
   return { ...(o as unknown as DocData), version: 2 }
 }
 
@@ -265,7 +310,7 @@ export function parseImported(
   try {
     d = JSON.parse(text)
   } catch (e) {
-    throw new Error('不是有效的 JSON 文档：' + (e as Error).message)
+    throw new Error('不是有效的 JSON 文档：' + (e as Error).message, { cause: e })
   }
   const o = d as Record<string, unknown>
   const blobs = (o._blobs as Record<string, { dataURL: string; type: string; name?: string }>) ?? {}

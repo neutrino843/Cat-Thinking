@@ -40,20 +40,18 @@ export default function NodePanel() {
   const [linkMode, setLinkMode] = useState<'url' | 'node'>('url')
   const imgInputRef = useRef<HTMLInputElement>(null)
   const attInputRef = useRef<HTMLInputElement>(null)
-  const [croppingId, setCroppingId] = useState<string | null>(null)
 
   const selId = selection.length === 1 ? selection[0] : null
   const node = selId ? doc.nodes[selId] : null
-  void croppingId
-  void setCroppingId
 
   // 备注富文本初值：优先 richNote.html；其次纯 note 串转义为段落
+  // 修审计 M-7：依赖补全为 node 整体（节点不可变更新，他节点编辑不会变 ref，安全）
   const richHtml = useMemo(() => {
     if (!node) return ''
     if (node.richNote?.html) return node.richNote.html
     if (node.note) return sanitizeHtml(`<p>${escapeHtml(node.note).replace(/\n/g, '<br>')}</p>`)
     return ''
-  }, [node?.richNote?.html, node?.note])
+  }, [node])
 
   // 候选内部节点：去掉自己，按 text 字母排序
   const nodeOptions = useMemo(() => {
@@ -163,14 +161,6 @@ export default function NodePanel() {
     const im = images.find((i) => i.id === id)
     if (im) revokeBlobURL(im.blobId)
     setNode(selId!, { images: images.filter((i) => i.id !== id) })
-  }
-
-  function setImageSize(id: string, w: number, h: number) {
-    setNode(selId!, { images: images.map((i) => (i.id === id ? { ...i, w, h } : i)) })
-  }
-
-  function setImageCrop(id: string, crop: { x: number; y: number; w: number; h: number }) {
-    setNode(selId!, { images: images.map((i) => (i.id === id ? { ...i, crop } : i)) })
   }
 
   /* ---- M7-P3：附件方法 ---- */
