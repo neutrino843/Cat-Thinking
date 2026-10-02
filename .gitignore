@@ -8,3 +8,9 @@ coverage/
 test-results/
 playwright-report/
 playwright/.cache/
+
+# 阶段/过程文档：本地保留，不纳入版本库
+CODE_AUDIT_REPORT.md
+TEST_REPORT.md
+NODE_CONFIRMATION.md
+.trae/
