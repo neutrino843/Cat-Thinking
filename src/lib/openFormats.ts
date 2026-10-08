@@ -227,7 +227,240 @@ export function parseMarkdown(md: string, fallbackTitle = '未命名导图'): Do
 
   const now = Date.now()
   return {
-    version: 2,
+    version: 3,
+    id: uid(),
+    title,
+    rootId,
+    layout: 'logic',
+    nodes,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+/* ---------------- OPML 导入导出（M10，PRD 4.3 P1） ---------------- */
+
+/**
+ * XML 文本/属性转义（& 必须最先替换），并剔除 XML 1.0 非法控制字符
+ * （保留 \t \n \r）。OPML 属性用双引号包裹，故同时转义引号。
+ */
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    // eslint-disable-next-line no-control-regex -- 有意剔除 XML 1.0 非法控制字符
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
+}
+
+/* ---- 极简 XML 解析（仅服务 OPML 导入）----
+ * 不使用 DOMParser：happy-dom 对 application/xml 会退化为 HTML 解析而破坏
+ * head/body 结构，真实浏览器与测试环境行为不一致。OPML 用到的 XML 子集很小
+ * （元素嵌套 + 属性 + 文本节点），~90 行确定性分词器即可，且天然不执行脚本：
+ * 所有文本（含属性值）都只是字符串，节点文本最终经 React <text> 渲染再转义。 */
+
+interface XmlNode {
+  tag: string
+  attrs: Record<string, string>
+  children: XmlNode[]
+  /** 直接文本内容（供 <title> 读取） */
+  text: string
+}
+
+/** 解码 XML 五个预定义实体 + 数字字符引用；未识别实体原样保留 */
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h: string) => String.fromCodePoint(parseInt(h, 16)))
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
+}
+
+class XmlParseError extends Error {}
+
+/** 解析开始标签头部：`outline text="a" _note="b"` → 标签名 + 属性表 */
+function splitTagHead(inner: string): { tag: string; attrs: Record<string, string> } {
+  const m = inner.match(/^([A-Za-z][\w.-]*)([\s\S]*)$/)
+  if (!m) throw new XmlParseError('标签名非法')
+  const tag = m[1]
+  const attrs: Record<string, string> = {}
+  const re = /([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+  let am: RegExpExecArray | null
+  while ((am = re.exec(m[2]))) {
+    attrs[am[1].toLowerCase()] = decodeXmlEntities(am[2] ?? am[3] ?? '')
+  }
+  return { tag, attrs }
+}
+
+function parseXml(xml: string): XmlNode {
+  const root: XmlNode = { tag: '#root', attrs: {}, children: [], text: '' }
+  const stack: XmlNode[] = [root]
+  let i = 0
+  while (i < xml.length) {
+    const lt = xml.indexOf('<', i)
+    if (lt === -1) {
+      stack[stack.length - 1].text += decodeXmlEntities(xml.slice(i))
+      break
+    }
+    if (lt > i) stack[stack.length - 1].text += decodeXmlEntities(xml.slice(i, lt))
+
+    // 注释、CDATA 段：直接跳过内容（OPML 不使用 CDATA，容错）
+    if (xml.startsWith('<!--', lt)) {
+      const end = xml.indexOf('-->', lt + 4)
+      if (end === -1) throw new XmlParseError('注释未闭合')
+      i = end + 3
+      continue
+    }
+    // 处理指令 <?xml?> 与声明 <!DOCTYPE>：跳到 >
+    if (xml[lt + 1] === '?' || xml[lt + 1] === '!') {
+      const gt = xml.indexOf('>', lt)
+      if (gt === -1) throw new XmlParseError('声明未闭合')
+      i = gt + 1
+      continue
+    }
+
+    const gt = xml.indexOf('>', lt)
+    if (gt === -1) throw new XmlParseError('标签未闭合')
+    const closing = xml.startsWith('</', lt)
+    let inner = xml.slice(lt + (closing ? 2 : 1), gt)
+    const selfClose = !closing && inner.endsWith('/')
+    if (selfClose) inner = inner.slice(0, -1)
+    const { tag, attrs } = splitTagHead(inner.trim())
+    i = gt + 1
+
+    if (closing) {
+      if (stack.length <= 1 || stack[stack.length - 1].tag !== tag) {
+        throw new XmlParseError(`结束标签 </${tag}> 与开始标签不匹配`)
+      }
+      stack.pop()
+    } else {
+      const node: XmlNode = { tag, attrs, children: [], text: '' }
+      stack[stack.length - 1].children.push(node)
+      if (!selfClose) stack.push(node)
+    }
+  }
+  if (stack.length !== 1) throw new XmlParseError('存在未闭合的标签')
+  return root
+}
+
+/** 在直接子节点中按标签名（小写）查找第一个 */
+function findChild(node: XmlNode | undefined, tag: string): XmlNode | undefined {
+  return node?.children.find((c) => c.tag.toLowerCase() === tag)
+}
+
+/** 深度优先找第一个具名元素 */
+function findDeep(node: XmlNode, tag: string): XmlNode | undefined {
+  for (const c of node.children) {
+    if (c.tag.toLowerCase() === tag) return c
+    const hit = findDeep(c, tag)
+    if (hit) return hit
+  }
+  return undefined
+}
+
+/**
+ * 导出为 OPML 2.0（大纲交换标准格式，可被 XMind / FreeMind / Workflowy 等读写）：
+ * - head/title 承载文档标题；
+ * - body 下单个顶层 outline 为根节点（与 XMind 导出惯例一致，保证往返根文本不丢）；
+ * - 嵌套 outline 表达层级；备注（richNote 降级纯文本或旧 note）写入 _note 属性；
+ * - 任务/标签等非 OPML 标准字段不导出（结构交换格式定位，无损往返请用 JSON/.msz）。
+ */
+export function toOPML(doc: DocData): string {
+  const root = doc.nodes[doc.rootId]
+
+  const outline = (n: MindNodeData, depth: number): string => {
+    const ind = '  '.repeat(depth + 2)
+    const noteText = n.richNote?.html ? richNoteToText(n.richNote.html) : n.note
+    const attrs =
+      `text="${xmlEscape(n.text)}"` + (noteText ? ` _note="${xmlEscape(noteText)}"` : '')
+    if (!n.children.length) return `${ind}<outline ${attrs}/>`
+    const inner = n.children
+      .map((cid) => doc.nodes[cid])
+      .filter(Boolean)
+      .map((c) => outline(c, depth + 1))
+      .join('\n')
+    return `${ind}<outline ${attrs}>\n${inner}\n${ind}</outline>`
+  }
+
+  const body = root ? `  <body>\n${outline(root, 0)}\n  </body>` : '  <body/>'
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<opml version="2.0">\n` +
+    `  <head>\n    <title>${xmlEscape(doc.title)}</title>\n  </head>\n` +
+    `${body}\n</opml>\n`
+  )
+}
+
+/**
+ * 解析 OPML 2.0 为本文档模型：
+ * - DOMParser 按 application/xml 解析（XML 数据模型天然不执行脚本，无 XSS 面；
+ *   节点文本最终经 React <text> 渲染也会自动转义）；
+ * - head/title 缺省时用 fallbackTitle；
+ * - body 下 0 个顶层 outline → 仅根；1 个 → 该 outline 即根（标准往返）；
+ *   多个 → 以标题为文本建包裹根（外部工具允许 body 多顶层）；
+ * - text 属性缺省时退 title 属性，再退「(空)」；_note → 纯文本备注；
+ * - 空输入 / XML 非法 / 缺 opml 根 → 抛中文 Error（best-effort 不静默吞错结构）。
+ */
+export function parseOPML(xml: string, fallbackTitle = '未命名导图'): DocData {
+  if (!xml || !xml.trim()) throw new Error('OPML 内容为空，无法导入')
+
+  let tree: XmlNode
+  try {
+    tree = parseXml(xml)
+  } catch (e) {
+    if (e instanceof XmlParseError) {
+      throw new Error('不是有效的 OPML 文件：XML 格式错误', { cause: e })
+    }
+    throw new Error('OPML 解析失败：' + (e as Error).message, { cause: e })
+  }
+  const opmlEl = findDeep(tree, 'opml')
+  if (!opmlEl) throw new Error('不是有效的 OPML 文件：缺少 <opml> 根元素')
+
+  const title = findChild(findChild(opmlEl, 'head'), 'title')?.text.trim() || fallbackTitle
+  const bodyEl = findChild(opmlEl, 'body')
+  const tops = bodyEl ? bodyEl.children.filter((c) => c.tag.toLowerCase() === 'outline') : []
+
+  const nodes: Record<string, MindNodeData> = {}
+  const mk = (el: XmlNode, parent: string | null): string => {
+    const id = uid()
+    const text = (el.attrs.text ?? el.attrs.title ?? '').trim() || '(空)'
+    const noteAttr = el.attrs._note
+    nodes[id] = {
+      id,
+      parent,
+      children: [],
+      text,
+      ...(noteAttr ? { note: noteAttr } : {}),
+    }
+    if (parent) nodes[parent].children.push(id)
+    for (const c of el.children) {
+      if (c.tag.toLowerCase() === 'outline') mk(c, id)
+    }
+    return id
+  }
+
+  let rootId: string
+  if (tops.length === 0) {
+    rootId = uid()
+    nodes[rootId] = { id: rootId, parent: null, children: [], text: title }
+  } else if (tops.length === 1) {
+    rootId = mk(tops[0], null)
+  } else {
+    // 多个顶层 outline：建标题包裹根，保证单根树结构（mk 内部负责挂到 parent.children）
+    rootId = uid()
+    nodes[rootId] = { id: rootId, parent: null, children: [], text: title }
+    for (const t of tops) mk(t, rootId)
+  }
+
+  const now = Date.now()
+  return {
+    version: 3,
     id: uid(),
     title,
     rootId,
@@ -253,10 +486,12 @@ function csvCell(s: string): string {
  * 折叠状态不影响导出（完整树）。
  */
 export function toGanttCSV(doc: DocData): string {
-  const header = ['层级', '任务', '开始', '结束', '进度%', '里程碑', '前置任务']
+  const header = ['层级', '任务', '开始', '结束', '进度%', '里程碑', '优先级', '负责人', '备注', '前置任务']
   const rows: string[][] = [header]
   const root = doc.nodes[doc.rootId]
   if (!root) return '\ufeff' + header.map(csvCell).join(',') + '\r\n'
+
+  const PRIORITY = ['', '低', '中', '高']
 
   // 先序收集 id→text，保证后续 deps 解析完整
   const textMap = new Map<string, string>()
@@ -272,14 +507,18 @@ export function toGanttCSV(doc: DocData): string {
   collect(root, 0)
 
   for (const { n, lv } of order) {
-    const deps = n.task?.deps?.map((d) => textMap.get(d.from) ?? d.from).join(', ') ?? ''
+    const t = n.task
+    const deps = t?.deps?.map((d) => textMap.get(d.from) ?? d.from).join('; ') ?? ''
     rows.push([
       String(lv),
       n.text,
-      n.task?.start ?? '',
-      n.task?.end ?? '',
-      typeof n.task?.progress === 'number' ? String(n.task.progress) : '',
-      n.task?.milestone ? '是' : '',
+      t?.start ?? '',
+      t?.milestone ? '' : t?.end ?? '',
+      typeof t?.progress === 'number' ? String(Math.round(t.progress * 100)) : '',
+      t?.milestone ? '是' : '',
+      t?.priority ? PRIORITY[t.priority] : '',
+      t?.owner ?? '',
+      t?.note ?? '',
       deps,
     ])
   }

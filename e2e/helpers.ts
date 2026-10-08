@@ -77,13 +77,24 @@ export async function selectNode(page: Page, index = 0) {
   await page.mouse.up()
 }
 
-/** 在导出菜单里点指定按钮 */
+/** 在「导出 ▾」菜单里点指定按钮（M10 起顶栏有 文件/导出 两个 tmenu，需按文本定位） */
 export async function clickExportMenu(page: Page, label: RegExp) {
-  await page.locator('details.tmenu summary.tbtn').click()
-  const item = page.locator('details.tmenu .tmenu-pop button', { hasText: label })
+  const menu = page.locator('details.tmenu', { hasText: '导出' })
+  await menu.locator('summary.tbtn').click()
+  const item = menu.locator('.tmenu-pop button', { hasText: label })
+  await expect(item).toBeVisible()
+  await item.click()
+}
+
+/** 在「文件 ▾」菜单里点指定按钮（M10 .msz 单文件模式） */
+export async function clickFileMenu(page: Page, label: string | RegExp) {
+  const menu = page.locator('details.tmenu', { hasText: '文件' })
+  await menu.locator('summary.tbtn').click()
+  const item = menu.locator('.tmenu-pop button', { hasText: label })
   await expect(item).toBeVisible()
   await item.click()
 }
 
 export const test = base.extend({})
 export { expect }
+export type { Page }

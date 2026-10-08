@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { migrateDoc, isV2 } from './migrate'
-import type { DocData, DocDataV1, MindNodeData } from '../types'
+import { migrateDoc, isV3 } from './migrate'
+import type { DocData, DocDataV1, DocDataV2, MindNodeData } from '../types'
 
 /** 构建一个 v1 文档用于迁移测试 */
 function v1Doc(opts?: {
@@ -35,14 +35,14 @@ function v1Doc(opts?: {
 }
 
 describe('migrateDoc', () => {
-  it('version=1 的文档迁移后 version=2', () => {
+  it('version=1 的文档迁移后 version=3', () => {
     const doc = v1Doc()
     const m = migrateDoc(doc)
-    expect(m.version).toBe(2)
+    expect(m.version).toBe(3)
   })
 
-  it('已是 v2 的文档浅拷贝原样返回，不修改', () => {
-    const doc: DocData = {
+  it('已是 v2 的文档迁移后 version=3，节点不变', () => {
+    const v2: DocDataV2 = {
       version: 2,
       id: 'd2',
       title: 'T',
@@ -52,9 +52,25 @@ describe('migrateDoc', () => {
       createdAt: 1,
       updatedAt: 2,
     }
+    const m = migrateDoc(v2)
+    expect(m.version).toBe(3)
+    expect(m.nodes).toEqual(v2.nodes)
+  })
+
+  it('已是 v3 的文档浅拷贝原样返回', () => {
+    const doc: DocData = {
+      version: 3,
+      id: 'd3',
+      title: 'T',
+      rootId: 'r',
+      layout: 'logic',
+      nodes: { r: { id: 'r', parent: null, children: [], text: 'r' } },
+      createdAt: 1,
+      updatedAt: 2,
+    }
     const m = migrateDoc(doc)
-    expect(m.version).toBe(2)
-    expect(m).not.toBe(doc) // 浅拷贝
+    expect(m.version).toBe(3)
+    expect(m).not.toBe(doc)
     expect(m.nodes).toEqual(doc.nodes)
   })
 
@@ -138,14 +154,14 @@ describe('migrateDoc', () => {
   })
 })
 
-describe('isV2', () => {
-  it('version=2 返回 true', () => {
-    expect(isV2({ version: 2 })).toBe(true)
+describe('isV3', () => {
+  it('version=3 返回 true', () => {
+    expect(isV3({ version: 3 })).toBe(true)
+  })
+  it('version=2 返回 false', () => {
+    expect(isV3({ version: 2 })).toBe(false)
   })
   it('version=1 返回 false', () => {
-    expect(isV2({ version: 1 })).toBe(false)
-  })
-  it('version=0 返回 false', () => {
-    expect(isV2({ version: 0 })).toBe(false)
+    expect(isV3({ version: 1 })).toBe(false)
   })
 })

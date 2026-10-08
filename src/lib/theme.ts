@@ -8,6 +8,8 @@ export interface Theme {
   inkSoft: string
   accent: string
   accentText: string
+  /** M14：关键路径条形色（甘特） */
+  critical: string
   nodeFill: string
   rootFill: string
   rootText: string
@@ -26,6 +28,7 @@ export const THEME_LIGHT: Theme = {
   inkSoft: '#6E685C',
   accent: '#C96F4A',
   accentText: '#FFF8EE',
+  critical: '#B03A2E',
   nodeFill: '#FFFDF6',
   rootFill: '#C96F4A',
   rootText: '#FFF8EE',
@@ -44,6 +47,7 @@ export const THEME_DARK: Theme = {
   inkSoft: '#9A9184',
   accent: '#E08B66',
   accentText: '#2A2622',
+  critical: '#E06050',
   nodeFill: '#35302A',
   rootFill: '#C96F4A',
   rootText: '#FFF3E4',

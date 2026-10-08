@@ -79,6 +79,31 @@ describe('docStore 节点操作', () => {
     expect(doc().nodes[root].children[0]).toBe(b)
   })
 
+  it('reparentAt：同父内按 index 排序、换父到指定位置、越界 clamp、拒绝移到后代', () => {
+    const { root, a, a1, b } = ids()
+    // 同父内排序：a 移到 b 之后（index 1）
+    get().reparentAt(a, null, 1)
+    expect(doc().nodes[root].children).toEqual([b, a])
+
+    // 换父：a1 从 a 移到 b 的 index 0
+    get().reparentAt(a1, b, 0)
+    expect(doc().nodes[a1].parent).toBe(b)
+    expect(doc().nodes[b].children[0]).toBe(a1)
+    expect(doc().nodes[a].children).toEqual([])
+
+    // 越界 clamp：a1 移到 b 的末尾（index 99 → 1）
+    get().reparentAt(a1, b, 99)
+    expect(doc().nodes[b].children).toEqual([a1])
+
+    // 拒绝把父移到子下
+    get().reparentAt(b, a1, 0)
+    expect(doc().nodes[b].parent).toBe(root)
+
+    // 根不可移动
+    get().reparentAt(root, b, 0)
+    expect(doc().nodes[root].parent).toBeNull()
+  })
+
   it('剪贴板：子树复制后 id 全部重映射、文本保留', () => {
     const { a, b } = ids()
     get().select([a])
@@ -145,6 +170,63 @@ describe('docStore 撤销重做', () => {
     expect(doc().nodes[a].text).toBe('a-edit')
   })
 
+  it('M8-P1（P-1）：连续输入结构共享——非编辑节点引用不变、草稿表复用', () => {
+    const { a, b } = ids()
+    const bBefore = doc().nodes[b]
+    const tableBefore = doc().nodes
+    get().beginEdit()
+    get().setText(a, 'a-')
+    const tableAfter1 = doc().nodes
+    get().setText(a, 'a-x')
+    get().setText(a, 'a-xyz')
+    const tableAfter3 = doc().nodes
+    // 首键与编辑前的表分叉；之后按键复用同一张草稿表（不再每键 O(n) 拷贝）
+    expect(tableAfter1).not.toBe(tableBefore)
+    expect(tableAfter3).toBe(tableAfter1)
+    // 未编辑节点引用跨全部按键保持不变（渲染层 memo 前提）
+    expect(doc().nodes[b]).toBe(bBefore)
+    expect(doc().nodes[a].text).toBe('a-xyz')
+    // 历史快照仍指向编辑前旧表：撤销恢复原文，不污染
+    get().undo()
+    expect(doc().nodes[a].text).toBe('a')
+    expect(doc().nodes[b]).toBe(bBefore)
+    get().redo()
+    expect(doc().nodes[a].text).toBe('a-xyz')
+  })
+
+  it('M8-P1：连续编辑两个节点——各自独立历史步，两步撤销各归其位', () => {
+    const { a, b } = ids()
+    get().beginEdit()
+    get().setText(a, 'A1')
+    get().beginEdit()
+    get().setText(b, 'B1')
+    expect(doc().nodes[a].text).toBe('A1')
+    expect(doc().nodes[b].text).toBe('B1')
+    get().undo()
+    expect(doc().nodes[b].text).toBe('b')
+    expect(doc().nodes[a].text).toBe('A1')
+    get().undo()
+    expect(doc().nodes[a].text).toBe('a')
+  })
+
+  it('M8-P1：输入中插入结构性动作后再编辑，草稿正确重建、文本不丢', () => {
+    const { a } = ids()
+    get().beginEdit()
+    get().setText(a, 'A1')
+    get().toggleCollapse(a) // 走 upd 的已提交动作：草稿失效，但基于含 A1 的当前表构建
+    expect(doc().nodes[a].text).toBe('A1')
+    expect(doc().nodes[a].collapsed).toBe(true)
+    get().beginEdit()
+    get().setText(a, 'A2')
+    expect(doc().nodes[a].text).toBe('A2')
+    expect(doc().nodes[a].collapsed).toBe(true)
+    get().undo() // 撤第二次编辑
+    expect(doc().nodes[a].text).toBe('A1')
+    get().undo() // 撤折叠（fixture 初始无 collapsed 字段，恢复为 undefined）
+    expect(doc().nodes[a].collapsed).toBeUndefined()
+    expect(doc().nodes[a].text).toBe('A1')
+  })
+
   it('甘特拖拽（commit:false）整体只占一步历史', () => {
     const { a } = ids()
     const t = todayISO()
@@ -175,14 +257,35 @@ describe('docStore 甘特任务', () => {
     expect(doc().nodes[a].task).toBeUndefined()
   })
 
-  it('里程碑只保留开始日', () => {
+  it('里程碑只保留开始日，但保留优先级/负责人/备注', () => {
     const { a } = ids()
     const t = todayISO()
-    get().setTask(a, { start: t, end: addDays(t, 5), progress: 0.3, milestone: true })
+    get().setTask(a, {
+      start: t,
+      end: addDays(t, 5),
+      progress: 0.3,
+      milestone: true,
+      priority: 3,
+      owner: '张三',
+      note: '备注',
+    })
     const task = doc().nodes[a].task!
     expect(task.milestone).toBe(true)
     expect(task.start).toBe(t)
     expect(task.end).toBeUndefined()
+    // M16：里程碑分支不再丢弃优先级/负责人/备注
+    expect(task.priority).toBe(3)
+    expect(task.owner).toBe('张三')
+    expect(task.note).toBe('备注')
+  })
+
+  it('仅有优先级/负责人无日期时仍保留 task（不移除）', () => {
+    const { a } = ids()
+    get().setTask(a, { priority: 2, owner: '李四' })
+    const task = doc().nodes[a].task!
+    expect(task.priority).toBe(2)
+    expect(task.owner).toBe('李四')
+    expect(task.start).toBeUndefined()
   })
 
   it('addDep：成环拒绝；removeDep 可移除', () => {

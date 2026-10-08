@@ -115,6 +115,17 @@ export default function TaskEditor({ id, onClose }: { id: string; onClose: () =>
         </select>
       </div>
 
+      {/* M16：任务备注（纯文本） */}
+      <div className="te-row">
+        <span className="te-sub">备注</span>
+        <textarea
+          className="te-note"
+          value={t.note ?? ''}
+          placeholder="任务备注…"
+          onChange={(e) => st.setTask(id, { note: e.target.value || undefined })}
+        />
+      </div>
+
       <button
         className="tbtn te-clear"
         onClick={() => {

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { exportCurrent } from '../lib/exporters'
+import { openMSZCurrent, quickSaveCurrent, saveMSZAs } from '../lib/fileHandle'
 import { saveTemplate } from '../store/db'
 
 interface Cmd {
@@ -42,6 +43,7 @@ function buildCmds(): Cmd[] {
     { id: 'undo', label: '撤销', key: 'Ctrl+Z', run: () => d().undo() },
     { id: 'redo', label: '重做', key: 'Ctrl+Shift+Z', run: () => d().redo() },
     { id: 'fit', label: '适应窗口', run: () => window.dispatchEvent(new Event('msz:fit')) },
+    { id: 'filter-clear', label: '清除节点过滤', run: () => d().clearFilter() },
     { id: 'layout-logic', label: '切换为逻辑图', run: () => d().setLayout('logic') },
     { id: 'layout-tree', label: '切换为树形图', run: () => d().setLayout('tree') },
     { id: 'layout-org', label: '切换为组织架构图', run: () => d().setLayout('org') },
@@ -94,9 +96,33 @@ function buildCmds(): Cmd[] {
     },
     { id: 'exp-json', label: '导出 JSON', run: () => void exportCurrent('json') },
     { id: 'exp-md', label: '导出 Markdown', run: () => void exportCurrent('md') },
+    { id: 'exp-opml', label: '导出 OPML 大纲', run: () => void exportCurrent('opml') },
     { id: 'exp-csv', label: '导出甘特任务表 CSV', run: () => void exportCurrent('csv') },
+    { id: 'exp-pdf', label: '导出 PDF', run: () => void exportCurrent('pdf') },
     { id: 'exp-svg', label: '导出 SVG', run: () => void exportCurrent('svg') },
     { id: 'exp-png', label: '导出 PNG', run: () => void exportCurrent('png') },
+    {
+      id: 'file-open-msz',
+      label: '打开 .msz 文件…',
+      run: () =>
+        void openMSZCurrent().then((r) => {
+          if (r === 'unsupported') window.alert('当前浏览器不支持直接读写 .msz 文件（需 Chrome/Edge 100+）。')
+        }),
+    },
+    {
+      id: 'file-save-msz',
+      label: '保存到 .msz 文件（Ctrl+S）',
+      key: 'Ctrl+S',
+      run: () =>
+        void quickSaveCurrent().then((r) => {
+          if (r === 'unsupported') window.alert('当前浏览器不支持直接读写 .msz 文件（需 Chrome/Edge 100+）。')
+        }),
+    },
+    {
+      id: 'file-saveas-msz',
+      label: '另存为 .msz…',
+      run: () => void saveMSZAs(d().doc),
+    },
     {
       id: 'trash-open',
       label: '打开回收站',

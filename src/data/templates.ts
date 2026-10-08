@@ -168,7 +168,7 @@ export function buildDoc(tpl: Tpl): DocData {
   }
   const rootId = mk(tpl.root, null, 0, '')
   return {
-    version: 2,
+    version: 3,
     id: uid(),
     title: tpl.id === 'blank' ? '未命名导图' : tpl.name,
     rootId,

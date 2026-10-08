@@ -1,17 +1,29 @@
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { searchRef } from '../store/refs'
 import { exportCurrent } from '../lib/exporters'
+import {
+  FILE_SAVED_EVENT,
+  isFileHandleSupported,
+  openMSZCurrent,
+  quickSaveCurrent,
+  saveMSZAs,
+} from '../lib/fileHandle'
 import type { LayoutKind } from '../types'
 import type { SketchLevel } from '../store/settings'
 import { SCALES } from './Gantt'
 import type { GanttScale } from '../lib/gantt'
+import { useI18n, useT } from '../i18n'
 
 interface Props {
   query: string
   setQuery: (q: string) => void
 }
+
+/** 不支持 File System Access API 时的降级说明（Firefox/Safari） */
+const FSA_UNSUPPORTED_MSG =
+  '当前浏览器不支持直接读写 .msz 文件（需 Chrome/Edge 100+）。\n可使用侧栏「导入文件」与「导出 JSON」达到同样的备份迁移效果。'
 
 export default function Toolbar({ query, setQuery }: Props) {
   const doc = useDoc((s) => s.doc)
@@ -23,8 +35,54 @@ export default function Toolbar({ query, setQuery }: Props) {
   const sidebar = useSettings((s) => s.sidebar)
   const view = useSettings((s) => s.view)
   const ganttScale = useSettings((s) => s.ganttScale)
+  const lang = useI18n((s) => s.lang)
+  const tr = useT()
   const st = useSettings.getState
   const matchIdx = useRef(0)
+  /** M10：.msz 保存成功轻提示（2.5s 自动消失） */
+  const [toast, setToast] = useState<string | null>(null)
+  const toastTimer = useRef<number | undefined>(undefined)
+
+  useEffect(() => {
+    const onSaved = (e: Event) => {
+      const name = (e as CustomEvent<{ name?: string }>).detail?.name
+      setToast(name ? `已保存到 ${name}` : '已保存')
+      window.clearTimeout(toastTimer.current)
+      toastTimer.current = window.setTimeout(() => setToast(null), 2500)
+    }
+    window.addEventListener(FILE_SAVED_EVENT, onSaved)
+    return () => {
+      window.removeEventListener(FILE_SAVED_EVENT, onSaved)
+      window.clearTimeout(toastTimer.current)
+    }
+  }, [])
+
+  /** M10：打开磁盘 .msz 文件 */
+  const onOpenMSZ = () => {
+    void openMSZCurrent()
+      .then((r) => {
+        if (r === 'unsupported') window.alert(FSA_UNSUPPORTED_MSG)
+      })
+      .catch((e) => window.alert('打开 .msz 失败：' + (e as Error).message))
+  }
+  /** M10：另存为 .msz */
+  const onSaveMSZAs = () => {
+    if (!isFileHandleSupported()) {
+      window.alert(FSA_UNSUPPORTED_MSG)
+      return
+    }
+    void saveMSZAs(useDoc.getState().doc).catch((e) =>
+      window.alert('保存 .msz 失败：' + (e as Error).message),
+    )
+  }
+  /** M10：保存到绑定的 .msz（Ctrl+S；未绑定则自动走另存为） */
+  const onQuickSave = () => {
+    void quickSaveCurrent()
+      .then((r) => {
+        if (r === 'unsupported') window.alert(FSA_UNSUPPORTED_MSG)
+      })
+      .catch((e) => window.alert('保存 .msz 失败：' + (e as Error).message))
+  }
 
   const jumpToMatch = () => {
     const nodes = useDoc.getState().doc.nodes
@@ -48,7 +106,7 @@ export default function Toolbar({ query, setQuery }: Props) {
       <input
         className="doc-title"
         value={doc.title}
-        placeholder="未命名导图"
+        placeholder={tr('common.untitled')}
         aria-label="文档标题"
         onChange={(e) => useDoc.getState().setTitle(e.target.value)}
       />
@@ -61,7 +119,7 @@ export default function Toolbar({ query, setQuery }: Props) {
           onClick={() => st().setView('mind')}
           title="思维导图视图"
         >
-          导图
+          {tr('view.mind')}
         </button>
         <button
           role="tab"
@@ -70,7 +128,7 @@ export default function Toolbar({ query, setQuery }: Props) {
           onClick={() => st().setView('gantt')}
           title="甘特图视图（与导图同源）"
         >
-          甘特
+          {tr('view.gantt')}
         </button>
       </div>
 
@@ -162,18 +220,63 @@ export default function Toolbar({ query, setQuery }: Props) {
       )}
       {view === 'mind' && (
         <button className="tbtn" title={outline ? '关闭大纲' : '打开大纲'} aria-pressed={outline} onClick={() => st().toggleOutline()}>
-          大纲
+          {tr('view.outline')}
         </button>
       )}
       <button className="tbtn" title="深色 / 浅色" aria-label={dark ? '切换到浅色模式' : '切换到深色模式'} onClick={() => st().toggleDark()}>
         {dark ? '☀' : '☾'}
       </button>
+      <select
+        className="tsel lang-sel"
+        value={lang}
+        title={tr('settings.language')}
+        aria-label={tr('settings.language')}
+        onChange={(e) => useI18n.getState().setLang(e.target.value as 'zh-CN' | 'en-US')}
+      >
+        <option value="zh-CN">中</option>
+        <option value="en-US">EN</option>
+      </select>
+      <details className="tmenu">
+        <summary className="tbtn">文件 ▾</summary>
+        {/* M10：点击任一菜单项后自动收起（原生 details 不会因内部点击而关闭） */}
+        <div
+          className="tmenu-pop"
+          onClick={(e) => {
+            if ((e.target as HTMLElement).tagName === 'BUTTON') {
+              const d = e.currentTarget.closest('details')
+              if (d) d.open = false
+            }
+          }}
+        >
+          <button onClick={onOpenMSZ} title="从磁盘打开 .msz 单文件文档">
+            打开 .msz 文件…
+          </button>
+          <button onClick={onQuickSave} title="保存到已绑定的 .msz 文件（未绑定则先选择位置）">
+            保存到文件（Ctrl+S）
+          </button>
+          <button onClick={onSaveMSZAs} title="选择磁盘位置另存为 .msz 单文件">
+            另存为 .msz…
+          </button>
+        </div>
+      </details>
       <details className="tmenu">
         <summary className="tbtn">导出 ▾</summary>
-        <div className="tmenu-pop">
+        <div
+          className="tmenu-pop"
+          onClick={(e) => {
+            if ((e.target as HTMLElement).tagName === 'BUTTON') {
+              const d = e.currentTarget.closest('details')
+              if (d) d.open = false
+            }
+          }}
+        >
           <button onClick={() => exportCurrent('json')}>JSON（完整数据）</button>
           <button onClick={() => exportCurrent('md')}>Markdown（.md）</button>
+          <button onClick={() => exportCurrent('opml')}>OPML（.opml 大纲）</button>
           <button onClick={() => exportCurrent('csv')}>甘特任务表（.csv）</button>
+          <button onClick={() => exportCurrent('pdf')}>
+            PDF（{view === 'gantt' ? '甘特图' : '思维导图'}）
+          </button>
           <button onClick={() => exportCurrent('svg')}>
             SVG（{view === 'gantt' ? '甘特图' : '思维导图'}）
           </button>
@@ -186,6 +289,11 @@ export default function Toolbar({ query, setQuery }: Props) {
         Ctrl+K
       </button>
       {!sidebar && <span className="spacer" />}
+      {toast && (
+        <span className="file-toast" role="status" aria-live="polite">
+          {toast}
+        </span>
+      )}
     </header>
   )
 }

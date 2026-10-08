@@ -3,12 +3,17 @@ import type { DocData, NodeImage, NodeLink, NodeTag } from '../types'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { worldHolder } from '../store/refs'
-import { computeLayout, type LaidEdge, type LaidNode } from '../lib/layout'
+import { computeLayout, type LaidBox, type LaidEdge, type LaidNode, type LaidRelation, type LaidSummary } from '../lib/layout'
+import { computeVisibleRect, edgeInRect, nodeInRect } from '../lib/culling'
 import { getTheme, FONT_HAND, FONT_BODY, type Theme } from '../lib/theme'
 import { cubicPts, hashSeed, roundedRectPts, sketchPath } from '../lib/sketch'
 import { buildSlides, presentDoc } from '../lib/presentation'
 import { renderIconPath } from '../data/icons'
 import { getBlobURL } from '../lib/blobUrl'
+import { applyFilter } from '../lib/filter'
+import { pinchFactor, wheelFactor, zoomAt, type View } from '../lib/viewport'
+import { computeSnap, type GuideLine } from '../lib/snap'
+import FilterBar from './FilterBar'
 
 /** M7-P3：节点图片最大显示宽度（与 layout.ts 一致） */
 const IMG_MAX_W = 140
@@ -28,16 +33,18 @@ const TAG_COLORS: Record<string, string> = {
   gray: '#9e9e9e',
 }
 
-interface View {
-  tx: number
-  ty: number
-  k: number
-}
-
 interface DragState {
+  /** 被拖子树全部节点 id */
   subs: Set<string>
+  /** 主拖节点 id（用于吸附对齐计算） */
+  primary: string
   dx: number
   dy: number
+  /** M12：吸附修正偏移（已含在渲染中） */
+  snapDx: number
+  snapDy: number
+  /** M12：吸附辅助线 */
+  guides: GuideLine[]
 }
 
 function collectSubIds(nodes: DocData['nodes'], id: string, out: Set<string>) {
@@ -78,6 +85,85 @@ const EdgeView = memo(function EdgeView({ e, theme, sketch, trans, dx, dy }: Edg
       strokeLinecap="round"
       opacity={e.level <= 1 ? 0.9 : 0.75}
     />
+  )
+})
+
+/* ---------------- M9 关系表达：关系线 / 概要 / 边界框 ---------------- */
+
+const RelationView = memo(function RelationView({ r, theme, sketch }: { r: LaidRelation; theme: Theme; sketch: 0 | 1 | 2 }) {
+  const p = r.points
+  const pts = cubicPts(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7])
+  const d = sketchPath(pts, { seed: hashSeed(r.from + '>' + r.to), jitter: JT[sketch] * 0.8, passes: 1 })
+  const color = r.color ? theme.branch[Number(r.color.slice(1))] ?? theme.accent : theme.accent
+  // 箭头
+  const ah = 9
+  const a = r.angle
+  const ax = r.ax
+  const ay = r.ay
+  const arrow = `M ${ax} ${ay} L ${ax - ah * Math.cos(a - 0.4)} ${ay - ah * Math.sin(a - 0.4)} M ${ax} ${ay} L ${ax - ah * Math.cos(a + 0.4)} ${ay - ah * Math.sin(a + 0.4)}`
+  return (
+    <g className="msz-relation">
+      <path d={d} fill="none" stroke={color} strokeWidth={1.6} strokeLinecap="round" opacity={0.85} strokeDasharray="4 3" />
+      <path d={arrow} fill="none" stroke={color} strokeWidth={1.6} strokeLinecap="round" opacity={0.85} />
+      {r.label ? (
+        <text x={r.lx} y={r.ly} textAnchor="middle" fontSize={12} fill={theme.ink} className="msz-relation-label" fontWeight={600}>
+          {r.label}
+        </text>
+      ) : null}
+    </g>
+  )
+})
+
+const SummaryView = memo(function SummaryView({ s, theme, sketch }: { s: LaidSummary; theme: Theme; sketch: 0 | 1 | 2 }) {
+  const color = s.color ? theme.branch[Number(s.color.slice(1))] ?? theme.ink : theme.inkSoft
+  // 花括号：用三次贝塞尔模拟 { 形状
+  const midY = (s.y1 + s.y2) / 2
+  const x = s.x
+  const dir = s.side
+  const w = 12
+  const d = sketchPath(
+    [
+      [x + dir * w, s.y1],
+      [x, s.y1 + (midY - s.y1) * 0.4],
+      [x, midY],
+      [x - dir * 4, midY],
+      [x, midY],
+      [x, midY + (s.y2 - midY) * 0.4],
+      [x + dir * w, s.y2],
+    ] as [number, number][],
+    { seed: hashSeed(s.id), jitter: JT[sketch] * 0.6, passes: 1 },
+  )
+  // 简单折线路径作为花括号
+  const bracePath = `M ${x + dir * w} ${s.y1} ` +
+    `Q ${x} ${s.y1} ${x} ${s.y1 + (midY - s.y1) * 0.5} ` +
+    `Q ${x} ${midY} ${x - dir * 4} ${midY} ` +
+    `Q ${x} ${midY} ${x} ${midY + (s.y2 - midY) * 0.5} ` +
+    `Q ${x} ${s.y2} ${x + dir * w} ${s.y2}`
+  return (
+    <g className="msz-summary">
+      <path d={sketch ? d : bracePath} fill="none" stroke={color} strokeWidth={1.8} strokeLinecap="round" opacity={0.8} />
+      {s.label ? (
+        <text x={s.lx} y={s.ly + 4} textAnchor="middle" fontSize={12} fill={theme.ink} fontWeight={600}>
+          {s.label}
+        </text>
+      ) : null}
+    </g>
+  )
+})
+
+const BoxView = memo(function BoxView({ b, theme, sketch }: { b: LaidBox; theme: Theme; sketch: 0 | 1 | 2 }) {
+  const color = b.color ? theme.branch[Number(b.color.slice(1))] ?? theme.inkSoft : theme.inkSoft
+  const pts = roundedRectPts(b.x, b.y, b.w, b.h, 8)
+  const d = sketchPath(pts, { seed: hashSeed(b.id), jitter: JT[sketch] * 0.5, passes: 1 })
+  return (
+    <g className="msz-bbox">
+      <path d={d} fill="none" stroke={color} strokeWidth={1.5} strokeLinecap="round" opacity={0.6} strokeDasharray="6 4" />
+      {b.label ? (
+        <text x={b.lx} y={b.ly + 12} fontSize={11} fill={color} fontWeight={600} className="msz-bbox-label">
+          {b.label}
+        </text>
+      ) : null}
+    </g>
   )
 })
 
@@ -209,6 +295,8 @@ const NodeView = memo(function NodeView({
       transform={inSub ? `translate(${dx},${dy})` : undefined}
       style={{ cursor: 'grab' }}
       role="button"
+      data-node-id={n.id}
+      data-color={n.color || undefined}
       tabIndex={focusable ? 0 : -1}
       aria-label={
         n.hasChildren
@@ -360,11 +448,14 @@ export default function Canvas({ query }: { query: string }) {
   const doc = useDoc((s) => s.doc)
   const selection = useDoc((s) => s.selection)
   const editing = useDoc((s) => s.editing)
+  const filter = useDoc((s) => s.filter)
   const dark = useSettings((s) => s.dark)
   const sketch = useSettings((s) => s.sketch)
   const presenting = useSettings((s) => s.presenting)
   const slide = useSettings((s) => s.slide)
   const reduceMotion = useSettings((s) => s.reduceMotion)
+  // M8-P2：导出全量渲染时关闭裁剪，保证 SVG/PNG 导出含全部节点（R1 红线）
+  const exportFullRender = useSettings((s) => s.exportFullRender)
   const theme = getTheme(dark)
 
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -378,6 +469,18 @@ export default function Canvas({ query }: { query: string }) {
   const hoverRef = useRef<string | null>(null)
   const [hover, setHover] = useState<string | null>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
+
+  // M8-P2-1：跟踪画布容器尺寸，供视口裁剪计算可视矩形
+  const [wrapSize, setWrapSize] = useState({ w: 0, h: 0 })
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const update = () => setWrapSize({ w: el.clientWidth, h: el.clientHeight })
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   /* 组件存活标记：拖拽进行中若切视图/卸载，命令式 window 监听据此自我清理（修 F-8） */
   const aliveRef = useRef(true)
@@ -396,10 +499,16 @@ export default function Canvas({ query }: { query: string }) {
     return set
   }, [doc, query])
 
-  /* 搜索时临时展开含命中后代的折叠节点（仅视图，不改状态） */
+  /* M11：过滤派生文档（仅视图层裁剪：命中分支 + 祖先链，临时展开路径上的折叠），
+     绝不可写回 store；未激活过滤时为 null。 */
+  const filteredDoc = useMemo(() => applyFilter(doc, filter), [doc, filter])
+
+  /* 搜索时临时展开含命中后代的折叠节点（仅视图，不改状态）；
+     在过滤派生文档之上继续派生，两者可叠加。 */
   const viewDoc = useMemo(() => {
-    if (!matches.size) return doc
-    const nodes = doc.nodes
+    const base = filteredDoc ?? doc
+    if (!matches.size) return base
+    const nodes = base.nodes
     const needOpen = new Set<string>()
     for (const id of matches) {
       let p = nodes[id]?.parent ?? null
@@ -408,11 +517,11 @@ export default function Canvas({ query }: { query: string }) {
         p = nodes[p]?.parent ?? null
       }
     }
-    if (!needOpen.size) return doc
-    const next = { ...doc, nodes: { ...nodes } }
+    if (!needOpen.size) return base
+    const next = { ...base, nodes: { ...nodes } }
     for (const id of needOpen) next.nodes[id] = { ...nodes[id], collapsed: false }
     return next
-  }, [doc, matches])
+  }, [doc, filteredDoc, matches])
 
   /* 演示模式：派生裁剪文档，绝不可写回 store。
    * 优先级（L-5）：presenting → presentDoc 裁剪；否则 viewDoc（搜索临时展开）。
@@ -434,7 +543,66 @@ export default function Canvas({ query }: { query: string }) {
     worldHolder.current = worldRef.current
   })
 
-  /* 缩放（以光标为中心） */
+  /*
+   * M8-P2-1：视口裁剪。
+   * 将屏幕可视矩形（wrapSize ± MARGIN）映射到世界坐标，仅渲染与之相交的节点/边。
+   * - 演示模式（presenting）已用 presentDoc 派生裁剪文档，无需再裁；导出全量渲染时也关闭。
+   * - wrapSize 未就绪（0/0）时返回 null 表示「渲染全部」，避免初始化期空屏闪。
+   * - 编辑中节点 / 拖拽子树（drag.subs）强制纳入，保证交互不丢节点。
+   * 核心几何见 src/lib/culling.ts（纯函数，单测覆盖）。
+   */
+  const CULL_MARGIN = 300
+  const visible = useMemo(
+    () => computeVisibleRect(view, wrapSize.w, wrapSize.h, CULL_MARGIN, presenting || exportFullRender),
+    [view, wrapSize, presenting, exportFullRender],
+  )
+
+  // 编辑中节点与拖拽子树强制渲染（不裁掉），保证用户可见其交互反馈
+  const forcedIds = useMemo(() => {
+    const s = new Set<string>()
+    if (editing && editing.source === 'canvas' && editing.id) s.add(editing.id)
+    if (drag?.subs) for (const id of drag.subs) s.add(id)
+    return s
+  }, [editing, drag])
+
+  const visibleNodes = useMemo(() => {
+    if (!visible) return layoutRes.nodes
+    const out = new Map<string, LaidNode>()
+    for (const n of layoutRes.nodes.values()) {
+      if (nodeInRect(n, visible)) out.set(n.id, n)
+    }
+    // 强制纳入编辑/拖拽节点（即便在视口外）
+    if (forcedIds.size) {
+      for (const id of forcedIds) {
+        const n = layoutRes.nodes.get(id)
+        if (n && !out.has(id)) out.set(id, n)
+      }
+    }
+    return out
+  }, [layoutRes, visible, forcedIds])
+
+  const visibleEdges = useMemo(() => {
+    if (!visible) return layoutRes.edges
+    const out: LaidEdge[] = []
+    for (const e of layoutRes.edges) {
+      if (edgeInRect(e.points, visible)) out.push(e)
+    }
+    // 强制纳入拖拽子树相关的边（from 或 to 在 forcedIds 中）
+    if (forcedIds.size) {
+      for (const e of layoutRes.edges) {
+        if ((forcedIds.has(e.from) || forcedIds.has(e.to)) && !out.includes(e)) {
+          out.push(e)
+        }
+      }
+    }
+    return out
+  }, [layoutRes, visible, forcedIds])
+
+  /* 缩放（以光标为中心）：
+     - 普通滚轮：deltaY 每档缩放（PRD 4.1.1 P0）；
+     - 触控板捏合（P1）：Chromium/Edge/Firefox 把捏合映射为 ctrlKey 的 wheel，
+       事件连续且量小，用 pinchFactor（系数更灵敏）；
+     - Safari/WebKit：gesturestart/change 携带 scale，单独监听。 */
   useEffect(() => {
     const el = wrapRef.current
     if (!el) return
@@ -444,14 +612,39 @@ export default function Canvas({ query }: { query: string }) {
       const rect = el.getBoundingClientRect()
       const mx = e.clientX - rect.left
       const my = e.clientY - rect.top
-      setView((v) => {
-        const k = Math.min(3, Math.max(0.15, v.k * Math.exp(-e.deltaY * 0.0012)))
-        const s = k / v.k
-        return { k, tx: mx - (mx - v.tx) * s, ty: my - (my - v.ty) * s }
-      })
+      const factor = e.ctrlKey ? pinchFactor(e.deltaY) : wheelFactor(e.deltaY)
+      setView((v) => zoomAt(v, mx, my, factor))
+    }
+    // Safari 手势事件非标准，类型库无声明（最小化 any 边界）
+    let gStart: { k: number; mx: number; my: number } | null = null
+    const onGestureStart = (e: Event) => {
+      e.preventDefault()
+      const rect = el.getBoundingClientRect()
+      gStart = {
+        k: viewRef.current.k,
+        mx: (e as MouseEvent).clientX - rect.left,
+        my: (e as MouseEvent).clientY - rect.top,
+      }
+    }
+    const onGestureChange = (e: Event) => {
+      e.preventDefault()
+      if (!gStart) return
+      const scale = (e as Event & { scale?: number }).scale ?? 1
+      setView((v) => zoomAt(v, gStart!.mx, gStart!.my, (gStart!.k * scale) / v.k))
+    }
+    const onGestureEnd = () => {
+      gStart = null
     }
     el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
+    el.addEventListener('gesturestart', onGestureStart as EventListener)
+    el.addEventListener('gesturechange', onGestureChange as EventListener)
+    el.addEventListener('gestureend', onGestureEnd)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('gesturestart', onGestureStart as EventListener)
+      el.removeEventListener('gesturechange', onGestureChange as EventListener)
+      el.removeEventListener('gestureend', onGestureEnd)
+    }
   }, [])
 
   const fitView = useCallback(() => {
@@ -478,6 +671,18 @@ export default function Canvas({ query }: { query: string }) {
     window.addEventListener('msz:fit', h)
     return () => window.removeEventListener('msz:fit', h)
   }, [fitView])
+
+  /* M11：过滤条件变化后可见树大幅裁剪，双层 rAF 等 layoutRef 刷新后自动适应 */
+  useEffect(() => {
+    let r2 = 0
+    const r1 = requestAnimationFrame(() => {
+      r2 = requestAnimationFrame(() => fitView())
+    })
+    return () => {
+      cancelAnimationFrame(r1)
+      cancelAnimationFrame(r2)
+    }
+  }, [filter, fitView])
 
   /* 演示模式：每页把「已揭示内容」整体居中适配（rAF 等 layoutRef 刷新） */
   useEffect(() => {
@@ -586,7 +791,29 @@ export default function Canvas({ query }: { query: string }) {
         const k = viewRef.current.k
         dx = (ev.clientX - sx) / k
         dy = (ev.clientY - sy) / k
-        setDrag({ subs, dx, dy })
+        // M12：对齐吸附——以主拖节点为基准，与其余可见节点比对
+        const laidNodes = layoutRef.current.nodes
+        const primaryLaid = laidNodes.get(id)
+        let snapDx = 0
+        let snapDy = 0
+        let guides: GuideLine[] = []
+        if (primaryLaid) {
+          const others: { x: number; y: number; w: number; h: number }[] = []
+          for (const ln of laidNodes.values()) {
+            if (subs.has(ln.id)) continue
+            others.push({ x: ln.x, y: ln.y, w: ln.w, h: ln.h })
+          }
+          const r = computeSnap(
+            { x: primaryLaid.x, y: primaryLaid.y, w: primaryLaid.w, h: primaryLaid.h },
+            others,
+            dx,
+            dy,
+          )
+          snapDx = r.snapDx
+          snapDy = r.snapDy
+          guides = r.guides
+        }
+        setDrag({ subs, primary: id, dx, dy, snapDx, snapDy, guides })
         const [wx, wy] = toWorld(ev.clientX, ev.clientY)
         let best: string | null = null
         let bestArea = Infinity
@@ -650,18 +877,22 @@ export default function Canvas({ query }: { query: string }) {
         >
           <rect data-bg="1" x={-50000} y={-50000} width={100000} height={100000} fill={`url(#msz-grid)`} />
           <g id="world" ref={worldRef}>
-            {layoutRes.edges.map((e) => (
+            {/* M9：边界框在最底层 */}
+            {layoutRes.boxes.map((b) => (
+              <BoxView key={b.id} b={b} theme={theme} sketch={sketch} />
+            ))}
+            {visibleEdges.map((e) => (
               <EdgeView
                 key={e.from + '>' + e.to}
                 e={e}
                 theme={theme}
                 sketch={sketch}
                 trans={!!sub?.has(e.to)}
-                dx={drag?.dx ?? 0}
-                dy={drag?.dy ?? 0}
+                dx={(drag?.dx ?? 0) + (drag?.snapDx ?? 0)}
+                dy={(drag?.dy ?? 0) + (drag?.snapDy ?? 0)}
               />
             ))}
-            {[...layoutRes.nodes.values()].map((n) => (
+            {[...visibleNodes.values()].map((n) => (
               <NodeView
                 key={n.id}
                 n={n}
@@ -676,18 +907,55 @@ export default function Canvas({ query }: { query: string }) {
                 selected={selection.includes(n.id)}
                 match={presenting ? false : matches.has(n.id)}
                 hovered={hover === n.id}
-                dx={sub?.has(n.id) ? drag!.dx : 0}
-                dy={sub?.has(n.id) ? drag!.dy : 0}
+                dx={sub?.has(n.id) ? drag!.dx + drag!.snapDx : 0}
+                dy={sub?.has(n.id) ? drag!.dy + drag!.snapDy : 0}
                 viewK={view.k}
                 focusable={!presenting && selection.includes(n.id)}
                 onDown={onNodeDown}
                 onEdit={beginEditAt}
               />
             ))}
+            {/* M9：概要在节点上方 */}
+            {layoutRes.summaries.map((s) => (
+              <SummaryView key={s.id} s={s} theme={theme} sketch={sketch} />
+            ))}
+            {/* M9：关系线在最顶层 */}
+            {layoutRes.relations.map((r) => (
+              <RelationView key={r.id} r={r} theme={theme} sketch={sketch} />
+            ))}
+            {/* M12：对齐吸附辅助线 */}
+            {drag?.guides.map((g, i) =>
+              g.orientation === 'vertical' ? (
+                <line
+                  key={`guide-${i}`}
+                  x1={g.pos}
+                  y1={g.from}
+                  x2={g.pos}
+                  y2={g.to}
+                  stroke={theme.accent}
+                  strokeWidth={1.5}
+                  strokeDasharray="6 4"
+                  pointerEvents="none"
+                />
+              ) : (
+                <line
+                  key={`guide-${i}`}
+                  x1={g.from}
+                  y1={g.pos}
+                  x2={g.to}
+                  y2={g.pos}
+                  stroke={theme.accent}
+                  strokeWidth={1.5}
+                  strokeDasharray="6 4"
+                  pointerEvents="none"
+                />
+              ),
+            )}
           </g>
         </g>
       </svg>
       <div className="paper-noise" aria-hidden="true" />
+      {!presenting && <FilterBar />}
       {editingNode && editing && (
         <NodeTextEditor
           key={editing.id}

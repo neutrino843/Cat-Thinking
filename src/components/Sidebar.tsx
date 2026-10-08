@@ -24,6 +24,8 @@ import { parseImported } from '../lib/exporters'
 import { exportTemplate, importTemplateFile } from '../lib/templateIO'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
+import { closeDocTab, createDocTab, emitDocsChanged, openDocById } from '../lib/tabs'
+import VersionHistory from './VersionHistory'
 
 type View = 'library' | 'trash'
 
@@ -46,6 +48,8 @@ export default function Sidebar() {
   const [renameVal, setRenameVal] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const [view, setView] = useState<View>('library')
+  /** M15：版本历史模态打开的文档 id，null 表示关闭 */
+  const [historyDocId, setHistoryDocId] = useState<string | null>(null)
   const activeId = useDoc((s) => s.doc.id)
   const dark = useSettings((s) => s.dark)
   /** M7-P5：悬停预览的模板（{name, doc}），null 表示不显示 */
@@ -115,16 +119,14 @@ export default function Sidebar() {
     }
   }, [trash.length])
 
-  const open = async (id: string) => {
+  const open = (id: string) => {
     if (id === activeId) return
-    const d = await loadDoc(id)
-    if (d) useDoc.getState().loadDoc(d)
+    // M11：经标签编排打开（恢复该文档的撤销/剪贴板会话并挂标签）
+    void openDocById(id)
   }
 
   const create = async (tplId: string) => {
-    const d = buildDoc(findTpl(tplId))
-    await saveDoc(d)
-    useDoc.getState().loadDoc(d)
+    await createDocTab(tplId)
     setMenuOpen(false)
     refresh()
   }
@@ -136,7 +138,8 @@ export default function Sidebar() {
       putBlob(id, docId, blob, nodeId),
     )
     await saveDoc(d)
-    useDoc.getState().loadDoc(d)
+    useDoc.getState().openDoc(d)
+    emitDocsChanged()
     setMenuOpen(false)
     refresh()
   }
@@ -177,7 +180,7 @@ export default function Sidebar() {
 
   /**
    * 软删除：文档移入回收站，30 天后自动清除。
-   * 仍保留旧逻辑中的兜底——若当前激活文档被删，切换到列表第一条或新建空白。
+   * M11：若被删文档开着标签，走 closeDocTab（自动切邻居；无邻居则新建空白标签）。
    */
   const remove = async (id: string) => {
     if (
@@ -185,17 +188,7 @@ export default function Sidebar() {
     )
       return
     await moveToTrash(id)
-    if (id === activeId) {
-      const rest = (await listDocs()).filter((m) => m.id !== id)
-      if (rest.length) {
-        const d = await loadDoc(rest[0].id)
-        if (d) useDoc.getState().loadDoc(d)
-      } else {
-        const d = buildDoc(findTpl('blank'))
-        await saveDoc(d)
-        useDoc.getState().loadDoc(d)
-      }
-    }
+    if (useDoc.getState().tabs.includes(id)) await closeDocTab(id)
     refresh()
     refreshTrash()
   }
@@ -233,7 +226,8 @@ export default function Sidebar() {
           /* 单个 blob 还原失败不阻断导入 */
         }
       }
-      useDoc.getState().loadDoc(d)
+      useDoc.getState().openDoc(d)
+      emitDocsChanged()
       refresh()
     } catch (e) {
       alert('导入失败：' + (e as Error).message)
@@ -245,10 +239,7 @@ export default function Sidebar() {
     const newId = await restoreDoc(id)
     await refreshTrash()
     await refresh()
-    if (newId) {
-      const d = await loadDoc(newId)
-      if (d) useDoc.getState().loadDoc(d)
-    }
+    if (newId) await openDocById(newId)
   }
 
   const purge = async (e: React.MouseEvent, id: string, title: string) => {
@@ -385,6 +376,17 @@ export default function Sidebar() {
                     {new Date(m.updatedAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })}
                   </span>
                   <button
+                    className="sb-history"
+                    title="版本历史"
+                    aria-label={`查看文档 ${m.title} 的版本历史`}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setHistoryDocId(m.id)
+                    }}
+                  >
+                    ⟳
+                  </button>
+                  <button
                     className="sb-del"
                     title="删除"
                     aria-label={`删除文档 ${m.title}`}
@@ -456,7 +458,7 @@ export default function Sidebar() {
             <input
               ref={fileRef}
               type="file"
-              accept=".json,application/json,.md,.markdown,text/markdown,text/plain"
+              accept=".json,.msz,application/json,.md,.markdown,text/markdown,text/plain,.opml,.xml,text/x-opml,text/xml"
               hidden
               onChange={(e) => {
                 const f = e.target.files?.[0]
@@ -493,6 +495,10 @@ export default function Sidebar() {
       </div>
       {/* M7：选中单节点时显示富内容编辑面板 */}
       <NodePanel />
+      {/* M15：版本历史模态 */}
+      {historyDocId && (
+        <VersionHistory docId={historyDocId} onClose={() => setHistoryDocId(null)} />
+      )}
     </aside>
   )
 }

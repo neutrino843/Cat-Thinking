@@ -17,6 +17,12 @@ interface SettingsState {
   slide: number
   /** 减少动效（持久化；缺省跟随系统 prefers-reduced-motion） */
   reduceMotion: boolean
+  /**
+   * M8-P2：导出全量渲染标志（内存态，不持久化）。
+   * 为 true 时 Canvas/Gantt 关闭视口裁剪，渲染全部节点/行，
+   * 供 SVG/PNG 导出序列化取全量 innerHTML。导出结束立即置回 false。
+   */
+  exportFullRender: boolean
   toggleDark: () => void
   setSketch: (s: SketchLevel) => void
   setView: (v: ViewKind) => void
@@ -98,6 +104,7 @@ export const useSettings = create<SettingsState>((set) => ({
   presenting: false,
   slide: 0,
   reduceMotion: initialReduceMotion,
+  exportFullRender: false,
   toggleDark: () =>
     set((s) => {
       save('msz.dark', String(!s.dark))

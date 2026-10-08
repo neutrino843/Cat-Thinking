@@ -77,6 +77,36 @@ describe('布局算法', () => {
     expect(r.nodes.get(grand)!.color).toBe('b0')
   })
 
+  it('M11：节点显式 color 优先于轮转色，子孙继承钉住色（四种分支布局）', () => {
+    for (const layout of ['logic', 'tree', 'org', 'fishbone'] as const) {
+      const doc = buildFixture({
+        children: [{ children: [{ text: 'x' }] }, { text: 'c2' }],
+      }, layout)
+      const [c1, c2] = doc.nodes[doc.rootId].children
+      doc.nodes[c1].color = 'b4' // 钉住：无视位置轮转（c1 本应 b0）
+      const r = computeLayout(doc)
+      const grand = doc.nodes[c1].children[0]
+      expect(r.nodes.get(c1)!.color, `一级分支 @${layout}`).toBe('b4')
+      expect(r.nodes.get(grand)!.color, `子孙继承 @${layout}`).toBe('b4')
+      // 未钉色的兄弟仍按位置轮转
+      expect(r.nodes.get(c2)!.color, `兄弟轮转 @${layout}`).toBe('b1')
+      // 钉色一级边也用该色（取边的 color 字段）
+      const rootEdge = r.edges.find((e) => e.from === doc.rootId && e.to === c1)
+      expect(rootEdge?.color, `一级边色 @${layout}`).toBe('b4')
+    }
+  })
+
+  it('M11：timeline 节点显式 color 透出，未钉色为空串', () => {
+    const doc = buildFixture({
+      children: [{ text: 'c1' }, { text: 'c2' }],
+    }, 'timeline')
+    const [c1, c2] = doc.nodes[doc.rootId].children
+    doc.nodes[c1].color = 'b2'
+    const r = computeLayout(doc)
+    expect(r.nodes.get(c1)!.color).toBe('b2')
+    expect(r.nodes.get(c2)!.color).toBe('')
+  })
+
   it('空树不崩溃，返回兜底边界', () => {
     const r = computeLayout(simpleFixture())
     expect(r.bounds.w).toBeGreaterThan(0)

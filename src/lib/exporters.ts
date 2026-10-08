@@ -1,11 +1,13 @@
-import type { DocData } from '../types'
+import type { BoundaryBox, DocData, Relation, Summary } from '../types'
+import { flushSync } from 'react-dom'
 import { computeLayout } from './layout'
 import { getTheme } from './theme'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { ganttHolder, worldHolder } from '../store/refs'
-import { parseMarkdown, sanitizeFileName, toGanttCSV, toMarkdown } from './openFormats'
+import { parseMarkdown, parseOPML, sanitizeFileName, toGanttCSV, toMarkdown, toOPML } from './openFormats'
 import { sanitizeHtml } from './sanitizeHtml'
+import { jpegToPdf } from './pdf'
 import { getBlob } from '../store/db'
 import { getCachedBlobURL } from './blobUrl'
 
@@ -61,8 +63,11 @@ async function embedBlobImages(html: string, doc: DocData): Promise<string> {
   return out
 }
 
-export async function exportJSON(doc: DocData) {
-  // M7-P3：把 blob 内嵌为 _blobs map，导出文件自包含可跨设备恢复
+/**
+ * 构建自包含导出载荷：文档 + _blobs（M7-P3：≤2MB 的图片/附件内嵌 dataURL，
+ * 使 JSON/.msz 文件可跨设备完整恢复）。JSON 导出与 .msz 单文件模式共用此函数。
+ */
+export async function buildExportPayload(doc: DocData): Promise<string> {
   const _blobs: Record<string, { dataURL: string; type: string; name?: string }> = {}
   for (const blobId of collectBlobIds(doc)) {
     const blob = await getBlob(blobId)
@@ -81,17 +86,33 @@ export async function exportJSON(doc: DocData) {
     }
     _blobs[blobId] = { dataURL, type: blob.type, ...(name ? { name } : {}) }
   }
-  const payload = { ...doc, _blobs }
-  download(
-    `${sanitizeFileName('猫思之-' + doc.title)}.json`,
-    new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
-  )
-  // JSON 是唯一无损格式，导出成功即视为一次完整备份（修审核 R-1）
+  return JSON.stringify({ ...doc, _blobs }, null, 2)
+}
+
+/** 记录一次完整备份时间（JSON/.msz 均为无损格式，导出/保存成功即视为备份，修审核 R-1） */
+export function markBackupNow() {
   try {
     localStorage.setItem(LAST_BACKUP_KEY, String(Date.now()))
   } catch {
     /* localStorage 不可用时静默，备份本身已落盘 */
   }
+}
+
+export async function exportJSON(doc: DocData) {
+  const payload = await buildExportPayload(doc)
+  download(
+    `${sanitizeFileName('猫思之-' + doc.title)}.json`,
+    new Blob([payload], { type: 'application/json' }),
+  )
+  markBackupNow()
+}
+
+/** M10：导出 OPML 2.0 大纲交换文件（结构格式，不含任务/富内容） */
+export function exportOPML(doc: DocData) {
+  download(
+    `${sanitizeFileName('猫思之-' + doc.title)}.opml`,
+    new Blob([toOPML(doc)], { type: 'text/x-opml;charset=utf-8' }),
+  )
 }
 
 interface ExportInput {
@@ -144,6 +165,12 @@ export function exportSVG(input: ExportInput) {
 export async function exportPNG(input: ExportInput) {
   const { svg, w, h } = buildSVG(input)
   await rasterize(svg, w, h, input.doc.title)
+}
+
+/** M10：思维导图 PDF 导出：构建 SVG → JPEG 栅格化 → 自研 PDF 生成器 */
+export async function exportPDF(input: ExportInput) {
+  const { svg, w, h } = buildSVG(input)
+  await rasterizeToPdf(svg, w, h, input.doc.title)
 }
 
 /** 导入防御：节点树最大深度（防恶意/损坏文件深层嵌套打爆递归布局栈） */
@@ -287,13 +314,74 @@ export function validateDoc(d: unknown): DocData {
     }
   }
 
-  return { ...(o as unknown as DocData), version: 2 }
+  // M9：关系表达可选字段校验（relations/summaries/boundaryBoxes）
+  let relations: Relation[] | undefined
+  let summaries: Summary[] | undefined
+  let boundaryBoxes: BoundaryBox[] | undefined
+  if (o.relations !== undefined) {
+    if (!Array.isArray(o.relations)) throw new Error('relations 必须是数组')
+    const rels: Relation[] = []
+    for (const r of o.relations) {
+      if (!r || typeof r !== 'object') throw new Error('relations 项必须是对象')
+      const rk = r as Record<string, unknown>
+      if (typeof rk.id !== 'string' || typeof rk.from !== 'string' || typeof rk.to !== 'string') {
+        throw new Error('relation 项缺少 id/from/to 字符串')
+      }
+      if (!nodeMap[rk.from]) throw new Error(`relation.from 指向不存在的节点 ${rk.from}`)
+      if (!nodeMap[rk.to]) throw new Error(`relation.to 指向不存在的节点 ${rk.to}`)
+      if (rk.label !== undefined && typeof rk.label !== 'string') throw new Error('relation.label 必须是字符串')
+      if (rk.color !== undefined && typeof rk.color !== 'string') throw new Error('relation.color 必须是字符串')
+      rels.push(rk as unknown as Relation)
+    }
+    relations = rels
+  }
+  if (o.summaries !== undefined) {
+    if (!Array.isArray(o.summaries)) throw new Error('summaries 必须是数组')
+    const sums: Summary[] = []
+    for (const sm of o.summaries) {
+      if (!sm || typeof sm !== 'object') throw new Error('summaries 项必须是对象')
+      const sk = sm as Record<string, unknown>
+      if (typeof sk.id !== 'string') throw new Error('summary 项缺少 id 字符串')
+      if (!Array.isArray(sk.members) || !sk.members.every((m) => typeof m === 'string')) {
+        throw new Error('summary.members 必须是字符串数组')
+      }
+      for (const m of sk.members as string[]) {
+        if (!nodeMap[m]) throw new Error(`summary.member 指向不存在的节点 ${m}`)
+      }
+      if (sk.label !== undefined && typeof sk.label !== 'string') throw new Error('summary.label 必须是字符串')
+      if (sk.color !== undefined && typeof sk.color !== 'string') throw new Error('summary.color 必须是字符串')
+      sums.push(sk as unknown as Summary)
+    }
+    summaries = sums
+  }
+  if (o.boundaryBoxes !== undefined) {
+    if (!Array.isArray(o.boundaryBoxes)) throw new Error('boundaryBoxes 必须是数组')
+    const boxes: BoundaryBox[] = []
+    for (const b of o.boundaryBoxes) {
+      if (!b || typeof b !== 'object') throw new Error('boundaryBoxes 项必须是对象')
+      const bk = b as Record<string, unknown>
+      if (typeof bk.id !== 'string') throw new Error('boundaryBox 项缺少 id 字符串')
+      if (!Array.isArray(bk.members) || !bk.members.every((m) => typeof m === 'string')) {
+        throw new Error('boundaryBox.members 必须是字符串数组')
+      }
+      for (const m of bk.members as string[]) {
+        if (!nodeMap[m]) throw new Error(`boundaryBox.member 指向不存在的节点 ${m}`)
+      }
+      if (bk.label !== undefined && typeof bk.label !== 'string') throw new Error('boundaryBox.label 必须是字符串')
+      if (bk.color !== undefined && typeof bk.color !== 'string') throw new Error('boundaryBox.color 必须是字符串')
+      boxes.push(bk as unknown as BoundaryBox)
+    }
+    boundaryBoxes = boxes
+  }
+
+  return { ...(o as unknown as DocData), version: 3, relations, summaries, boundaryBoxes }
 }
 
 /**
  * 解析导入内容：按扩展名分流（修审核 S-3）。
- * - .json：JSON.parse + 结构校验；剥离 _blobs 单独返回（M7-P3 由调用方落盘）
+ * - .json / .msz：JSON.parse + 结构校验；剥离 _blobs 单独返回（M7-P3 由调用方落盘）
  * - .md / .markdown：parseMarkdown（容错兜底）
+ * - .opml：parseOPML（XML 大纲交换格式，M10）
  * - filename 缺省（如剪贴板粘贴 JSON）：按 JSON 解析
  */
 export function parseImported(
@@ -304,6 +392,10 @@ export function parseImported(
   if (ext === 'md' || ext === 'markdown') {
     const fallback = filename ? filename.replace(/\.[^.]+$/, '') : '未命名导图'
     return { doc: parseMarkdown(text, fallback), blobs: {} }
+  }
+  if (ext === 'opml' || ext === 'xml') {
+    const fallback = filename ? filename.replace(/\.[^.]+$/, '') : '未命名导图'
+    return { doc: parseOPML(text, fallback), blobs: {} }
   }
   // 默认按 JSON 处理
   let d: unknown
@@ -321,7 +413,7 @@ export function parseImported(
 }
 
 /** 从当前应用状态导出（先取消选择以获得干净画面） */
-export async function exportCurrent(kind: 'json' | 'svg' | 'png' | 'md' | 'csv') {
+export async function exportCurrent(kind: 'json' | 'svg' | 'png' | 'pdf' | 'md' | 'csv' | 'opml') {
   const doc = useDoc.getState().doc
   if (kind === 'json') {
     await exportJSON(doc)
@@ -334,6 +426,10 @@ export async function exportCurrent(kind: 'json' | 'svg' | 'png' | 'md' | 'csv')
     )
     return
   }
+  if (kind === 'opml') {
+    exportOPML(doc)
+    return
+  }
   if (kind === 'csv') {
     download(
       `${sanitizeFileName('猫思之-' + doc.title + '-甘特')}.csv`,
@@ -341,46 +437,96 @@ export async function exportCurrent(kind: 'json' | 'svg' | 'png' | 'md' | 'csv')
     )
     return
   }
-  useDoc.getState().clearSel()
-  // 修 F-4：等两帧确保 React 完成重渲染并绘制（比固定 80ms 在慢机/大文档上可靠）
+  // M8-P2-2（R1 红线）：flushSync 强制 React 同步提交全量渲染（concurrent 模式下
+  // 大文档渲染可能被切片，两帧 rAF 不足以保证全部节点入 DOM）。
+  // clearSel + exportFullRender 一起 flush，再等两帧确保浏览器绘制完毕。
+  flushSync(() => {
+    useDoc.getState().clearSel()
+    useSettings.setState({ exportFullRender: true })
+  })
   await new Promise<void>((r) =>
     requestAnimationFrame(() => requestAnimationFrame(() => r())),
   )
-  if (useSettings.getState().view === 'gantt' && ganttHolder.current) {
-    const svg = new XMLSerializer().serializeToString(ganttHolder.current)
-    if (kind === 'svg') {
-      download(
-        `${sanitizeFileName('猫思之-' + doc.title + '-甘特')}.svg`,
-        new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }),
-      )
-    } else {
-      await rasterize(svg, ganttHolder.current.width.baseVal.value, ganttHolder.current.height.baseVal.value, doc.title + '-甘特')
+  try {
+    if (useSettings.getState().view === 'gantt' && ganttHolder.current) {
+      const svg = new XMLSerializer().serializeToString(ganttHolder.current)
+      const gw = ganttHolder.current.width.baseVal.value
+      const gh = ganttHolder.current.height.baseVal.value
+      const gname = doc.title + '-甘特'
+      if (kind === 'svg') {
+        download(
+          `${sanitizeFileName('猫思之-' + gname)}.svg`,
+          new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }),
+        )
+      } else if (kind === 'pdf') {
+        await rasterizeToPdf(svg, gw, gh, gname)
+      } else {
+        await rasterize(svg, gw, gh, gname)
+      }
+      return
     }
-    return
+    const worldHTML = worldHolder.current?.innerHTML ?? ''
+    // M7-P3：把 blob: URL 替换为 dataURL，使 SVG/PNG/PDF 自包含可移植
+    const embedded = await embedBlobImages(worldHTML, doc)
+    const input: ExportInput = { worldHTML: embedded, doc, dark: useSettings.getState().dark }
+    if (kind === 'svg') exportSVG(input)
+    else if (kind === 'pdf') await exportPDF(input)
+    else await exportPNG(input)
+  } finally {
+    useSettings.setState({ exportFullRender: false })
   }
-  const worldHTML = worldHolder.current?.innerHTML ?? ''
-  // M7-P3：把 blob: URL 替换为 dataURL，使 SVG/PNG 自包含可移植
-  const embedded = await embedBlobImages(worldHTML, doc)
-  const input: ExportInput = { worldHTML: embedded, doc, dark: useSettings.getState().dark }
-  if (kind === 'svg') exportSVG(input)
-  else await exportPNG(input)
 }
 
-async function rasterize(svg: string, w: number, h: number, name: string) {
+/** Canvas 单边像素上限（Chrome/Safari 硬限制约 16384，留余量取 14000） */
+const MAX_CANVAS_DIM = 14000
+
+/** 把 SVG 载入 Image 并绘制到 2x 离屏 canvas；超大图自动降档避免越过浏览器尺寸上限 */
+async function svgToCanvas(svg: string, w: number, h: number): Promise<{ canvas: HTMLCanvasElement; scale: number }> {
   const img = new Image()
   await new Promise<void>((res, rej) => {
     img.onload = () => res()
     img.onerror = () => rej(new Error('SVG 渲染失败'))
     img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
   })
-  const scale = 2
+  let scale = 2
+  if (Math.round(w * scale) > MAX_CANVAS_DIM || Math.round(h * scale) > MAX_CANVAS_DIM) {
+    scale = Math.min(1, MAX_CANVAS_DIM / Math.max(w, h))
+  }
   const canvas = document.createElement('canvas')
-  canvas.width = Math.round(w * scale)
-  canvas.height = Math.round(h * scale)
+  canvas.width = Math.max(1, Math.round(w * scale))
+  canvas.height = Math.max(1, Math.round(h * scale))
   const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas 2D 上下文不可用，无法导出 PNG')
+  if (!ctx) throw new Error('Canvas 2D 上下文不可用，无法栅格化')
   ctx.scale(scale, scale)
   ctx.drawImage(img, 0, 0, w, h)
+  return { canvas, scale }
+}
+
+async function rasterize(svg: string, w: number, h: number, name: string) {
+  const { canvas } = await svgToCanvas(svg, w, h)
   const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/png'))
   if (blob) download(`${sanitizeFileName('猫思之-' + name)}.png`, blob)
+}
+
+/**
+ * M10：SVG → JPEG → 单页 PDF。JPEG 质量 0.92（奶油纸底+手绘线条，0.92 视觉无可见损失）；
+ * 页面尺寸用 CSS 像素当 PDF point（72dpi 常规屏幕观感），图像用 2x 像素保证打印清晰。
+ */
+async function rasterizeToPdf(svg: string, w: number, h: number, name: string) {
+  const { canvas, scale } = await svgToCanvas(svg, w, h)
+  const jpegBlob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/jpeg', 0.92))
+  if (!jpegBlob) throw new Error('JPEG 编码失败，无法导出 PDF')
+  const buf = new Uint8Array(await jpegBlob.arrayBuffer())
+  const pdf = jpegToPdf({
+    jpeg: buf,
+    pxW: canvas.width,
+    pxH: canvas.height,
+    ptW: Math.round(canvas.width / scale),
+    ptH: Math.round(canvas.height / scale),
+  })
+  download(
+    `${sanitizeFileName('猫思之-' + name)}.pdf`,
+    // pdf 为精确分配的 Uint8Array，其 buffer 即完整 ArrayBuffer（TS 5.5 BlobPart 类型收窄）
+    new Blob([pdf.buffer as ArrayBuffer], { type: 'application/pdf' }),
+  )
 }

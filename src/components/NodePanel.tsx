@@ -1,11 +1,118 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDoc } from '../store/docStore'
+import { useSettings } from '../store/settings'
 import { ICONS } from '../data/icons'
 import type { Attachment, NodeImage, NodeLink, NodeTag } from '../types'
 import { sanitizeHtml } from '../lib/sanitizeHtml'
 import { getBlob, saveBlob } from '../store/db'
 import { getBlobURL, revokeBlobURL } from '../lib/blobUrl'
+import { getTheme } from '../lib/theme'
 import NoteEditor from './NoteEditor'
+
+/** 分支色键：'' 跟随布局自动配色；'b0'..'b5' 钉住主题分支色 */
+type BranchKey = '' | 'b0' | 'b1' | 'b2' | 'b3' | 'b4' | 'b5'
+
+/** 6 个分支色键（与 theme.branch 数组、layout 轮转一致） */
+const BRANCH_KEYS: BranchKey[] = ['b0', 'b1', 'b2', 'b3', 'b4', 'b5']
+
+/** M11：分支色取色器（单选节点 + 多选批量共用） */
+function BranchColorPicker({ value, onPick }: { value: BranchKey; onPick: (c: BranchKey) => void }) {
+  const dark = useSettings((s) => s.dark)
+  const colors = getTheme(dark).branch
+  return (
+    <div className="msz-np-color-picker" role="group" aria-label="分支颜色">
+      {BRANCH_KEYS.map((k, i) => (
+        <button
+          key={k}
+          className={'msz-np-color-btn branch' + (value === k ? ' active' : '')}
+          style={{ background: colors[i] }}
+          onClick={() => onPick(k)}
+          title={`分支色 ${i + 1}`}
+          aria-label={`分支色 ${i + 1}`}
+          aria-pressed={value === k}
+        />
+      ))}
+      <button
+        className={'msz-np-color-btn branch default' + (value === '' ? ' active' : '')}
+        onClick={() => onPick('')}
+        title="默认（跟随布局自动配色）"
+        aria-label="默认颜色"
+        aria-pressed={value === ''}
+      >
+        默
+      </button>
+    </div>
+  )
+}
+
+/**
+ * M11（PRD 4.4 P1）：多选（≥2）时的批量操作面板。
+ * 仅暴露 PRD 要求的两件事：批量改分支色、批量加标签；一次快照、可整体撤销。
+ */
+function BatchPanel({ ids }: { ids: string[] }) {
+  const batchColor = useDoc((s) => s.batchColor)
+  const batchAddTag = useDoc((s) => s.batchAddTag)
+  const [tagInput, setTagInput] = useState('')
+  const [tagColor, setTagColor] = useState('blue')
+
+  const addTag = () => {
+    const t = tagInput.trim()
+    if (!t) return
+    batchAddTag(ids, t, tagColor)
+    setTagInput('')
+  }
+
+  return (
+    <div className="msz-node-panel">
+      <div className="msz-np-header">
+        <span>批量操作</span>
+        <span className="msz-np-node-id">已选 {ids.length} 个节点</span>
+      </div>
+
+      <div className="msz-np-section">
+        <div className="msz-np-label">分支颜色</div>
+        <div className="msz-np-batch-hint">统一覆盖所选节点的分支配色（含其下游连线）</div>
+        <BranchColorPicker value="" onPick={(c) => batchColor(ids, c)} />
+      </div>
+
+      <div className="msz-np-section">
+        <div className="msz-np-label">批量加标签</div>
+        <div className="msz-np-batch-hint">同文本标签在同一节点上不会重复添加</div>
+        <div className="msz-np-tag-add">
+          <input
+            type="text"
+            value={tagInput}
+            onChange={(e) => setTagInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                addTag()
+              }
+            }}
+            placeholder="标签文本…"
+            maxLength={20}
+            className="msz-np-input"
+          />
+          <div className="msz-np-color-picker">
+            {TAG_COLOR_OPTIONS.map((c) => (
+              <button
+                key={c.key}
+                className={`msz-np-color-btn ${tagColor === c.key ? 'active' : ''}`}
+                style={{ background: c.hex }}
+                onClick={() => setTagColor(c.key)}
+                title={c.label}
+                aria-label={`标签颜色：${c.label}`}
+              />
+            ))}
+          </div>
+          <button className="msz-np-add-btn" onClick={addTag} disabled={!tagInput.trim()}>
+            全部添加
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 /** 标签色板选项 */
 const TAG_COLOR_OPTIONS = [
@@ -64,6 +171,9 @@ export default function NodePanel() {
     list.sort((a, b) => a.text.localeCompare(b.text, 'zh'))
     return list.slice(0, 200)
   }, [doc.nodes, selId])
+
+  // M11：多选（≥2）走批量操作面板
+  if (selection.length >= 2) return <BatchPanel ids={selection} />
 
   if (!selId || !node) return null
 
@@ -220,6 +330,16 @@ export default function NodePanel() {
         <span className="msz-np-node-id" title={selId}>
           {node.text?.slice(0, 12) || '未命名'}
         </span>
+      </div>
+
+      {/* M11 分支颜色（单选节点） */}
+      <div className="msz-np-section">
+        <div className="msz-np-label">分支颜色</div>
+        <BranchColorPicker
+          // 历史/导入数据可能带其他 color 串，非法值一律视为「默认」
+          value={BRANCH_KEYS.includes(node.color as BranchKey) ? (node.color as BranchKey) : ''}
+          onPick={(c) => setNode(selId, { color: c || undefined })}
+        />
       </div>
 
       {/* 标签区 */}

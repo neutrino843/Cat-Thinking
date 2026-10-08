@@ -1,4 +1,4 @@
-import type { DocData, DocDataV1, MindNodeData, NodeLink } from '../types'
+import type { DocData, DocDataV1, DocDataV2, MindNodeData, NodeLink } from '../types'
 
 /**
  * 生成短 id：优先 crypto.randomUUID，降级 Math.random。
@@ -12,25 +12,12 @@ function genId(): string {
 }
 
 /**
- * v1 → v2 文档迁移（纯函数）。
- *
- * 规则：
- * - version 1 → 2（已为 2 则原样返回浅拷贝）
- * - href 存在 → links[0] = { id, kind:'url', url: href }；旧 href 不清空（兼容旧读取方）
- * - note 存在且 richNote 未设 → richNote = { html: 转义后的 note }
- * - 其余 v2 新字段（tags/icons/images/attachments）不补——undefined 即「无」
- *
- * 设计决策：不改盘直到首次编辑保存（懒迁移），调用方在 loadDoc 后调用此函数。
+ * v1/v2 → v2 节点级迁移（纯函数）：href→links[0]、note→richNote。
+ * 与 version 无关，仅做字段补全。
  */
-export function migrateDoc(doc: DocDataV1 | DocData): DocData {
-  // 已是 v2：浅拷贝返回（调用方不应依赖返回值与输入相同引用）
-  if (doc.version === 2) {
-    return { ...doc }
-  }
-
-  // v1 → v2
-  const nodes: Record<string, MindNodeData> = {}
-  for (const [id, n] of Object.entries(doc.nodes)) {
+function migrateNodes(nodes: Record<string, MindNodeData>): Record<string, MindNodeData> {
+  const out: Record<string, MindNodeData> = {}
+  for (const [id, n] of Object.entries(nodes)) {
     const next: MindNodeData = { ...n }
 
     // href → links[0]（仅当 links 尚未存在且有 href）
@@ -52,20 +39,41 @@ export function migrateDoc(doc: DocDataV1 | DocData): DocData {
       next.richNote = { html: escaped }
     }
 
-    nodes[id] = next
+    out[id] = next
   }
+  return out
+}
+
+/**
+ * 文档迁移（纯函数）。
+ *
+ * 规则：
+ * - version 1 → 3：先做 v1→v2 节点字段补全（href→links、note→richNote），再设 version=3
+ * - version 2 → 3：节点不变，仅设 version=3（M9 新增 relations/summaries/boundaryBoxes 不补，undefined 即「无」）
+ * - version 3 → 原样浅拷贝返回
+ *
+ * 设计决策：不改盘直到首次编辑保存（懒迁移），调用方在 loadDoc 后调用此函数。
+ */
+export function migrateDoc(doc: DocDataV1 | DocDataV2 | DocData): DocData {
+  // 已是 v3：浅拷贝返回（调用方不应依赖返回值与输入相同引用）
+  if (doc.version === 3) {
+    return { ...doc }
+  }
+
+  // v1 → 节点字段补全；v2 → 节点不变
+  const nodes = doc.version === 1 ? migrateNodes(doc.nodes) : doc.nodes
 
   return {
     ...doc,
-    version: 2,
+    version: 3,
     nodes,
   }
 }
 
 /**
- * 判断文档是否已是 v2。
+ * 判断文档是否已是 v3。
  * 用于 loadDoc 后决定是否需要迁移。
  */
-export function isV2(doc: { version: number }): boolean {
-  return doc.version === 2
+export function isV3(doc: { version: number }): boolean {
+  return doc.version === 3
 }

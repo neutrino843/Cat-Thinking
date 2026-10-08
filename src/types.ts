@@ -8,6 +8,12 @@ export interface TaskData {
   progress?: number
   milestone?: boolean
   deps?: { from: string; type: 'FS' | 'SS' | 'FF' | 'SF' }[]
+  /** M16：优先级 0=无 1=低 2=中 3=高 */
+  priority?: 0 | 1 | 2 | 3
+  /** M16：负责人（自由文本） */
+  owner?: string
+  /** M16：任务备注（纯文本，区别于节点富备注） */
+  note?: string
 }
 
 /** 节点标签（M7-P1）：文本 + 颜色色板 key */
@@ -53,6 +59,41 @@ export interface RichNote {
   html: string
 }
 
+/* ---- M9 关系表达（PRD 4.1.5 P1）---- */
+
+/** 关系线：任意两节点间的箭头连接，可带文字标签；独立于 parent/children 层级 */
+export interface Relation {
+  id: string
+  /** 起点节点 id */
+  from: string
+  /** 终点节点 id */
+  to: string
+  /** 关系线文字标签 */
+  label?: string
+  /** 颜色 key：'' 用主题 ink；'b0'..'b5' 用分支色 */
+  color?: string
+}
+
+/** 概要：花括号框选一组兄弟节点 */
+export interface Summary {
+  id: string
+  /** 被框选的兄弟节点 id 列表（应同 parent，运行时宽松校验） */
+  members: string[]
+  /** 概要文字标签 */
+  label?: string
+  color?: string
+}
+
+/** 边界框：矩形框选任意节点 */
+export interface BoundaryBox {
+  id: string
+  /** 被框选的节点 id 列表（可任意） */
+  members: string[]
+  /** 标题文字 */
+  label?: string
+  color?: string
+}
+
 export interface MindNodeData {
   id: string
   parent: string | null
@@ -82,6 +123,24 @@ export interface MindNodeData {
   richNote?: RichNote
 }
 
+/** M9：关系表达（PRD 4.1.5 P1）——v3 新增可选字段，旧文档懒迁移后 undefined 即「无」 */
+interface DocDataV3 {
+  version: 3
+  id: string
+  title: string
+  rootId: string
+  layout: LayoutKind
+  nodes: Record<string, MindNodeData>
+  /** 关系线列表（可选） */
+  relations?: Relation[]
+  /** 概要列表（可选） */
+  summaries?: Summary[]
+  /** 边界框列表（可选） */
+  boundaryBoxes?: BoundaryBox[]
+  createdAt: number
+  updatedAt: number
+}
+
 interface DocDataV2 {
   version: 2
   id: string
@@ -105,11 +164,11 @@ interface DocDataV1 {
   updatedAt: number
 }
 
-/** 当前文档类型（v2）；v1 数据经 migrateDoc 升级后也符合此类型 */
-export type DocData = DocDataV2
+/** 当前文档类型（v3）；v1/v2 数据经 migrateDoc 升级后也符合此类型 */
+export type DocData = DocDataV3
 
-/** 旧 v1 类型仅用于 migrate 函数签名 */
-export type { DocDataV1 }
+/** 旧 v1/v2 类型仅用于 migrate 函数签名 */
+export type { DocDataV1, DocDataV2 }
 
 export interface DocMeta {
   id: string

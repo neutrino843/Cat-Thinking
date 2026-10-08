@@ -73,6 +73,29 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
     }
   }
 
+  // M9：关系表达 overlay 字段 id 重映射（from/to/members）
+  const remappedRelations = src.relations?.length
+    ? src.relations
+        .filter((r) => idMap.has(r.from) && idMap.has(r.to))
+        .map((r) => ({ ...r, from: idMap.get(r.from)!, to: idMap.get(r.to)! }))
+    : undefined
+  const remappedSummaries = src.summaries?.length
+    ? src.summaries
+        .map((s) => ({
+          ...s,
+          members: s.members.filter((m) => idMap.has(m)).map((m) => idMap.get(m)!),
+        }))
+        .filter((s) => s.members.length > 0)
+    : undefined
+  const remappedBoxes = src.boundaryBoxes?.length
+    ? src.boundaryBoxes
+        .map((b) => ({
+          ...b,
+          members: b.members.filter((m) => idMap.has(m)).map((m) => idMap.get(m)!),
+        }))
+        .filter((b) => b.members.length > 0)
+    : undefined
+
   const now = Date.now()
   return {
     doc: {
@@ -80,6 +103,9 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
       id: uid(),
       rootId: idMap.get(src.rootId) ?? src.rootId,
       nodes,
+      relations: remappedRelations,
+      summaries: remappedSummaries,
+      boundaryBoxes: remappedBoxes,
       createdAt: now,
       updatedAt: now,
     },

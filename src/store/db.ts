@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie'
 import type { DocData, DocMeta } from '../types'
 import { cloneDocBlobs, cloneFromTemplate } from '../lib/templateClone'
 import { migrateDoc } from '../lib/migrate'
+import type { MSZFileHandle } from '../lib/fsaTypes'
 
 /** 文档附件总量上限（64MB）：上传/校验时累加 blobs 表同 docId 总字节，超出拒绝 */
 export const BLOB_QUOTA_BYTES = 64 * 1024 * 1024
@@ -48,7 +49,39 @@ export interface StoredBlob {
   docId: string
   /** 关联节点 id（可选，图片可挂节点） */
   nodeId?: string
+
   blob: Blob
+  createdAt: number
+}
+
+/**
+ * M10：.msz 单文件模式的句柄绑定（docId ↔ 用户磁盘上的 .msz 文件）。
+ * FileSystemFileHandle 是平台可结构化克隆对象，直接持久化进 IndexedDB；
+ * 跨会话重开后通过 queryPermission/requestPermission 恢复读写授权。
+ */
+export interface StoredFileHandle {
+  /** 主键：一篇文档最多绑定一个 .msz 文件 */
+  docId: string
+  handle: MSZFileHandle
+  savedAt: number
+}
+
+/**
+ * M15：文档版本快照（历史版本）。saveDoc 时节流写入，支持浏览与回滚。
+ */
+export interface StoredDocVersion {
+  id: string
+  docId: string
+  title: string
+  createdAt: number
+  payload: string
+}
+
+/** 版本元信息（不含 payload，用于列表展示） */
+export interface DocVersionMeta {
+  id: string
+  docId: string
+  title: string
   createdAt: number
 }
 
@@ -57,6 +90,8 @@ class MSZDB extends Dexie {
   templates!: Table<StoredTemplate, string>
   trash!: Table<StoredTrash, string>
   blobs!: Table<StoredBlob, string>
+  fileHandles!: Table<StoredFileHandle, string>
+  docVersions!: Table<StoredDocVersion, string>
   constructor() {
     super('maosizhi')
     this.version(1).stores({ docs: 'id, updatedAt' })
@@ -74,6 +109,23 @@ class MSZDB extends Dexie {
       templates: 'id, createdAt',
       trash: 'id, deletedAt',
       blobs: 'id, docId, nodeId',
+    })
+    // M10：新增 fileHandles 表（.msz 单文件模式句柄绑定），仅增量加表，老库自动升级
+    this.version(5).stores({
+      docs: 'id, updatedAt',
+      templates: 'id, createdAt',
+      trash: 'id, deletedAt',
+      blobs: 'id, docId, nodeId',
+      fileHandles: 'docId',
+    })
+    // M15：新增 doc_versions 表（文档版本快照，支持历史浏览与回滚）
+    this.version(6).stores({
+      docs: 'id, updatedAt',
+      templates: 'id, createdAt',
+      trash: 'id, deletedAt',
+      blobs: 'id, docId, nodeId',
+      fileHandles: 'docId',
+      docVersions: 'id, docId, createdAt',
     })
   }
 }
@@ -111,12 +163,118 @@ export async function saveDoc(doc: DocData): Promise<void> {
     updatedAt: doc.updatedAt,
     payload: JSON.stringify(doc),
   })
+  // M15：节流写入版本快照（每文档最少间隔 5 分钟，保留最近 50 个版本）
+  await snapshotVersion(doc)
+}
+
+/* ---------------- 版本历史（M15） ---------------- */
+
+/** 版本节流：同文档两次快照最小间隔（毫秒） */
+const VERSION_MIN_INTERVAL_MS = 5 * 60 * 1000
+/** 每文档保留版本数上限 */
+const VERSION_MAX_PER_DOC = 50
+/** 内存记录每文档上次快照时间，避免每次 saveDoc 都查库 */
+const lastVersionAt = new Map<string, number>()
+
+function genVersionId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : 'v_' + Math.random().toString(36).slice(2) + Date.now().toString(36)
+}
+
+/**
+ * saveDoc 时调用：若距该文档上次快照超过 VERSION_MIN_INTERVAL_MS 则写入新快照，
+ * 并在超过 VERSION_MAX_PER_DOC 时清理最旧版本。best-effort，失败仅 warn 不阻断保存。
+ */
+async function snapshotVersion(doc: DocData): Promise<void> {
+  try {
+    const now = Date.now()
+    const last = lastVersionAt.get(doc.id) ?? 0
+    if (now - last < VERSION_MIN_INTERVAL_MS) return
+    lastVersionAt.set(doc.id, now)
+    await db.docVersions.put({
+      id: genVersionId(),
+      docId: doc.id,
+      title: doc.title,
+      createdAt: now,
+      payload: JSON.stringify(doc),
+    })
+    // 清理超限的最旧版本
+    const all = await db.docVersions.where('docId').equals(doc.id).sortBy('createdAt')
+    if (all.length > VERSION_MAX_PER_DOC) {
+      const overflow = all.slice(0, all.length - VERSION_MAX_PER_DOC)
+      await db.docVersions.bulkDelete(overflow.map((v) => v.id))
+    }
+  } catch (e) {
+    console.warn('[猫思之] 版本快照写入失败', e)
+  }
+}
+
+/** 测试钩子：清空版本节流记忆，便于单测/E2E 立即产生快照 */
+export function __resetVersionThrottle(): void {
+  lastVersionAt.clear()
+}
+
+/** 列出某文档的版本元信息（按时间倒序，不含 payload） */
+export async function listVersions(docId: string): Promise<DocVersionMeta[]> {
+  const all = await db.docVersions.where('docId').equals(docId).sortBy('createdAt')
+  return all
+    .reverse()
+    .map((v) => ({ id: v.id, docId: v.docId, title: v.title, createdAt: v.createdAt }))
+}
+
+/** 读取单个版本快照（迁移到当前模型版本后返回） */
+export async function loadVersion(versionId: string): Promise<DocData | null> {
+  const v = await db.docVersions.get(versionId)
+  if (!v) return null
+  try {
+    const raw = JSON.parse(v.payload) as DocData
+    return migrateDoc(raw)
+  } catch (e) {
+    console.error('[猫思之] 版本快照解析失败', e)
+    return null
+  }
+}
+
+/**
+ * 用指定版本快照覆盖当前文档（回滚）。将快照内容写入 docs 表并更新 updatedAt，
+ * 同时刷新该文档的内存节流标记以便后续保存立即产生新版本。
+ */
+export async function restoreVersion(versionId: string): Promise<DocData | null> {
+  const v = await db.docVersions.get(versionId)
+  if (!v) return null
+  try {
+    const raw = JSON.parse(v.payload) as DocData
+    const migrated = migrateDoc(raw)
+    const now = Date.now()
+    const restored: DocData = { ...migrated, updatedAt: now }
+    await db.docs.put({
+      id: restored.id,
+      title: restored.title,
+      createdAt: restored.createdAt,
+      updatedAt: now,
+      payload: JSON.stringify(restored),
+    })
+    lastVersionAt.set(restored.id, now)
+    return restored
+  } catch (e) {
+    console.error('[猫思之] 版本回滚失败', e)
+    return null
+  }
+}
+
+/** 删除单个版本快照 */
+export async function deleteVersion(versionId: string): Promise<void> {
+  await db.docVersions.delete(versionId)
 }
 
 export async function deleteDoc(id: string): Promise<void> {
-  await db.transaction('rw', db.docs, db.blobs, async () => {
+  await db.transaction('rw', db.docs, db.blobs, db.docVersions, async () => {
     await db.docs.delete(id)
     await deleteBlobsByDoc(id)
+    // M15：级联删除该文档的全部版本快照
+    const vers = await db.docVersions.where('docId').equals(id).primaryKeys()
+    await db.docVersions.bulkDelete(vers)
   })
 }
 
@@ -239,31 +397,39 @@ export async function restoreDoc(id: string): Promise<string | null> {
 
 /** 永久删除单条 */
 export async function purgeDoc(id: string): Promise<void> {
-  await db.transaction('rw', db.trash, db.blobs, async () => {
+  await db.transaction('rw', db.trash, db.blobs, db.docVersions, async () => {
     await deleteBlobsByDoc(id)
     await db.trash.delete(id)
+    const vers = await db.docVersions.where('docId').equals(id).primaryKeys()
+    await db.docVersions.bulkDelete(vers)
   })
 }
 
 /** 清空回收站 */
 export async function emptyTrash(): Promise<void> {
-  await db.transaction('rw', db.trash, db.blobs, async () => {
+  await db.transaction('rw', db.trash, db.blobs, db.docVersions, async () => {
     const all = await db.trash.toArray()
-    for (const t of all) await deleteBlobsByDoc(t.id)
+    for (const t of all) {
+      await deleteBlobsByDoc(t.id)
+      const vers = await db.docVersions.where('docId').equals(t.id).primaryKeys()
+      await db.docVersions.bulkDelete(vers)
+    }
     await db.trash.clear()
   })
 }
 
 /** 启动清扫：删除 deletedAt 超过 retentionDays 的条目（fire-and-forget 调用）。
  * 修审计 M-1：旧实现只删 trash 条目不删关联 blob，导致超期文档的二进制数据永久泄漏；
- * 现在事务内同步清理 blobs。 */
+ * 现在事务内同步清理 blobs。M15：同步清理版本快照。 */
 export async function sweepTrash(retentionDays = 30): Promise<void> {
   const cutoff = Date.now() - retentionDays * DAY_MS
-  await db.transaction('rw', db.trash, db.blobs, async () => {
+  await db.transaction('rw', db.trash, db.blobs, db.docVersions, async () => {
     const stale = await db.trash.where('deletedAt').below(cutoff).toArray()
     for (const t of stale) {
       await deleteBlobsByDoc(t.id)
       await db.trash.delete(t.id)
+      const vers = await db.docVersions.where('docId').equals(t.id).primaryKeys()
+      await db.docVersions.bulkDelete(vers)
     }
   })
 }
@@ -307,6 +473,30 @@ export async function deleteTemplate(id: string): Promise<void> {
     await deleteBlobsByDoc(id)
     await db.templates.delete(id)
   })
+}
+
+/* ---------------- .msz 单文件模式句柄绑定（M10） ---------------- */
+
+/** 持久化文档 → .msz 文件句柄的绑定（覆盖保存同一主键） */
+export async function bindFileHandle(docId: string, handle: MSZFileHandle): Promise<void> {
+  await db.fileHandles.put({ docId, handle, savedAt: Date.now() })
+}
+
+/** 读取文档绑定的 .msz 句柄；未绑定返回 undefined */
+export async function getFileHandle(docId: string): Promise<MSZFileHandle | undefined> {
+  const row = await db.fileHandles.get(docId)
+  return row?.handle
+}
+
+/** 更新绑定的最近保存时间（Ctrl+S 覆写成功后） */
+export async function touchFileHandle(docId: string): Promise<void> {
+  const row = await db.fileHandles.get(docId)
+  if (row) await db.fileHandles.put({ ...row, savedAt: Date.now() })
+}
+
+/** 删除文档的 .msz 句柄绑定（不影响磁盘文件本身） */
+export async function unbindFileHandle(docId: string): Promise<void> {
+  await db.fileHandles.delete(docId)
 }
 
 export const LAST_KEY = 'msz.lastDoc'

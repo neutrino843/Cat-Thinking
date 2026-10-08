@@ -14,6 +14,9 @@ import { LAST_KEY, listDocs, loadDoc, saveDoc, sweepTrash } from './store/db'
 import { schedulePersist } from './store/persist'
 import { buildDoc, findTpl } from './data/templates'
 import { buildSlides } from './lib/presentation'
+import { quickSaveCurrent } from './lib/fileHandle'
+import { restoreTabIds } from './lib/tabs'
+import Tabs from './components/Tabs'
 
 /** 初始化单飞锁（模块级）：StrictMode 双 effect / 未来任何双挂载时 init 只执行一次 */
 let initPromise: Promise<void> | null = null
@@ -43,11 +46,21 @@ export default function App() {
           metas = await listDocs()
         }
         const lastId = localStorage.getItem(LAST_KEY)
+        // M11：优先恢复标签条（localStorage msz.openTabs，已剔除库中不存在的 id）
+        const tabIds = await restoreTabIds().catch((): string[] => [])
+        if (tabIds.length) {
+          const activeId = lastId && tabIds.includes(lastId) ? lastId : tabIds[0]
+          const doc = (await loadDoc(activeId).catch(() => null)) ?? (await loadDoc(tabIds[0]).catch(() => null))
+          if (doc) {
+            useDoc.getState().openDoc(doc, { tabs: tabIds })
+            return
+          }
+        }
         const doc =
           (lastId ? await loadDoc(lastId) : null) ??
           (metas[0] ? await loadDoc(metas[0].id) : null) ??
           buildDoc(findTpl('welcome'))
-        useDoc.getState().loadDoc(doc)
+        useDoc.getState().openDoc(doc, { tabs: [doc.id] })
       })()
     }
     let cancelled = false
@@ -159,6 +172,21 @@ export default function App() {
         st.setPalette(!st.paletteOpen)
         return
       }
+      /* M10：Ctrl/Cmd+S 保存到已绑定的 .msz（未绑定则首次走另存为）；
+         必须在 INPUT 早退之前处理——编辑标题/节点时也要拦截浏览器保存对话框 */
+      if (mod && key === 's') {
+        e.preventDefault()
+        void quickSaveCurrent()
+          .then((r) => {
+            if (r === 'unsupported') {
+              window.alert(
+                '当前浏览器不支持直接保存 .msz 文件（需 Chrome/Edge 100+）。\n可使用「导出 ▸ JSON」备份。',
+              )
+            }
+          })
+          .catch((err) => window.alert('保存 .msz 失败：' + (err as Error).message))
+        return
+      }
       if (mod && key === 'f') {
         e.preventDefault()
         searchRef.current?.focus()
@@ -253,6 +281,7 @@ export default function App() {
   return (
     <div className={'app' + (presenting ? ' presenting' : '')}>
       {!presenting && <Toolbar query={query} setQuery={setQuery} />}
+      {!presenting && <Tabs />}
       {!presenting && <BackupBanner />}
       <div className="main">
         {!presenting && sidebar && <Sidebar />}

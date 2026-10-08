@@ -6,7 +6,7 @@ import type { DocData, MindNodeData } from '../types'
 describe('导入校验 parseImported', () => {
   it('合法 JSON 文档可解析并补齐版本号', () => {
     const { doc: d } = parseImported(JSON.stringify(simpleFixture()))
-    expect(d.version).toBe(2)
+    expect(d.version).toBe(3)
     expect(d.nodes[d.rootId]).toBeDefined()
   })
 
@@ -32,6 +32,31 @@ describe('导入校验 parseImported', () => {
     const { doc: d } = parseImported(`# X\n\n- a\n`, 'x.MARKDOWN')
     expect(d.title).toBe('X')
     expect(d.nodes[d.rootId].children.length).toBe(1)
+  })
+
+  it('.opml 扩展名走 OPML 解析（M10）', () => {
+    const xml =
+      '<?xml version="1.0"?><opml version="2.0"><head><title>OPML导入</title></head>' +
+      '<body><outline text="根"><outline text="子A"/></outline></body></opml>'
+    const { doc: d, blobs } = parseImported(xml, '导图.opml')
+    expect(d.title).toBe('OPML导入')
+    expect(Object.keys(d.nodes).length).toBe(2)
+    const root = d.nodes[d.rootId]
+    expect(root.text).toBe('根')
+    expect(d.nodes[root.children[0]].text).toBe('子A')
+    expect(Object.keys(blobs).length).toBe(0)
+  })
+
+  it('.xml 扩展名同样走 OPML 解析', () => {
+    const xml = '<?xml version="1.0"?><opml><body><outline text="顶层"/></body></opml>'
+    const { doc: d } = parseImported(xml, 'x.XML')
+    expect(d.nodes[d.rootId].text).toBe('顶层')
+  })
+
+  it('.msz 扩展名按 JSON 全量格式解析（单文件模式与 JSON 同构）', () => {
+    const { doc: d } = parseImported(JSON.stringify(simpleFixture()), '猫思之-x.msz')
+    expect(d.version).toBe(3)
+    expect(d.nodes[d.rootId]).toBeDefined()
   })
 
   it('缺省文件名按 JSON 解析（向后兼容旧调用方式）', () => {
@@ -88,7 +113,7 @@ describe('导入校验 parseImported', () => {
       prev = id
     }
     const doc: DocData = {
-      version: 2, id: 'deep', title: 'deep', rootId: 'r', layout: 'logic',
+      version: 3, id: 'deep', title: 'deep', rootId: 'r', layout: 'logic',
       nodes, createdAt: 0, updatedAt: 0,
     }
     expect(() => validateDoc(JSON.parse(JSON.stringify(doc)))).toThrow(/深度/)
@@ -187,7 +212,7 @@ describe('导入校验 parseImported', () => {
     const base = simpleFixture()
     const payload = { ...base, _blobs: { b1: { dataURL: 'data:text/plain;base64,AA==', type: 'text/plain' } } }
     const { doc, blobs } = parseImported(JSON.stringify(payload))
-    expect(doc.version).toBe(2)
+    expect(doc.version).toBe(3)
     expect((doc as unknown as Record<string, unknown>)._blobs).toBeUndefined()
     expect(blobs.b1).toBeDefined()
     expect(blobs.b1.dataURL).toBe('data:text/plain;base64,AA==')

@@ -1,5 +1,6 @@
 import type { DocData, NodeImage } from '../types'
 import { measureText } from './measure'
+import type { BoundaryBox, Relation, Summary } from '../types'
 
 export interface LaidNode {
   id: string
@@ -42,6 +43,64 @@ export interface LayoutResult {
   nodes: Map<string, LaidNode>
   edges: LaidEdge[]
   bounds: Bounds
+  /** M9：关系线几何 */
+  relations: LaidRelation[]
+  /** M9：概要几何 */
+  summaries: LaidSummary[]
+  /** M9：边界框几何 */
+  boxes: LaidBox[]
+}
+
+/* ---- M9 关系表达几何 ---- */
+
+/** 关系线渲染几何：贝塞尔曲线 + 箭头 + 标签位置 */
+export interface LaidRelation {
+  id: string
+  from: string
+  to: string
+  label?: string
+  color: string
+  /** [x0,y0,c1x,c1y,c2x,c2y,x1,y1] 三次贝塞尔起点→终点 */
+  points: number[]
+  /** 箭头终点（=贝塞尔终点） */
+  ax: number
+  ay: number
+  /** 箭头方向角（弧度），由终点切线计算 */
+  angle: number
+  /** 标签位置（中点） */
+  lx: number
+  ly: number
+}
+
+/** 概要渲染几何：花括号位置 */
+export interface LaidSummary {
+  id: string
+  label?: string
+  color: string
+  /** 括号 x 坐标（在成员 bbox 外侧） */
+  x: number
+  /** 括号纵向范围 */
+  y1: number
+  y2: number
+  /** 1=右侧 -1=左侧 */
+  side: 1 | -1
+  /** 标签位置 */
+  lx: number
+  ly: number
+}
+
+/** 边界框渲染几何：矩形 + 标签 */
+export interface LaidBox {
+  id: string
+  label?: string
+  color: string
+  x: number
+  y: number
+  w: number
+  h: number
+  /** 标签位置 */
+  lx: number
+  ly: number
 }
 
 const GX = 52
@@ -177,7 +236,8 @@ function placeLogicOrTree(
       color: level === 0 ? color : '',
       level: level + 1,
     })
-    placeLogicOrTree(doc, k, kx, ky, side, level + 1, color, out, edges)
+    // M11：子节点可钉住自定义分支色（批量/单选改色），否则继承分支色
+    placeLogicOrTree(doc, k, kx, ky, side, level + 1, doc.nodes[k.id]?.color || color, out, edges)
     cy += k.subH + GY
   }
 }
@@ -198,7 +258,8 @@ function layoutLogic(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, edges
   for (const k of kids) {
     const ky = cy + k.subH / 2 - k.h / 2
     const kx = rootWt.w + GX
-    const color = colorOf.get(k.id) ?? ''
+    // M11：节点显式 color 优先于位置轮转色
+    const color = doc.nodes[k.id]?.color || colorOf.get(k.id) || ''
     const ax = rootWt.w
     const ay = rootWt.h / 2
     const bx = kx
@@ -252,16 +313,18 @@ function layoutTree(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, edges:
   for (const k of right) {
     const ky = cy + k.subH / 2 - k.h / 2
     const kx = rootWt.w + GX
-    rootEdge(k, kx, ky, 1, colorOf.get(k.id) ?? '')
-    placeLogicOrTree(doc, k, kx, ky, 1, 1, colorOf.get(k.id) ?? '', out, edges)
+    const kc = doc.nodes[k.id]?.color || colorOf.get(k.id) || ''
+    rootEdge(k, kx, ky, 1, kc)
+    placeLogicOrTree(doc, k, kx, ky, 1, 1, kc, out, edges)
     cy += k.subH + GY
   }
   let cy2 = cy0 - (lh - GY) / 2
   for (const k of left) {
     const ky = cy2 + k.subH / 2 - k.h / 2
     const kx = -GX - k.w
-    rootEdge(k, kx, ky, -1, colorOf.get(k.id) ?? '')
-    placeLogicOrTree(doc, k, kx, ky, -1, 1, colorOf.get(k.id) ?? '', out, edges)
+    const kc = doc.nodes[k.id]?.color || colorOf.get(k.id) || ''
+    rootEdge(k, kx, ky, -1, kc)
+    placeLogicOrTree(doc, k, kx, ky, -1, 1, kc, out, edges)
     cy2 += k.subH + GY
   }
 }
@@ -298,8 +361,8 @@ function placeOrg(
     const kcx = x + k.subW / 2
     const ky = top + wt.h + GY_TOP
     const by = ky + k.h / 2
-    // 根的子节点分配轮转色 b0..b5；其余继承父色
-    const kColor = level === 0 ? (colorOf.get(k.id) ?? '') : color
+    // M11：显式钉色最优先；否则根子节点用轮转色 b0..b5，更深节点继承父色
+    const kColor = doc.nodes[k.id]?.color || (level === 0 ? (colorOf.get(k.id) ?? '') : color)
     edges.push({
       from: wt.id, to: k.id,
       points: [cx, ay, cx, ay + GY_TOP / 2, kcx, ay + GY_TOP / 2, kcx, by],
@@ -357,7 +420,7 @@ function placeFish(
       points: [curX, parentMidY, midX, parentMidY, midX, childMidY, nx, childMidY],
       color: '', level: level + 1,
     })
-    placeFish(doc, c, nx, by, dir, level + 1, color, out, edges)
+    placeFish(doc, c, nx, by, dir, level + 1, doc.nodes[c.id]?.color || color, out, edges)
     curX = nx + c.w
   }
 }
@@ -380,7 +443,7 @@ function layoutFishbone(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, ed
     const dir: 1 | -1 = i % 2 === 0 ? -1 : 1
     const branchX = rootWt.w + GX + i * FISH_LEVEL1_GAP
     const branchY = SPINE_Y + dir * (rootWt.h / 2 + GY)
-    const color = colorOf.get(k.id) ?? ''
+    const color = doc.nodes[k.id]?.color || colorOf.get(k.id) || ''
     // root 脊线点 → 分支节点（斜线贝塞尔）
     const spineX = rootWt.w + i * FISH_LEVEL1_GAP
     edges.push({
@@ -451,7 +514,7 @@ function layoutTimeline(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, ed
     const y = AXIS_Y + side * (TIMELINE_ROW_H * (stackCount + 1)) - wt.h / 2
     out.set(wt.id, {
       id: wt.id, x, y, w: wt.w, h: wt.h,
-      side, level: 1, color: '', collapsed: !!n?.collapsed,
+      side, level: 1, color: n?.color || '', collapsed: !!n?.collapsed,
       hasChildren: (n?.children.length ?? 0) > 0,
       hidden: wt.hidden, fontSize: wt.fs, imgH: wt.imgH,
     })
@@ -479,7 +542,16 @@ export function computeLayout(doc: DocData): LayoutResult {
   const out = new Map<string, LaidNode>()
   const edges: LaidEdge[] = []
   const rootWt = build(doc, doc.rootId, 0)
-  if (!rootWt) return { nodes: out, edges, bounds: { x: 0, y: 0, w: 100, h: 60 } }
+  if (!rootWt) {
+    return {
+      nodes: out,
+      edges,
+      bounds: { x: 0, y: 0, w: 100, h: 60 },
+      relations: [],
+      summaries: [],
+      boxes: [],
+    }
+  }
 
   switch (doc.layout) {
     case 'tree':
@@ -499,5 +571,130 @@ export function computeLayout(doc: DocData): LayoutResult {
       break
   }
 
-  return { nodes: out, edges, bounds: boundsOf(out) }
+  return {
+    nodes: out,
+    edges,
+    bounds: boundsOf(out),
+    relations: computeRelations(doc.relations, out),
+    summaries: computeSummaries(doc.summaries, out),
+    boxes: computeBoxes(doc.boundaryBoxes, out),
+  }
+}
+
+/* =============== M9 关系表达几何计算（纯函数，单测覆盖） =============== */
+
+/** 计算节点矩形与中心连线的交点（从中心向目标方向延伸，命中最近边） */
+function edgePoint(n: LaidNode, tx: number, ty: number): [number, number] {
+  const cx = n.x + n.w / 2
+  const cy = n.y + n.h / 2
+  const dx = tx - cx
+  const dy = ty - cy
+  if (dx === 0 && dy === 0) return [cx, cy]
+  const hw = n.w / 2
+  const hh = n.h / 2
+  // 用缩放后的方向向量求与矩形边的交点
+  const sx = dx !== 0 ? hw / Math.abs(dx) : Infinity
+  const sy = dy !== 0 ? hh / Math.abs(dy) : Infinity
+  const s = Math.min(sx, sy)
+  return [cx + dx * s, cy + dy * s]
+}
+
+/**
+ * 计算关系线几何：贝塞尔曲线 + 箭头角 + 标签中点。
+ * 跳过 from/to 不在布局结果中的悬挂引用（节点被删后未清理的孤儿关系线）。
+ */
+export function computeRelations(rels: Relation[] | undefined, nodes: Map<string, LaidNode>): LaidRelation[] {
+  if (!rels || !rels.length) return []
+  const out: LaidRelation[] = []
+  for (const r of rels) {
+    const a = nodes.get(r.from)
+    const b = nodes.get(r.to)
+    if (!a || !b || r.from === r.to) continue
+    const [x0, y0] = edgePoint(a, b.x + b.w / 2, b.y + b.h / 2)
+    const [x1, y1] = edgePoint(b, a.x + a.w / 2, a.y + a.h / 2)
+    // 控制点：横向偏移，方向跟随 from→to 的水平分量
+    const dx = x1 - x0
+    const cx = Math.abs(dx) * 0.4
+    const c1x = x0 + (dx >= 0 ? cx : -cx)
+    const c2x = x1 - (dx >= 0 ? cx : -cx)
+    // 箭头方向：终点切线（c2→终点）
+    const angle = Math.atan2(y1 - y0, x1 - x0)
+    const lx = (x0 + x1) / 2
+    const ly = (y0 + y1) / 2 - 8
+    out.push({
+      id: r.id,
+      from: r.from,
+      to: r.to,
+      label: r.label,
+      color: r.color ?? '',
+      points: [x0, y0, c1x, y0, c2x, y1, x1, y1],
+      ax: x1,
+      ay: y1,
+      angle,
+      lx,
+      ly,
+    })
+  }
+  return out
+}
+
+/**
+ * 计算概要几何：花括号位置（成员 bbox 外侧）。
+ * side 由首个成员与其 parent 的相对 x 决定：parent 在左→括号在右，反之在左。
+ */
+export function computeSummaries(sums: Summary[] | undefined, nodes: Map<string, LaidNode>): LaidSummary[] {
+  if (!sums || !sums.length) return []
+  const out: LaidSummary[] = []
+  for (const s of sums) {
+    const members = s.members.map((m) => nodes.get(m)).filter((n): n is LaidNode => !!n)
+    if (!members.length) continue
+    const minY = Math.min(...members.map((n) => n.y))
+    const maxY = Math.max(...members.map((n) => n.y + n.h))
+    const minX = Math.min(...members.map((n) => n.x))
+    const maxX = Math.max(...members.map((n) => n.x + n.w))
+    // 默认放右侧；若成员整体在画布右半则放左侧
+    const side: 1 | -1 = minX + maxX >= 0 ? -1 : 1
+    const x = side === 1 ? maxX + 14 : minX - 14
+    out.push({
+      id: s.id,
+      label: s.label,
+      color: s.color ?? '',
+      x,
+      y1: minY,
+      y2: maxY,
+      side,
+      lx: x,
+      ly: (minY + maxY) / 2,
+    })
+  }
+  return out
+}
+
+/**
+ * 计算边界框几何：成员 bbox + padding 的圆角矩形。
+ */
+export function computeBoxes(boxes: BoundaryBox[] | undefined, nodes: Map<string, LaidNode>): LaidBox[] {
+  if (!boxes || !boxes.length) return []
+  const out: LaidBox[] = []
+  const PAD = 12
+  for (const b of boxes) {
+    const members = b.members.map((m) => nodes.get(m)).filter((n): n is LaidNode => !!n)
+    if (!members.length) continue
+    const minX = Math.min(...members.map((n) => n.x))
+    const minY = Math.min(...members.map((n) => n.y))
+    const maxX = Math.max(...members.map((n) => n.x + n.w))
+    const maxY = Math.max(...members.map((n) => n.y + n.h))
+    out.push({
+      id: b.id,
+      label: b.label,
+      color: b.color ?? '',
+      x: minX - PAD,
+      y: minY - PAD,
+      w: maxX - minX + PAD * 2,
+      h: maxY - minY + PAD * 2,
+      lx: minX - PAD + 8,
+      ly: minY - PAD - 4,
+    })
+  }
+  return out
 }
