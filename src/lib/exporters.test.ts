@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { parseImported, exportSVG, validateDoc } from './exporters'
+import { parseImported, exportSVG, pruneSourceAnchors, validateDoc } from './exporters'
 import { simpleFixture, buildFixture } from '../test/fixture'
 import type { DocData, MindNodeData } from '../types'
 
@@ -216,6 +216,74 @@ describe('导入校验 parseImported', () => {
     expect((doc as unknown as Record<string, unknown>)._blobs).toBeUndefined()
     expect(blobs.b1).toBeDefined()
     expect(blobs.b1.dataURL).toBe('data:text/plain;base64,AA==')
+  })
+
+  it('M17：JSON 来源文档经校验后单独返回，且强制绑定当前导图 id', () => {
+    const base = simpleFixture()
+    const payload = {
+      ...base,
+      _sources: [{
+        version: 1,
+        id: 'source-1',
+        docId: '伪造-id',
+        name: '../课程.md',
+        kind: 'markdown',
+        mime: 'text/markdown',
+        size: 8,
+        lastModified: 100,
+        importedAt: 200,
+        extractor: 'test-v1',
+        text: '# 课程',
+        charCount: 999,
+        anchors: [{ nodeId: base.rootId, start: 0, end: 4, locator: '课程' }],
+      }],
+    }
+    const { doc, sources } = parseImported(JSON.stringify(payload))
+    expect(sources).toHaveLength(1)
+    expect(sources[0].docId).toBe(doc.id)
+    expect(sources[0].name).toBe('课程.md')
+    expect(sources[0].charCount).toBe(4)
+    expect((doc as unknown as Record<string, unknown>)._sources).toBeUndefined()
+  })
+
+  it('M17：拒绝来源锚点指向不存在节点或越过原文范围', () => {
+    const base = simpleFixture()
+    const source = {
+      version: 1, id: 's1', name: 'x.txt', kind: 'text', text: 'abc', anchors: [],
+    }
+    expect(() => parseImported(JSON.stringify({
+      ...base,
+      _sources: [{ ...source, anchors: [{ nodeId: 'ghost', start: 0, end: 1 }] }],
+    }))).toThrow(/不存在的节点/)
+    expect(() => parseImported(JSON.stringify({
+      ...base,
+      _sources: [{ ...source, anchors: [{ nodeId: base.rootId, start: 0, end: 9 }] }],
+    }))).toThrow(/区间非法/)
+  })
+
+  it('M17：导出边界剔除用户已删除节点的悬空来源锚点', () => {
+    const doc = simpleFixture()
+    const liveId = doc.rootId
+    const sources = pruneSourceAnchors(doc, [{
+      version: 1,
+      id: 's1',
+      docId: '旧-id',
+      name: 'x.txt',
+      kind: 'text',
+      mime: 'text/plain',
+      size: 3,
+      lastModified: 1,
+      importedAt: 2,
+      extractor: 'test',
+      text: 'abc',
+      charCount: 3,
+      anchors: [
+        { nodeId: liveId, start: 0, end: 1 },
+        { nodeId: 'deleted-node', start: 1, end: 2 },
+      ],
+    }])
+    expect(sources[0].docId).toBe(doc.id)
+    expect(sources[0].anchors).toEqual([{ nodeId: liveId, start: 0, end: 1 }])
   })
 
   /* ---------- S-2：SVG 导出标记净化 ---------- */

@@ -1,5 +1,5 @@
 import { test, expect } from './helpers'
-import { resetStore, waitForApp, selectNode, clickExportMenu } from './helpers'
+import { resetStore, waitForApp, selectNode } from './helpers'
 
 /**
  * M16 E2E：甘特任务字段增强（优先级/负责人/备注）+ CSV 导出。
@@ -17,7 +17,7 @@ test('甘特：设置优先级/负责人/备注，CSV 导出包含对应字段',
   // 加一个子节点并变为任务
   await selectNode(page, 0)
   await page.keyboard.press('Tab')
-  let ed = page.locator('textarea.node-editor').first()
+  const ed = page.locator('textarea.node-editor').first()
   await ed.fill('任务A')
   await ed.press('Enter')
 

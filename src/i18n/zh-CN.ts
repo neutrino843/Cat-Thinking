@@ -34,6 +34,25 @@ export const zhCN = {
   'sidebar.import': '导入文件',
   'sidebar.empty': '暂无文档',
 
+  // 文档导入（M17）
+  'import.document': '从文档生成',
+  'import.extracting': '正在提取…',
+  'import.map': '导入导图',
+  'import.documentTitle': '从文档生成可编辑导图',
+  'import.documentHint': '先在本地提取文本和结构，确认后创建新导图；原文会与导图分开保存。',
+  'import.ready': '已就绪',
+  'import.mapTitle': '将创建的导图标题',
+  'import.chars': '字符',
+  'import.sections': '章节',
+  'import.paragraphs': '段落',
+  'import.nodes': '草稿节点',
+  'import.preview': '一级结构预览',
+  'import.noPreview': '没有可预览的一级结构',
+  'import.currentSupport': '支持 TXT、Markdown、文本型 PDF 和 DOCX，均在浏览器本地解析；扫描版 PDF 暂不支持 OCR。',
+  'import.create': '创建可编辑导图',
+  'import.saving': '正在创建…',
+  'import.failed': '文档导入失败：',
+
   // 文件
   'file.open': '打开 .msz',
   'file.save': '保存到文件',

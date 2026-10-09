@@ -45,6 +45,8 @@ export function autoAcceptDialog(page: Page) {
  */
 export async function selectNode(page: Page, index = 0) {
   const loc = page.locator('svg g[role=button]').nth(index)
+  await expect(loc).toBeVisible({ timeout: 10_000 })
+  await expect.poll(async () => (await loc.boundingBox()) !== null, { timeout: 10_000 }).toBe(true)
   const box = await loc.boundingBox()
   if (!box) throw new Error(`画布上找不到第 ${index} 个节点`)
   const x = box.x + box.width / 2

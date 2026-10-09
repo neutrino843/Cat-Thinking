@@ -57,8 +57,8 @@ test('OPML 导出-导入往返一致', async ({ page }) => {
   // —— 导入该 .opml ——
   await page.locator('input[type=file][accept*=".opml"]').setInputFiles(savePath)
   await expect(page.locator('input.doc-title')).toHaveValue('OPML往返')
-  await expect(page.locator('svg')).toContainText('分支A')
-  await expect(page.locator('svg')).toContainText('分支B')
+  await expect(page.locator('svg.canvas-svg')).toContainText('分支A')
+  await expect(page.locator('svg.canvas-svg')).toContainText('分支B')
 
   await fs.unlink(savePath).catch(() => {})
 })

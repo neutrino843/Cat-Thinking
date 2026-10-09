@@ -12,6 +12,10 @@ vi.mock('dexie', () => {
       return row.id
     }
 
+    async bulkPut(rows: any[]) {
+      for (const row of rows) await this.put(row)
+    }
+
     async get(id: string) {
       return this.rows.find((r) => r.id === id) ?? undefined
     }
@@ -94,12 +98,17 @@ import {
   __resetVersionThrottle,
   db,
   deleteDoc,
+  listSourcesByDoc,
   listVersions,
   loadVersion,
+  moveToTrash,
+  purgeDoc,
+  restoreDoc,
   restoreVersion,
+  saveDocumentBundle,
   saveDoc,
 } from '../store/db'
-import type { DocData } from '../types'
+import type { DocData, SourceDocument } from '../types'
 
 function makeDoc(id: string, title: string): DocData {
   return {
@@ -118,7 +127,7 @@ describe('M15 版本历史', () => {
   beforeEach(() => {
     __resetVersionThrottle()
     // 清空所有表（FakeTable 的 rows），避免跨用例污染
-    for (const name of ['docs', 'docVersions', 'trash', 'blobs', 'templates', 'fileHandles']) {
+    for (const name of ['docs', 'docVersions', 'trash', 'blobs', 'templates', 'fileHandles', 'sources']) {
       const t = (db as any)[name]
       if (t) t.rows = []
     }
@@ -176,5 +185,54 @@ describe('M15 版本历史', () => {
 
     await deleteDoc('d1')
     expect(await listVersions('d1')).toHaveLength(0)
+  })
+
+  it('M17 bundle 完整替换来源集合，不遗留旧来源', async () => {
+    const doc = makeDoc('d1', '来源文档')
+    const source = (id: string): SourceDocument => ({
+      version: 1,
+      id,
+      docId: doc.id,
+      name: `${id}.txt`,
+      kind: 'text',
+      mime: 'text/plain',
+      size: 3,
+      lastModified: 1,
+      importedAt: 2,
+      extractor: 'test',
+      text: 'abc',
+      charCount: 3,
+      anchors: [{ nodeId: doc.rootId, start: 0, end: 3 }],
+    })
+    await saveDocumentBundle(doc, [source('s1')])
+    await saveDocumentBundle(doc, [source('s2')])
+    expect((await listSourcesByDoc(doc.id)).map((item) => item.id)).toEqual(['s2'])
+  })
+
+  it('M17 来源随软删还原保留，并在永久删除时清理', async () => {
+    const doc = makeDoc('d1', '来源文档')
+    const source: SourceDocument = {
+      version: 1,
+      id: 's1',
+      docId: doc.id,
+      name: 'x.txt',
+      kind: 'text',
+      mime: 'text/plain',
+      size: 3,
+      lastModified: 1,
+      importedAt: 2,
+      extractor: 'test',
+      text: 'abc',
+      charCount: 3,
+      anchors: [{ nodeId: doc.rootId, start: 0, end: 3 }],
+    }
+    await saveDocumentBundle(doc, [source])
+    await moveToTrash(doc.id)
+    expect(await listSourcesByDoc(doc.id)).toHaveLength(1)
+    expect(await restoreDoc(doc.id)).toBe(doc.id)
+    expect(await listSourcesByDoc(doc.id)).toHaveLength(1)
+    await moveToTrash(doc.id)
+    await purgeDoc(doc.id)
+    expect(await listSourcesByDoc(doc.id)).toHaveLength(0)
   })
 })

@@ -94,6 +94,40 @@ export interface BoundaryBox {
   color?: string
 }
 
+/** 节点与来源原文之间的定位关系。字符区间基于规范化后的纯文本。 */
+export interface SourceAnchor {
+  nodeId: string
+  start: number
+  end: number
+  /** 标题路径或段落所属章节，便于后续展示引用来源。 */
+  locator?: string
+  /** PDF 等分页文档使用；文本/Markdown/DOCX 省略。 */
+  page?: number
+}
+
+/** Cat-Thinking 内建解析器支持的来源文档类型。 */
+export type SourceKind = 'text' | 'markdown' | 'pdf' | 'docx'
+
+/**
+ * 独立持久化的来源文档。原文不塞进 DocData，避免每次编辑节点时重复序列化大文本。
+ * 后续摘要、大纲、题目、知识拓展和节点 AI 都以 source.id 为稳定输入边界。
+ */
+export interface SourceDocument {
+  version: 1
+  id: string
+  docId: string
+  name: string
+  kind: SourceKind
+  mime: string
+  size: number
+  lastModified: number
+  importedAt: number
+  extractor: string
+  text: string
+  charCount: number
+  anchors: SourceAnchor[]
+}
+
 export interface MindNodeData {
   id: string
   parent: string | null
