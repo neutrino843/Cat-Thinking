@@ -1,7 +1,7 @@
-import { ANALYSIS_LIMITS } from './constants'
-import type { ArtifactEnvelopeV1, MindMapArtifactV1, OutlineArtifactV1, OutlineNodeV1 } from './artifacts'
-import type { CitationV1 } from './citations'
-import type { SourceManifestV1 } from './sources'
+import { ANALYSIS_LIMITS } from './constants.js'
+import type { ArtifactEnvelopeV1, MindMapArtifactV1, OutlineArtifactV1, OutlineNodeV1 } from './artifacts.js'
+import type { CitationV1 } from './citations.js'
+import type { SourceManifestV1 } from './sources.js'
 
 export interface ContractValidationIssue {
   code: 'source_missing' | 'range_invalid' | 'page_invalid' | 'graph_invalid' | 'limit_exceeded'

@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { ANALYSIS_CONTRACT_VERSION } from './constants'
-import { boundedTextSchema, identifierSchema } from './common'
-import { sourceRangeSchema } from './sources'
+import { ANALYSIS_CONTRACT_VERSION } from './constants.js'
+import { boundedTextSchema, identifierSchema } from './common.js'
+import { sourceRangeSchema } from './sources.js'
 
 export const sourceCitationSchema = z
   .object({

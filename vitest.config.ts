@@ -7,6 +7,7 @@ export default defineConfig({
     include: [
       'src/**/*.test.ts',
       'packages/analysis-contracts/test/**/*.test.ts',
+      'services/analysis-service/test/**/*.test.ts',
       'evals/analysis/**/*.test.ts',
     ],
     coverage: {
@@ -18,8 +19,9 @@ export default defineConfig({
         'src/analysis/**',
         'src/store/docStore.ts',
         'packages/analysis-contracts/src/**',
+        'services/analysis-service/src/**',
       ],
-      exclude: ['src/lib/measure.ts'],
+      exclude: ['src/lib/measure.ts', 'services/analysis-service/src/index.ts'],
     },
   },
 })

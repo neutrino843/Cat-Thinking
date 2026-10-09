@@ -18,6 +18,7 @@ The analysis feature is split between Cat-Thinking and an independently deployab
 - `requestKey` identifies stable user intent: document, ordered source identities/ranges, requested artifacts, options, and the negotiated engine capability version. Provider/model/prompt versions belong to the engine's separate execution/cache key.
 - SSE events are ordered by a run-global `sequence`; `eventId` is used for reconnect and `runRevision` prevents stale workers from overwriting newer state.
 - A run can be partial. One failed artifact must not erase successful siblings.
+- `acceptsRuns` is authoritative. A client must not create a run while it is false and should surface `degradedReasons` instead of treating a reachable service as an operational AI engine.
 
 ## Browser client rules
 
@@ -27,6 +28,14 @@ The analysis feature is split between Cat-Thinking and an independently deployab
 - Connection loss is not a terminal run failure. Reconnect and reconcile the server snapshot before deciding that a run is interrupted.
 - `MockAnalysisEngineClient` is for deterministic unit/E2E replay only and must never appear as a production AI capability.
 
+## Service boundary
+
+- The compiled contracts package is the runtime dependency for both browser and service artifacts; production Node processes do not execute workspace TypeScript source.
+- Production service authentication is gateway-to-service. The trusted same-origin gateway injects `Authorization` and overwrites `X-Cat-Tenant-Id`; provider or service credentials are never shipped to the browser.
+- CORS origins are exact HTTP(S) origins. Wildcards, paths, credentials, and request-provided upstream URLs are rejected.
+- `/health` and `/ready` are unauthenticated probes. Analysis API routes use authentication, origin enforcement, body limits, rate limits, stable error envelopes, and metadata-only logs.
+- AI-1 advertises `acceptsRuns: false` until AI-2 supplies durable job and event persistence. Reaching the capabilities endpoint alone is not proof that model execution is available.
+
 ## Quality commands
 
 ```text
@@ -35,6 +44,9 @@ npm run coverage:check
 npm run verify:fixtures
 npm run lint:ci
 npm run build
+npm run typecheck:service
+npm run test:service
+npm run build:service
 ```
 
 On Windows systems whose PowerShell execution policy blocks `npm.ps1`, use `npm.cmd` for the same commands. Playwright must be allowed to spawn Chromium; a sandbox `spawn EPERM` is an environment failure, not a product assertion failure.

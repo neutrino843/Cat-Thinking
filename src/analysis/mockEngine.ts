@@ -78,6 +78,8 @@ export class MockAnalysisEngineClient implements AnalysisEngineClient {
     return engineCapabilitiesSchema.parse({
       service: 'cat-analysis-engine',
       serviceVersion: 'mock-1',
+      acceptsRuns: true,
+      degradedReasons: [],
       contractVersions: [ANALYSIS_CONTRACT_VERSION],
       qualityProfiles: ['economy', 'standard', 'high-quality'],
       artifactKinds: [...ARTIFACT_KINDS],

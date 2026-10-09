@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { ANALYSIS_LIMITS } from './constants'
+import { ANALYSIS_LIMITS } from './constants.js'
 
 export const identifierSchema = z
   .string()

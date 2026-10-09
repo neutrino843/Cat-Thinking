@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { ANALYSIS_CONTRACT_VERSION, RUN_STAGES } from './constants'
-import { identifierSchema, jsonPrimitiveSchema } from './common'
+import { ANALYSIS_CONTRACT_VERSION, RUN_STAGES } from './constants.js'
+import { identifierSchema, jsonPrimitiveSchema } from './common.js'
 
 export const analysisErrorCodeSchema = z.enum([
   'invalid_request',
@@ -19,6 +19,7 @@ export const analysisErrorCodeSchema = z.enum([
   'provider_timeout',
   'provider_unavailable',
   'provider_rejected',
+  'service_unavailable',
   'cancelled',
   'conflict',
   'internal_error',
@@ -32,6 +33,7 @@ export const analysisErrorCategorySchema = z.enum([
   'rate-limit',
   'budget',
   'provider',
+  'availability',
   'cancellation',
   'conflict',
   'internal',

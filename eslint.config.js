@@ -21,6 +21,7 @@ export default tseslint.config(
       'src/**/*.{ts,tsx}',
       'e2e/**/*.ts',
       'packages/**/*.ts',
+      'services/**/*.ts',
       'evals/**/*.ts',
       'vite.config.ts',
       'vitest.config.ts',
@@ -52,6 +53,12 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',
       'no-console': 'off',
+    },
+  },
+  {
+    files: ['services/**/*.ts'],
+    languageOptions: {
+      globals: { ...globals.node },
     },
   },
   {

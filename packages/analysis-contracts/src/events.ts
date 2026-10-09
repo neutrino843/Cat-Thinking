@@ -1,9 +1,9 @@
 import { z } from 'zod'
-import { ANALYSIS_CONTRACT_VERSION, CANCEL_EFFECTS } from './constants'
-import { identifierSchema, timestampSchema, unitIntervalSchema } from './common'
-import { analysisErrorSchema } from './errors'
-import { artifactEnvelopeSchema, artifactKindSchema } from './artifacts'
-import { coverageSchema, runStageSchema, usageSchema } from './runs'
+import { ANALYSIS_CONTRACT_VERSION, CANCEL_EFFECTS } from './constants.js'
+import { identifierSchema, timestampSchema, unitIntervalSchema } from './common.js'
+import { analysisErrorSchema } from './errors.js'
+import { artifactEnvelopeSchema, artifactKindSchema } from './artifacts.js'
+import { coverageSchema, runStageSchema, usageSchema } from './runs.js'
 
 const eventBase = z.object({
   version: z.literal(ANALYSIS_CONTRACT_VERSION),

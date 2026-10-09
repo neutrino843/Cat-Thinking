@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { ANALYSIS_CONTRACT_VERSION, ANALYSIS_LIMITS, ARTIFACT_KINDS } from './constants'
-import { boundedTextSchema, identifierSchema, timestampSchema, uniqueValues } from './common'
-import { citationSchema } from './citations'
+import { ANALYSIS_CONTRACT_VERSION, ANALYSIS_LIMITS, ARTIFACT_KINDS } from './constants.js'
+import { boundedTextSchema, identifierSchema, timestampSchema, uniqueValues } from './common.js'
+import { citationSchema } from './citations.js'
 
 export const artifactKindSchema = z.enum(ARTIFACT_KINDS)
 

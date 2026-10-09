@@ -6,11 +6,11 @@ import {
   QUALITY_PROFILES,
   RUN_STAGES,
   RUN_STATUSES,
-} from './constants'
-import { identifierSchema, sha256Schema, timestampSchema, unitIntervalSchema, uniqueValues } from './common'
-import { analysisErrorSchema } from './errors'
-import { artifactKindSchema } from './artifacts'
-import { sourceManifestSchema } from './sources'
+} from './constants.js'
+import { identifierSchema, sha256Schema, timestampSchema, unitIntervalSchema, uniqueValues } from './common.js'
+import { analysisErrorSchema } from './errors.js'
+import { artifactKindSchema } from './artifacts.js'
+import { sourceManifestSchema } from './sources.js'
 
 export const qualityProfileSchema = z.enum(QUALITY_PROFILES)
 export const runStatusSchema = z.enum(RUN_STATUSES)

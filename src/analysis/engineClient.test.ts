@@ -17,6 +17,8 @@ import {
 const capabilities = {
   service: 'cat-analysis-engine',
   serviceVersion: '1.0.0',
+  acceptsRuns: true,
+  degradedReasons: [],
   contractVersions: [1],
   qualityProfiles: ['standard'],
   artifactKinds: ['summary', 'outline', 'mindmap', 'quiz', 'knowledge'],

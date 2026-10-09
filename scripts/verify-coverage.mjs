@@ -10,6 +10,7 @@ const thresholds = {
   total: { statements: 78, branches: 69, functions: 84, lines: 82 },
   analysis: { functions: 90, lines: 90, branches: 85 },
   contracts: { functions: 90, lines: 90, branches: 85 },
+  service: { functions: 90, lines: 90, branches: 85 },
 }
 
 const percentage = (covered, total) => total === 0 ? 100 : (covered / total) * 100
@@ -42,6 +43,11 @@ const groups = {
   contracts: combine(
     normalizedEntries
       .filter(([name]) => name.includes('/packages/analysis-contracts/src/'))
+      .map(([, value]) => value),
+  ),
+  service: combine(
+    normalizedEntries
+      .filter(([name]) => name.includes('/services/analysis-service/src/'))
       .map(([, value]) => value),
   ),
 }

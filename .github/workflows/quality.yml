@@ -75,3 +75,37 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libreoffice-writer poppler-utils fonts-noto-cjk
       - run: node scripts/verify-fixtures.mjs
       - run: node scripts/verify-docx-render.mjs
+
+  analysis-service-container:
+    name: Analysis service container smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build pinned non-root image
+        run: docker build --file services/analysis-service/Dockerfile --tag cat-analysis-service:ci .
+      - name: Start and probe container
+        env:
+          ANALYSIS_SERVICE_TOKEN: ci-service-token-with-at-least-thirty-two-bytes
+        run: |
+          container_id=$(docker run --detach --publish 127.0.0.1:8787:8787 \
+            --env ANALYSIS_AUTH_MODE=service-token \
+            --env ANALYSIS_SERVICE_TOKEN="$ANALYSIS_SERVICE_TOKEN" \
+            --env ANALYSIS_CORS_ORIGINS=https://app.example.test \
+            cat-analysis-service:ci)
+          trap 'docker logs "$container_id"; docker stop "$container_id"' EXIT
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:8787/health > /dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 20 ]; then exit 1; fi
+            sleep 1
+          done
+          curl --fail --silent \
+            --header "Authorization: Bearer $ANALYSIS_SERVICE_TOKEN" \
+            --header 'X-Cat-Tenant-Id: ci-tenant' \
+            --header 'Origin: https://app.example.test' \
+            http://127.0.0.1:8787/api/analysis/v1/capabilities \
+            | grep --fixed-strings '"acceptsRuns":false'

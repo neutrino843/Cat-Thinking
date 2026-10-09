@@ -2,6 +2,8 @@
 *.docx binary
 .gitattributes text eol=lf
 .gitignore text eol=lf
+.dockerignore text eol=lf
+Dockerfile text eol=lf
 *.js text eol=lf
 *.mjs text eol=lf
 *.ts text eol=lf

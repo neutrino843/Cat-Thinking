@@ -1,13 +1,16 @@
 import { z } from 'zod'
-import { ANALYSIS_CONTRACT_VERSION, ARTIFACT_KINDS, QUALITY_PROFILES } from './constants'
-import { byteCountSchema, identifierSchema } from './common'
-import { artifactKindSchema } from './artifacts'
-import { analysisRequestSchema, analysisRunSchema } from './runs'
+import { ANALYSIS_CONTRACT_VERSION, ARTIFACT_KINDS, QUALITY_PROFILES } from './constants.js'
+import { byteCountSchema, identifierSchema } from './common.js'
+import { artifactKindSchema } from './artifacts.js'
+import { analysisErrorSchema } from './errors.js'
+import { analysisRequestSchema, analysisRunSchema } from './runs.js'
 
 export const engineCapabilitiesSchema = z
   .object({
     service: z.literal('cat-analysis-engine'),
     serviceVersion: z.string().trim().min(1).max(100),
+    acceptsRuns: z.boolean(),
+    degradedReasons: z.array(identifierSchema).max(20),
     contractVersions: z.array(z.literal(ANALYSIS_CONTRACT_VERSION)).min(1),
     qualityProfiles: z.array(z.enum(QUALITY_PROFILES)).min(1).max(QUALITY_PROFILES.length),
     artifactKinds: z.array(z.enum(ARTIFACT_KINDS)).min(1).max(ARTIFACT_KINDS.length),
@@ -18,6 +21,14 @@ export const engineCapabilitiesSchema = z
     supportsCancellation: z.boolean(),
     supportsExternalKnowledge: z.boolean(),
     retentionSeconds: z.number().int().nonnegative(),
+  })
+  .strict()
+
+export const analysisErrorResponseSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    traceId: identifierSchema,
+    error: analysisErrorSchema,
   })
   .strict()
 
@@ -93,6 +104,7 @@ export const deleteRunContentResultSchema = z
   .strict()
 
 export type EngineCapabilitiesV1 = z.infer<typeof engineCapabilitiesSchema>
+export type AnalysisErrorResponseV1 = z.infer<typeof analysisErrorResponseSchema>
 export type CreateAnalysisRunV1 = z.infer<typeof createAnalysisRunSchema>
 export type RunCreatedV1 = z.infer<typeof runCreatedSchema>
 export type StartRunRequestV1 = z.infer<typeof startRunRequestSchema>

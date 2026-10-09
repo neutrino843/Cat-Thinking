@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { ANALYSIS_CONTRACT_VERSION, ANALYSIS_LIMITS } from './constants'
-import { byteCountSchema, identifierSchema, sha256Schema, uniqueValues } from './common'
+import { ANALYSIS_CONTRACT_VERSION, ANALYSIS_LIMITS } from './constants.js'
+import { byteCountSchema, identifierSchema, sha256Schema, uniqueValues } from './common.js'
 
 export const sourceKindSchema = z.enum(['text', 'markdown', 'pdf', 'docx'])
 

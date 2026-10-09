@@ -1,0 +1,14 @@
+.git
+.github
+.trae
+node_modules
+dist
+coverage
+test-results
+playwright-report
+reports
+*.log
+.env
+.env.*
+packages/*/dist
+services/*/dist

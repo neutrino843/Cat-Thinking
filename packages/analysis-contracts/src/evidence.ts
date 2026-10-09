@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { ANALYSIS_CONTRACT_VERSION } from './constants'
-import { boundedTextSchema, identifierSchema, sha256Schema, uniqueValues } from './common'
-import { sourceCitationSchema } from './citations'
+import { ANALYSIS_CONTRACT_VERSION } from './constants.js'
+import { boundedTextSchema, identifierSchema, sha256Schema, uniqueValues } from './common.js'
+import { sourceCitationSchema } from './citations.js'
 
 export const evidenceClaimKindSchema = z.enum([
   'definition',
