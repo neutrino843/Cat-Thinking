@@ -141,4 +141,8 @@ jobs:
       - name: Run durable store restart and concurrency tests
         env:
           ANALYSIS_TEST_DATABASE_URL: postgresql://postgres:integration-only-password@127.0.0.1:5432/cat_analysis_test
+        run: npm run test:service:postgres
+      - name: Enforce PostgreSQL adapter coverage
+        env:
+          ANALYSIS_TEST_DATABASE_URL: postgresql://postgres:integration-only-password@127.0.0.1:5432/cat_analysis_test
         run: npm run coverage:postgres
