@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "schemaVersion": 1,
+  "id": "artifact-quiz-invalid",
+  "runId": "run-1",
+  "docId": "doc-foundations",
+  "kind": "quiz",
+  "sourceContentHashes": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "createdAt": 1791500000000,
+  "updatedAt": 1791500001000,
+  "payload": {
+    "title": "光合作用测验",
+    "questions": [
+      {
+        "id": "question-1",
+        "type": "multiple-choice",
+        "prompt": "光合作用主要发生在哪里？",
+        "options": ["叶绿体", "线粒体"],
+        "answerIndex": 2,
+        "explanation": "答案索引故意越界。",
+        "difficulty": "easy",
+        "evidenceIds": ["claim-2"],
+        "citations": [
+          {
+            "version": 1,
+            "provenance": "source",
+            "sourceId": "source-photosynthesis",
+            "start": 43,
+            "end": 96,
+            "page": 1
+          }
+        ]
+      }
+    ]
+  }
+}

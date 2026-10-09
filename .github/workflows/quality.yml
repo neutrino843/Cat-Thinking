@@ -1,0 +1,77 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Windows quality gates
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          package-manager-cache: true
+      - run: npm ci --ignore-scripts
+      - run: npm run check:ci
+      - run: npm run audit:all
+      - run: npm run audit:prod
+
+  e2e:
+    name: Ubuntu Chromium E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          package-manager-cache: true
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+      - name: Upload Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-diagnostics
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  document-fixtures:
+    name: LibreOffice document fixture smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install render dependencies
+        run: sudo apt-get update && sudo apt-get install -y libreoffice-writer poppler-utils fonts-noto-cjk
+      - run: node scripts/verify-fixtures.mjs
+      - run: node scripts/verify-docx-render.mjs

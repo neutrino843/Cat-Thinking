@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "schemaVersion": 1,
+  "id": "artifact-summary-1",
+  "runId": "run-1",
+  "docId": "doc-foundations",
+  "kind": "summary",
+  "sourceContentHashes": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "createdAt": 1791500000000,
+  "updatedAt": 1791500001000,
+  "payload": {
+    "overview": {
+      "id": "summary-overview",
+      "text": "光合作用把光能转化为化学能。",
+      "evidenceIds": ["claim-1"],
+      "citations": [
+        {
+          "version": 1,
+          "provenance": "source",
+          "sourceId": "source-photosynthesis",
+          "start": 0,
+          "end": 42,
+          "page": 1,
+          "locator": "第一节"
+        }
+      ]
+    },
+    "keyPoints": [
+      {
+        "id": "summary-point-1",
+        "text": "叶绿体是绿色植物完成光合作用的主要场所。",
+        "evidenceIds": ["claim-2"],
+        "citations": [
+          {
+            "version": 1,
+            "provenance": "source",
+            "sourceId": "source-photosynthesis",
+            "start": 43,
+            "end": 96,
+            "page": 1
+          }
+        ]
+      }
+    ],
+    "confusions": [],
+    "conclusion": {
+      "id": "summary-conclusion",
+      "text": "光反应与碳反应共同完成能量转换和有机物合成。",
+      "evidenceIds": ["claim-3"],
+      "citations": [
+        {
+          "version": 1,
+          "provenance": "source",
+          "sourceId": "source-photosynthesis",
+          "start": 97,
+          "end": 180,
+          "page": 2
+        }
+      ]
+    }
+  }
+}

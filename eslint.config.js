@@ -17,7 +17,15 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['src/**/*.{ts,tsx}', 'e2e/**/*.ts', 'vite.config.ts', 'vitest.config.ts', 'playwright.config.ts'],
+    files: [
+      'src/**/*.{ts,tsx}',
+      'e2e/**/*.ts',
+      'packages/**/*.ts',
+      'evals/**/*.ts',
+      'vite.config.ts',
+      'vitest.config.ts',
+      'playwright.config.ts',
+    ],
     languageOptions: {
       globals: { ...globals.browser },
     },
@@ -39,10 +47,19 @@ export default tseslint.config(
   },
   {
     // 测试与 e2e：断言式非空断言是惯用法，放宽
-    files: ['**/*.test.ts', 'src/test/**', 'e2e/**'],
+    files: ['**/*.test.ts', 'src/test/**', 'e2e/**', 'evals/**'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',
+      'no-console': 'off',
+    },
+  },
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+    rules: {
       'no-console': 'off',
     },
   },
