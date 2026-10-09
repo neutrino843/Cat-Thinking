@@ -181,8 +181,9 @@ test('另存为 .msz → Ctrl+S 覆写 → 打开 .msz 全流程', async ({ page
   await mockCall(page, 'setOpen', names2[0])
   await clickFileMenu(page, /打开/)
   await expect(page.locator('input.doc-title')).toHaveValue('MSZ单文件')
-  await expect(page.locator('svg')).toContainText('子A')
-  await expect(page.locator('svg')).toContainText('子C')
+  const canvas = page.locator('svg.canvas-svg')
+  await expect(canvas).toContainText('子A')
+  await expect(canvas).toContainText('子C')
 })
 
 test('保存选择器取消时静默无操作', async ({ page }) => {

@@ -15,6 +15,7 @@ import {
   putBlob,
   restoreDoc,
   saveDoc,
+  saveDocumentBundle,
   type CustomTemplate,
   type TrashMeta,
 } from '../store/db'
@@ -26,6 +27,9 @@ import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
 import { closeDocTab, createDocTab, emitDocsChanged, openDocById } from '../lib/tabs'
 import VersionHistory from './VersionHistory'
+import DocumentImportDialog from './DocumentImportDialog'
+import { prepareDocumentImport, type DocumentImportDraft } from '../lib/documentImport'
+import { useT } from '../i18n'
 
 type View = 'library' | 'trash'
 
@@ -41,6 +45,7 @@ function fmtMD(ts: number): string {
 }
 
 export default function Sidebar() {
+  const t = useT()
   const [metas, setMetas] = useState<DocMeta[]>([])
   const [trash, setTrash] = useState<TrashMeta[]>([])
   const [customs, setCustoms] = useState<CustomTemplate[]>([])
@@ -50,11 +55,14 @@ export default function Sidebar() {
   const [view, setView] = useState<View>('library')
   /** M15：版本历史模态打开的文档 id，null 表示关闭 */
   const [historyDocId, setHistoryDocId] = useState<string | null>(null)
+  const [documentDraft, setDocumentDraft] = useState<DocumentImportDraft | null>(null)
+  const [documentImporting, setDocumentImporting] = useState(false)
   const activeId = useDoc((s) => s.doc.id)
   const dark = useSettings((s) => s.dark)
   /** M7-P5：悬停预览的模板（{name, doc}），null 表示不显示 */
   const [preview, setPreview] = useState<{ name: string; doc: DocData } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const documentFileRef = useRef<HTMLInputElement>(null)
   const tplFileRef = useRef<HTMLInputElement>(null)
 
   const refresh = async () => setMetas(await listDocs())
@@ -214,8 +222,8 @@ export default function Sidebar() {
 
   const importFile = async (file: File) => {
     try {
-      const { doc: d, blobs } = parseImported(await file.text(), file.name)
-      await saveDoc(d)
+      const { doc: d, blobs, sources } = parseImported(await file.text(), file.name)
+      await saveDocumentBundle(d, sources)
       // M7-P3：把 JSON 中的 _blobs dataURL 还原为 Blob 并写入 IndexedDB
       for (const [blobId, meta] of Object.entries(blobs)) {
         try {
@@ -226,12 +234,36 @@ export default function Sidebar() {
           /* 单个 blob 还原失败不阻断导入 */
         }
       }
+      // 导入备份可能与已打开标签同 id；先摘除旧会话，避免 M11 优先恢复陈旧内存副本。
+      const state = useDoc.getState()
+      if (state.tabs.includes(d.id)) state.closeTab(d.id)
       useDoc.getState().openDoc(d)
       emitDocsChanged()
       refresh()
     } catch (e) {
       alert('导入失败：' + (e as Error).message)
     }
+  }
+
+  const prepareSourceDocument = async (file: File) => {
+    if (documentImporting) return
+    setDocumentImporting(true)
+    try {
+      setDocumentDraft(await prepareDocumentImport(file))
+    } catch (e) {
+      alert(t('import.failed') + (e as Error).message)
+    } finally {
+      setDocumentImporting(false)
+    }
+  }
+
+  const confirmSourceDocument = async () => {
+    if (!documentDraft) return
+    await saveDocumentBundle(documentDraft.doc, [documentDraft.source])
+    useDoc.getState().openDoc(documentDraft.doc)
+    emitDocsChanged()
+    await refresh()
+    setDocumentDraft(null)
   }
 
   /* 回收站操作 */
@@ -441,8 +473,15 @@ export default function Sidebar() {
       <div className="sb-foot">
         {view === 'library' ? (
           <>
+            <button
+              className="tbtn primary document-import-trigger"
+              onClick={() => documentFileRef.current?.click()}
+              disabled={documentImporting}
+            >
+              {documentImporting ? t('import.extracting') : t('import.document')}
+            </button>
             <button className="tbtn" onClick={() => fileRef.current?.click()}>
-              导入文件
+              {t('import.map')}
             </button>
             <button className="tbtn" onClick={() => tplFileRef.current?.click()} title="导入 .msz-tpl 模板文件">
               导入模板
@@ -455,6 +494,18 @@ export default function Sidebar() {
             >
               🗑 回收站{trash.length > 0 ? ` (${trash.length})` : ''}
             </button>
+            <input
+              ref={documentFileRef}
+              type="file"
+              accept=".txt,.text,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              disabled={documentImporting}
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) void prepareSourceDocument(f)
+                e.target.value = ''
+              }}
+            />
             <input
               ref={fileRef}
               type="file"
@@ -498,6 +549,13 @@ export default function Sidebar() {
       {/* M15：版本历史模态 */}
       {historyDocId && (
         <VersionHistory docId={historyDocId} onClose={() => setHistoryDocId(null)} />
+      )}
+      {documentDraft && (
+        <DocumentImportDialog
+          draft={documentDraft}
+          onClose={() => setDocumentDraft(null)}
+          onConfirm={confirmSourceDocument}
+        />
       )}
     </aside>
   )

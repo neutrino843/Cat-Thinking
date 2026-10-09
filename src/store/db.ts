@@ -1,5 +1,5 @@
 import Dexie, { type Table } from 'dexie'
-import type { DocData, DocMeta } from '../types'
+import type { DocData, DocMeta, SourceDocument } from '../types'
 import { cloneDocBlobs, cloneFromTemplate } from '../lib/templateClone'
 import { migrateDoc } from '../lib/migrate'
 import type { MSZFileHandle } from '../lib/fsaTypes'
@@ -92,6 +92,7 @@ class MSZDB extends Dexie {
   blobs!: Table<StoredBlob, string>
   fileHandles!: Table<StoredFileHandle, string>
   docVersions!: Table<StoredDocVersion, string>
+  sources!: Table<SourceDocument, string>
   constructor() {
     super('maosizhi')
     this.version(1).stores({ docs: 'id, updatedAt' })
@@ -126,6 +127,16 @@ class MSZDB extends Dexie {
       blobs: 'id, docId, nodeId',
       fileHandles: 'docId',
       docVersions: 'id, docId, createdAt',
+    })
+    // M17：来源文档与提取文本独立存放，避免编辑导图时重复序列化大段原文。
+    this.version(7).stores({
+      docs: 'id, updatedAt',
+      templates: 'id, createdAt',
+      trash: 'id, deletedAt',
+      blobs: 'id, docId, nodeId',
+      fileHandles: 'docId',
+      docVersions: 'id, docId, createdAt',
+      sources: 'id, docId, importedAt',
     })
   }
 }
@@ -268,10 +279,49 @@ export async function deleteVersion(versionId: string): Promise<void> {
   await db.docVersions.delete(versionId)
 }
 
+/** 原子保存新导图及其来源文档，避免出现只有导图或只有原文的半成功状态。 */
+export async function saveDocumentBundle(doc: DocData, sources: SourceDocument[]): Promise<void> {
+  if (sources.some((source) => source.docId !== doc.id)) {
+    throw new Error('来源文档与导图 ID 不一致')
+  }
+  await db.transaction('rw', db.docs, db.sources, async () => {
+    await db.docs.put({
+      id: doc.id,
+      title: doc.title,
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+      payload: JSON.stringify(doc),
+    })
+    // bundle 表示完整替换：导入同 id 的备份时，先清理旧来源，避免遗留幽灵数据。
+    await db.sources.where('docId').equals(doc.id).delete()
+    if (sources.length) await db.sources.bulkPut(sources)
+  })
+  // 版本历史属于辅助能力；主文档与来源已原子落盘后，再 best-effort 建初始快照。
+  await snapshotVersion(doc)
+}
+
+/** 按导图列出来源；后续多文档分析继续复用这一边界。 */
+export async function listSourcesByDoc(docId: string): Promise<SourceDocument[]> {
+  return await db.sources.where('docId').equals(docId).sortBy('importedAt')
+}
+
+export async function getSource(id: string): Promise<SourceDocument | undefined> {
+  return await db.sources.get(id)
+}
+
+export async function putSource(source: SourceDocument): Promise<void> {
+  await db.sources.put(source)
+}
+
+export async function deleteSourcesByDoc(docId: string): Promise<void> {
+  await db.sources.where('docId').equals(docId).delete()
+}
+
 export async function deleteDoc(id: string): Promise<void> {
-  await db.transaction('rw', db.docs, db.blobs, db.docVersions, async () => {
+  await db.transaction('rw', db.docs, db.blobs, db.docVersions, db.sources, async () => {
     await db.docs.delete(id)
     await deleteBlobsByDoc(id)
+    await deleteSourcesByDoc(id)
     // M15：级联删除该文档的全部版本快照
     const vers = await db.docVersions.where('docId').equals(id).primaryKeys()
     await db.docVersions.bulkDelete(vers)
@@ -397,8 +447,9 @@ export async function restoreDoc(id: string): Promise<string | null> {
 
 /** 永久删除单条 */
 export async function purgeDoc(id: string): Promise<void> {
-  await db.transaction('rw', db.trash, db.blobs, db.docVersions, async () => {
+  await db.transaction('rw', db.trash, db.blobs, db.docVersions, db.sources, async () => {
     await deleteBlobsByDoc(id)
+    await deleteSourcesByDoc(id)
     await db.trash.delete(id)
     const vers = await db.docVersions.where('docId').equals(id).primaryKeys()
     await db.docVersions.bulkDelete(vers)
@@ -407,10 +458,11 @@ export async function purgeDoc(id: string): Promise<void> {
 
 /** 清空回收站 */
 export async function emptyTrash(): Promise<void> {
-  await db.transaction('rw', db.trash, db.blobs, db.docVersions, async () => {
+  await db.transaction('rw', db.trash, db.blobs, db.docVersions, db.sources, async () => {
     const all = await db.trash.toArray()
     for (const t of all) {
       await deleteBlobsByDoc(t.id)
+      await deleteSourcesByDoc(t.id)
       const vers = await db.docVersions.where('docId').equals(t.id).primaryKeys()
       await db.docVersions.bulkDelete(vers)
     }
@@ -423,10 +475,11 @@ export async function emptyTrash(): Promise<void> {
  * 现在事务内同步清理 blobs。M15：同步清理版本快照。 */
 export async function sweepTrash(retentionDays = 30): Promise<void> {
   const cutoff = Date.now() - retentionDays * DAY_MS
-  await db.transaction('rw', db.trash, db.blobs, db.docVersions, async () => {
+  await db.transaction('rw', db.trash, db.blobs, db.docVersions, db.sources, async () => {
     const stale = await db.trash.where('deletedAt').below(cutoff).toArray()
     for (const t of stale) {
       await deleteBlobsByDoc(t.id)
+      await deleteSourcesByDoc(t.id)
       await db.trash.delete(t.id)
       const vers = await db.docVersions.where('docId').equals(t.id).primaryKeys()
       await db.docVersions.bulkDelete(vers)

@@ -34,5 +34,5 @@ test('reload 后文档与标题持久', async ({ page }) => {
 
   // 标题与节点文本应仍在
   await expect(page.locator('input.doc-title')).toHaveValue('崩溃恢复测试-标题')
-  await expect(page.locator('svg')).toContainText('根节点新文本')
+  await expect(page.locator('svg.canvas-svg')).toContainText('根节点新文本')
 })

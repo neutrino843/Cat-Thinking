@@ -1,4 +1,4 @@
-import type { BoundaryBox, DocData, Relation, Summary } from '../types'
+import type { BoundaryBox, DocData, Relation, SourceDocument, Summary } from '../types'
 import { flushSync } from 'react-dom'
 import { computeLayout } from './layout'
 import { getTheme } from './theme'
@@ -8,7 +8,7 @@ import { ganttHolder, worldHolder } from '../store/refs'
 import { parseMarkdown, parseOPML, sanitizeFileName, toGanttCSV, toMarkdown, toOPML } from './openFormats'
 import { sanitizeHtml } from './sanitizeHtml'
 import { jpegToPdf } from './pdf'
-import { getBlob } from '../store/db'
+import { getBlob, listSourcesByDoc } from '../store/db'
 import { getCachedBlobURL } from './blobUrl'
 
 const LAST_BACKUP_KEY = 'msz.lastBackupAt'
@@ -44,6 +44,18 @@ export function collectBlobIds(doc: DocData): string[] {
     if (n.attachments) for (const at of n.attachments) ids.add(at.blobId)
   }
   return [...ids]
+}
+
+/**
+ * 用户可删除由来源生成的节点；来源全文仍需保留，但导出包不能携带悬空 nodeId。
+ * 在交付边界按当前 DocData 清理锚点，避免旧引用让后续严格导入失败。
+ */
+export function pruneSourceAnchors(doc: DocData, sources: SourceDocument[]): SourceDocument[] {
+  return sources.map((source) => ({
+    ...source,
+    docId: doc.id,
+    anchors: source.anchors.filter((anchor) => !!doc.nodes[anchor.nodeId]),
+  }))
 }
 
 /**
@@ -86,7 +98,8 @@ export async function buildExportPayload(doc: DocData): Promise<string> {
     }
     _blobs[blobId] = { dataURL, type: blob.type, ...(name ? { name } : {}) }
   }
-  return JSON.stringify({ ...doc, _blobs }, null, 2)
+  const _sources = pruneSourceAnchors(doc, await listSourcesByDoc(doc.id))
+  return JSON.stringify({ ...doc, _blobs, _sources }, null, 2)
 }
 
 /** 记录一次完整备份时间（JSON/.msz 均为无损格式，导出/保存成功即视为备份，修审核 R-1） */
@@ -387,15 +400,19 @@ export function validateDoc(d: unknown): DocData {
 export function parseImported(
   text: string,
   filename?: string,
-): { doc: DocData; blobs: Record<string, { dataURL: string; type: string; name?: string }> } {
+): {
+  doc: DocData
+  blobs: Record<string, { dataURL: string; type: string; name?: string }>
+  sources: SourceDocument[]
+} {
   const ext = filename ? filename.toLowerCase().replace(/^.*\./, '') : ''
   if (ext === 'md' || ext === 'markdown') {
     const fallback = filename ? filename.replace(/\.[^.]+$/, '') : '未命名导图'
-    return { doc: parseMarkdown(text, fallback), blobs: {} }
+    return { doc: parseMarkdown(text, fallback), blobs: {}, sources: [] }
   }
   if (ext === 'opml' || ext === 'xml') {
     const fallback = filename ? filename.replace(/\.[^.]+$/, '') : '未命名导图'
-    return { doc: parseOPML(text, fallback), blobs: {} }
+    return { doc: parseOPML(text, fallback), blobs: {}, sources: [] }
   }
   // 默认按 JSON 处理
   let d: unknown
@@ -407,9 +424,75 @@ export function parseImported(
   const o = d as Record<string, unknown>
   const blobs = (o._blobs as Record<string, { dataURL: string; type: string; name?: string }>) ?? {}
   const doc = validateDoc(d)
+  const sources = validateImportedSources(o._sources, doc)
   // _blobs 不进入文档本体
   delete (doc as unknown as Record<string, unknown>)._blobs
-  return { doc, blobs }
+  delete (doc as unknown as Record<string, unknown>)._sources
+  return { doc, blobs, sources }
+}
+
+/** JSON 备份中的来源原文属于不可信输入，导入时做严格结构、大小和锚点校验。 */
+function validateImportedSources(raw: unknown, doc: DocData): SourceDocument[] {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw)) throw new Error('_sources 必须是数组')
+  const seen = new Set<string>()
+  return raw.map((item, index) => {
+    if (!item || typeof item !== 'object') throw new Error(`来源 ${index + 1} 不是对象`)
+    const source = item as Record<string, unknown>
+    if (typeof source.id !== 'string' || !source.id || seen.has(source.id)) {
+      throw new Error(`来源 ${index + 1} 的 id 缺失或重复`)
+    }
+    seen.add(source.id)
+    if (typeof source.name !== 'string' || !source.name.trim()) throw new Error(`来源 ${source.id} 缺少名称`)
+    if (!['text', 'markdown', 'pdf', 'docx'].includes(String(source.kind))) {
+      throw new Error(`来源 ${source.id} 的 kind 非法`)
+    }
+    if (typeof source.text !== 'string' || source.text.length > 2_000_000) {
+      throw new Error(`来源 ${source.id} 的文本无效或超过限制`)
+    }
+    const sourceText = source.text
+    if (!Array.isArray(source.anchors)) throw new Error(`来源 ${source.id} 的 anchors 必须是数组`)
+    const anchors = source.anchors.map((anchor, anchorIndex) => {
+      if (!anchor || typeof anchor !== 'object') throw new Error(`来源 ${source.id} 的锚点 ${anchorIndex + 1} 非法`)
+      const value = anchor as Record<string, unknown>
+      if (typeof value.nodeId !== 'string' || !doc.nodes[value.nodeId]) {
+        throw new Error(`来源 ${source.id} 的锚点指向不存在的节点`)
+      }
+      if (
+        typeof value.start !== 'number' ||
+        typeof value.end !== 'number' ||
+        value.start < 0 ||
+        value.end < value.start ||
+        value.end > sourceText.length
+      ) {
+        throw new Error(`来源 ${source.id} 的锚点区间非法`)
+      }
+      return {
+        nodeId: value.nodeId,
+        start: value.start,
+        end: value.end,
+        ...(typeof value.locator === 'string' ? { locator: value.locator } : {}),
+        ...(typeof value.page === 'number' ? { page: value.page } : {}),
+      }
+    })
+    const importedAt = typeof source.importedAt === 'number' ? source.importedAt : Date.now()
+    const lastModified = typeof source.lastModified === 'number' ? source.lastModified : importedAt
+    return {
+      version: 1,
+      id: source.id,
+      docId: doc.id,
+      name: source.name.replace(/^.*[\\/]/, ''),
+      kind: source.kind as SourceDocument['kind'],
+      mime: typeof source.mime === 'string' ? source.mime : 'text/plain',
+      size: typeof source.size === 'number' ? source.size : new Blob([sourceText]).size,
+      lastModified,
+      importedAt,
+      extractor: typeof source.extractor === 'string' ? source.extractor : 'json-import-v1',
+      text: sourceText,
+      charCount: sourceText.length,
+      anchors,
+    }
+  })
 }
 
 /** 从当前应用状态导出（先取消选择以获得干净画面） */
