@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-09T09:00:00Z",
+  "files": {
+    "structured-course.pdf": {
+      "mime": "application/pdf",
+      "description": "Two-page PDF with a real text layer and edge page numbers",
+      "bytes": 2666,
+      "sha256": "bffe11be54f544aaaebfcea49b519f166f0b1c5b817c7060767cac8f7cf8e881"
+    },
+    "scanned-no-text.pdf": {
+      "mime": "application/pdf",
+      "description": "One-page image-only PDF without a text layer",
+      "bytes": 29116,
+      "sha256": "480708e98d3018fb30dd5eac3307fbcdc1da011ceeba03a644f716ae0fecab8e"
+    },
+    "structured-course.docx": {
+      "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "description": "OOXML document with headings, paragraphs, a tab, and a table",
+      "bytes": 37972,
+      "sha256": "bf22dcf8cd945ec2f94467efc0c558e8526e4e43414af09951e5a5f5dba5f659"
+    }
+  }
+}

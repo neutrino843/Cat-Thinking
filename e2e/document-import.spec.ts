@@ -1,44 +1,30 @@
 import { test, expect, resetStore, waitForApp } from './helpers'
-import { strToU8, zipSync } from 'fflate'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-function minimalDocx(): Buffer {
-  const document = `<?xml version="1.0" encoding="UTF-8"?>
-    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
-      <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>DOCX 课程</w:t></w:r></w:p>
-      <w:p><w:r><w:t>这是可编辑的正文节点。</w:t></w:r></w:p>
-    </w:body></w:document>`
-  const styles = `<?xml version="1.0" encoding="UTF-8"?>
-    <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-      <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>
-    </w:styles>`
-  return Buffer.from(zipSync({
-    '[Content_Types].xml': strToU8('<Types/>'),
-    'word/document.xml': strToU8(document),
-    'word/styles.xml': strToU8(styles),
-  }))
+interface ExpectedFixtures {
+  structuredPdf: { file: string; title: string; requiredText: string[]; anchorPages: number[] }
+  scannedPdf: { file: string; errorContains: string }
+  structuredDocx: { file: string; title: string; requiredText: string[] }
 }
 
-function minimalPdf(): Buffer {
-  const stream = 'BT /F1 18 Tf 72 720 Td (PDF Heading) Tj 0 -30 Td (Editable PDF body.) Tj ET'
-  const objects = [
-    '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
-    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
-  ]
-  let pdf = '%PDF-1.4\n'
-  const offsets = [0]
-  objects.forEach((body, index) => {
-    offsets.push(Buffer.byteLength(pdf))
-    pdf += `${index + 1} 0 obj\n${body}\nendobj\n`
-  })
-  const xref = Buffer.byteLength(pdf)
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
-  pdf += offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
-  return Buffer.from(pdf, 'ascii')
+interface FixtureManifest {
+  files: Record<string, { bytes: number; sha256: string }>
 }
+
+const fixtureDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'documents')
+const expected = JSON.parse(readFileSync(path.join(fixtureDir, 'expected.json'), 'utf8')) as ExpectedFixtures
+const manifest = JSON.parse(readFileSync(path.join(fixtureDir, 'manifest.json'), 'utf8')) as FixtureManifest
+
+test('真实文档 fixture 与 manifest 的大小和 SHA-256 一致', () => {
+  for (const [name, metadata] of Object.entries(manifest.files)) {
+    const payload = readFileSync(path.join(fixtureDir, name))
+    expect(payload.byteLength, name).toBe(metadata.bytes)
+    expect(createHash('sha256').update(payload).digest('hex'), name).toBe(metadata.sha256)
+  }
+})
 
 test('TXT 文档预检后生成可编辑导图并持久化来源', async ({ page }) => {
   await resetStore(page)
@@ -58,7 +44,7 @@ test('TXT 文档预检后生成可编辑导图并持久化来源', async ({ page
 
   await expect(dialog).toBeHidden()
   await expect(page.locator('input.doc-title')).toHaveValue('第一章 网络基础')
-  await expect(page.locator('svg')).toContainText('第二章 协议')
+  await expect(page.locator('svg.canvas-svg')).toContainText('第二章 协议')
 
   const payload = await page.evaluate(async () => {
     const request = indexedDB.open('maosizhi')
@@ -81,43 +67,56 @@ test('TXT 文档预检后生成可编辑导图并持久化来源', async ({ page
   await page.reload()
   await waitForApp(page)
   await expect(page.locator('input.doc-title')).toHaveValue('第一章 网络基础')
-  await expect(page.locator('svg')).toContainText('第二章 协议')
+  await expect(page.locator('svg.canvas-svg')).toContainText('第二章 协议')
 })
 
 test('DOCX 在浏览器本地提取标题与正文并生成导图', async ({ page }) => {
   await resetStore(page)
   await waitForApp(page)
 
-  await page.locator('input[type=file][accept*=".docx"]').setInputFiles({
-    name: '课程.docx',
-    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    buffer: minimalDocx(),
-  })
+  await page.locator('input[type=file][accept*=".docx"]').setInputFiles(
+    path.join(fixtureDir, expected.structuredDocx.file),
+  )
 
   const dialog = page.getByRole('dialog', { name: '从文档生成可编辑导图' })
   await expect(dialog).toContainText('DOCX')
-  await expect(dialog).toContainText('DOCX 课程')
+  await expect(dialog).toContainText(expected.structuredDocx.title)
   await dialog.getByRole('button', { name: '创建可编辑导图' }).click()
-  await expect(page.locator('input.doc-title')).toHaveValue('DOCX 课程')
-  await expect(page.locator('svg')).toContainText('这是可编辑的正文节点。')
+  await expect(page.locator('input.doc-title')).toHaveValue(expected.structuredDocx.title)
+  await expect(page.locator('svg.canvas-svg')).toContainText('第一章 来源与引用')
+  await expect(page.locator('svg.canvas-svg')).toContainText('第二章 可编辑导图')
+
+  const sourceText = await page.evaluate(async () => {
+    const request = indexedDB.open('maosizhi')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+    const transaction = database.transaction(['sources'], 'readonly')
+    const getAll = transaction.objectStore('sources').getAll()
+    const sources = await new Promise<any[]>((resolve, reject) => {
+      getAll.onsuccess = () => resolve(getAll.result)
+      getAll.onerror = () => reject(getAll.error)
+    })
+    database.close()
+    return sources[0]?.text ?? ''
+  })
+  for (const value of expected.structuredDocx.requiredText) expect(sourceText).toContain(value)
 })
 
 test('文本型 PDF 在浏览器本地提取并记录页码锚点', async ({ page }) => {
   await resetStore(page)
   await waitForApp(page)
 
-  await page.locator('input[type=file][accept*=".pdf"]').setInputFiles({
-    name: 'lesson.pdf',
-    mimeType: 'application/pdf',
-    buffer: minimalPdf(),
-  })
+  await page.locator('input[type=file][accept*=".pdf"]').setInputFiles(
+    path.join(fixtureDir, expected.structuredPdf.file),
+  )
 
   const dialog = page.getByRole('dialog', { name: '从文档生成可编辑导图' })
   await expect(dialog).toContainText('PDF')
-  await expect(dialog).toContainText('PDF Heading')
+  await expect(dialog).toContainText(expected.structuredPdf.title)
   await dialog.getByRole('button', { name: '创建可编辑导图' }).click()
-  await expect(page.locator('input.doc-title')).toHaveValue('PDF Heading')
-  await expect(page.locator('svg')).toContainText('Editable PDF body.')
+  await expect(page.locator('input.doc-title')).toHaveValue(expected.structuredPdf.title)
 
   const pages = await page.evaluate(async () => {
     const request = indexedDB.open('maosizhi')
@@ -132,7 +131,29 @@ test('文本型 PDF 在浏览器本地提取并记录页码锚点', async ({ pag
       getAll.onerror = () => reject(getAll.error)
     })
     database.close()
-    return sources.flatMap((source) => source.anchors.map((anchor: { page?: number }) => anchor.page))
+    return {
+      text: sources[0]?.text ?? '',
+      pages: sources.flatMap((source) => source.anchors.map((anchor: { page?: number }) => anchor.page)),
+    }
   })
-  expect(pages).toContain(1)
+  for (const value of expected.structuredPdf.requiredText) expect(pages.text).toContain(value)
+  for (const pageNumber of expected.structuredPdf.anchorPages) expect(pages.pages).toContain(pageNumber)
+})
+
+test('扫描型 PDF 无文本层时给出 OCR 提示且不创建草稿', async ({ page }) => {
+  await resetStore(page)
+  await waitForApp(page)
+
+  const alertMessage = new Promise<string>((resolve) => {
+    page.once('dialog', async (dialog) => {
+      resolve(dialog.message())
+      await dialog.accept()
+    })
+  })
+  await page.locator('input[type=file][accept*=".pdf"]').setInputFiles(
+    path.join(fixtureDir, expected.scannedPdf.file),
+  )
+
+  expect(await alertMessage).toContain(expected.scannedPdf.errorContains)
+  await expect(page.getByRole('dialog', { name: '从文档生成可编辑导图' })).toHaveCount(0)
 })

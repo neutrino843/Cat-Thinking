@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "structuredPdf": {
+    "file": "structured-course.pdf",
+    "title": "PDF Import Course",
+    "requiredText": [
+      "The body number 42 must remain in extracted text.",
+      "This sentence must be anchored to page 2."
+    ],
+    "anchorPages": [
+      1,
+      2
+    ]
+  },
+  "scannedPdf": {
+    "file": "scanned-no-text.pdf",
+    "errorContains": "尚未内建 OCR"
+  },
+  "structuredDocx": {
+    "file": "structured-course.docx",
+    "title": "文档解析课程",
+    "requiredText": [
+      "第一章 来源与引用",
+      "把导图节点连接到原文字符区间。",
+      "SourceDocument | 保存规范化原文和提取器版本",
+      "第二章 可编辑导图"
+    ]
+  }
+}
