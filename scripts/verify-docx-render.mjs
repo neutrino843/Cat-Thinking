@@ -18,6 +18,12 @@ const run = (command, args) => {
   return result.stdout
 }
 
+const normalizeRenderedText = (value) => value
+  .normalize('NFC')
+  .replace(/\s*\|\s*/gu, ' ')
+  .replace(/\s+/gu, ' ')
+  .trim()
+
 try {
   run('libreoffice', ['--headless', '--convert-to', 'pdf', '--outdir', outputDirectory, source])
   const output = resolve(outputDirectory, `${basename(source, '.docx')}.pdf`)
@@ -25,9 +31,12 @@ try {
   const pages = Number(info.match(/^Pages:\s+(\d+)$/mu)?.[1] ?? 0)
   if (pages < 1) throw new Error('Converted DOCX has no PDF pages')
 
-  const text = run('pdftotext', [output, '-'])
+  const text = normalizeRenderedText(run('pdftotext', ['-layout', '-enc', 'UTF-8', output, '-']))
   for (const required of expected.structuredDocx.requiredText) {
-    if (!text.includes(required)) throw new Error(`Converted DOCX is missing required text: ${required}`)
+    const normalizedRequired = normalizeRenderedText(required)
+    if (!text.includes(normalizedRequired)) {
+      throw new Error(`Converted DOCX is missing required text: ${normalizedRequired}`)
+    }
   }
   console.log(`LibreOffice DOCX smoke test passed: ${pages} page(s)`)
 } finally {
