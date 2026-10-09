@@ -14,9 +14,9 @@ const key = Buffer.alloc(32, 11)
 const plaintext = 'PostgreSQL 持久加密正文 🌱 '.repeat(8)
 const hash = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex')
 
-const makeRequest = (): AnalysisRequestV1 => analysisRequestSchema.parse({
+const makeRequest = (requestKey = hash('postgres-integration-request')): AnalysisRequestV1 => analysisRequestSchema.parse({
   version: 1,
-  requestKey: hash('postgres-integration-request'),
+  requestKey,
   docId: 'doc-postgres',
   manifest: {
     version: 1,
@@ -55,13 +55,14 @@ const sourcePart = (): UploadSourcePartV1 => ({
 
 const openStores = new Set<PostgresJobStore>()
 const connectStore = async (): Promise<PostgresJobStore> => {
-  const store = await PostgresJobStore.connect({
+  const store = await PostgresJobStore.connectFromConfig({
+    mode: 'postgres',
     connectionString: databaseUrl!,
     ssl: 'disable',
     poolMax: 4,
     connectTimeoutMs: 10_000,
-    cipher: new AesGcmContentCipher(key),
-  })
+    encryptionKey: key.toString('base64'),
+  }, new AesGcmContentCipher(key))
   openStores.add(store)
   return store
 }
@@ -98,16 +99,24 @@ integration('PostgreSQL durable job store', () => {
     })
     const created = await service.createRun('tenant-postgres', makeRequest())
     await service.uploadSource('tenant-postgres', created.run.id, sourcePart())
+    await expect(service.uploadSource('tenant-postgres', created.run.id, sourcePart())).resolves.toMatchObject({
+      complete: true,
+      receivedParts: 1,
+    })
     await service.startRun('tenant-postgres', created.run.id, 1)
     await closeStore(store)
 
     const reopened = await connectStore()
+    expect(await reopened.checkHealth()).toBe(true)
     const recovered = new RunService({ store: reopened, retentionSeconds: 3_600 })
     expect(await recovered.getRun('tenant-postgres', created.run.id)).toMatchObject({ status: 'queued', revision: 2 })
-    expect((await recovered.listEvents('tenant-postgres', created.run.id)).map((event) => event.type)).toEqual([
+    const events = await recovered.listEvents('tenant-postgres', created.run.id)
+    expect(events.map((event) => event.type)).toEqual([
       'run.accepted',
       'stage.started',
     ])
+    expect((await recovered.listEvents('tenant-postgres', created.run.id, events[0]?.eventId))
+      .map((event) => event.type)).toEqual(['stage.started'])
     expect(await reopened.getSourceReceipt('tenant-postgres', created.run.id, 'source-postgres')).toMatchObject({
       complete: true,
       computedHash: hash(plaintext),
@@ -118,6 +127,7 @@ integration('PostgreSQL durable job store', () => {
     )
     expect(encrypted.rows[0]?.ciphertext.includes(Buffer.from(plaintext, 'utf8'))).toBe(false)
     await closeStore(reopened)
+    expect(await reopened.checkHealth()).toBe(false)
   })
 
   it('serializes concurrent idempotent create and revision transitions', async () => {
@@ -159,6 +169,9 @@ integration('PostgreSQL durable job store', () => {
     })
     const run = (await service.createRun('tenant-postgres', makeRequest())).run
     await service.uploadSource('tenant-postgres', run.id, sourcePart())
+    const terminal = (await service.createRun('tenant-postgres', makeRequest('7'.repeat(64)))).run
+    await service.uploadSource('tenant-postgres', terminal.id, sourcePart())
+    await service.cancel('tenant-postgres', terminal.id, 1)
     const first = await store.acquireLease({
       tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker-1', now, durationMs: 100,
     })
@@ -169,10 +182,13 @@ integration('PostgreSQL durable job store', () => {
     expect(takeover).toMatchObject({ attempt: 2, ownerId: 'worker-2' })
 
     now = 2_000
-    expect(await service.cleanupExpired(10)).toEqual({ examined: 1, cleaned: 1, expired: 1 })
+    expect(await service.cleanupExpired(10)).toEqual({ examined: 2, cleaned: 2, expired: 1 })
     expect(await service.getRun('tenant-postgres', run.id)).toMatchObject({ status: 'expired', revision: 2 })
+    expect(await service.getRun('tenant-postgres', terminal.id)).toMatchObject({ status: 'cancelled', revision: 2 })
     expect(await rawPool!.query('SELECT 1 FROM analysis_source_parts WHERE run_id=$1', [run.id]))
       .toMatchObject({ rowCount: 0 })
+    expect(await store.cleanupExpiredRun('tenant-postgres', run.id, now, () => undefined))
+      .toEqual({ outcome: 'already_clean' })
     await closeStore(store)
   })
 
@@ -199,6 +215,8 @@ integration('PostgreSQL durable job store', () => {
       .rejects.toMatchObject({ statusCode: 409 })
     await expect(store.markSourceComplete('tenant-postgres', run.id, 'source-postgres', 'f'.repeat(64)))
       .rejects.toBeInstanceOf(JobStoreConflictError)
+    expect(await store.markSourceComplete('tenant-postgres', run.id, 'missing-source', 'f'.repeat(64)))
+      .toBeUndefined()
 
     const sameOwner = await store.acquireLease({
       tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker-1', now: 10, durationMs: 100,
@@ -206,6 +224,9 @@ integration('PostgreSQL durable job store', () => {
     expect((await store.acquireLease({
       tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker-1', now: 20, durationMs: 100,
     }))?.attempt).toBe(sameOwner?.attempt)
+    expect(await store.acquireLease({
+      tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker-2', now: 25, durationMs: 100,
+    })).toBeUndefined()
     const renewed = await store.renewLease({
       tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker-1', attempt: 1,
     }, 30, 100)
@@ -213,6 +234,9 @@ integration('PostgreSQL durable job store', () => {
     expect(await store.renewLease({
       tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker-1', attempt: 2,
     }, 40, 100)).toBeUndefined()
+    await expect(store.renewLease({
+      tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker-1', attempt: 1,
+    }, 40, 0)).rejects.toThrow(/positive/)
     expect(await store.releaseLease({
       tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker-2', attempt: 1,
     })).toBe(false)
@@ -262,5 +286,20 @@ integration('PostgreSQL durable job store', () => {
     expect(await store.cleanupExpiredRun('tenant-postgres', 'missing-run', 1, () => undefined))
       .toEqual({ outcome: 'missing' })
     await closeStore(store)
+  })
+
+  it('refuses a database schema newer than the service supports and closes failed pools', async () => {
+    await rawPool!.query('INSERT INTO cat_analysis_schema_migrations(version) VALUES (999)')
+    try {
+      await expect(PostgresJobStore.connect({
+        connectionString: databaseUrl!,
+        ssl: 'disable',
+        poolMax: 1,
+        connectTimeoutMs: 10_000,
+        cipher: new AesGcmContentCipher(key),
+      })).rejects.toThrow(/newer than supported/)
+    } finally {
+      await rawPool!.query('DELETE FROM cat_analysis_schema_migrations WHERE version=999')
+    }
   })
 })
