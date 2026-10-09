@@ -233,6 +233,23 @@ describe('analysis event reducer', () => {
     expect(failed.error).toEqual(error)
   })
 
+  it('applies a persisted expiration event as a terminal snapshot', () => {
+    const accepted = applyAnalysisEvent(createRunMirror('run-1'), acceptedEvent()).state
+    const expired = applyAnalysisEvent(accepted, {
+      version: 1,
+      type: 'run.expired',
+      eventId: 'event-expired',
+      runId: 'run-1',
+      runRevision: 2,
+      sequence: 1,
+      createdAt: 1791500000100,
+      reason: 'retention_elapsed',
+    }).state
+
+    expect(expired.status).toBe('expired')
+    expect(expired.revision).toBe(2)
+  })
+
   it('reconciles only a matching non-stale server snapshot', () => {
     const request = analysisRequestSchema.parse(requestFixture)
     const artifactState = { status: 'pending' as const, attempt: 0, updatedAt: 1791500000000 }

@@ -47,7 +47,9 @@ const groups = {
   ),
   service: combine(
     normalizedEntries
-      .filter(([name]) => name.includes('/services/analysis-service/src/'))
+      .filter(([name]) =>
+        name.includes('/services/analysis-service/src/')
+        && !name.includes('/services/analysis-service/src/infrastructure/postgres/'))
       .map(([, value]) => value),
   ),
 }

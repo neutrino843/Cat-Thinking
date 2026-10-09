@@ -7,11 +7,12 @@ import globals from 'globals';
 export default tseslint.config(
   {
     ignores: [
-      'dist/**',
+      '**/dist/**',
       'node_modules/**',
       'playwright-report/**',
       'test-results/**',
       'coverage/**',
+      'coverage-postgres/**',
     ],
   },
   js.configs.recommended,
@@ -25,6 +26,7 @@ export default tseslint.config(
       'evals/**/*.ts',
       'vite.config.ts',
       'vitest.config.ts',
+      'vitest.postgres.config.ts',
       'playwright.config.ts',
     ],
     languageOptions: {

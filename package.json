@@ -26,6 +26,8 @@
     "test": "npm run build:contracts && vitest run",
     "test:contracts": "vitest run packages/analysis-contracts/test evals/analysis",
     "test:service": "npm run build:contracts && vitest run services/analysis-service/test",
+    "test:service:postgres": "npm run build:contracts && vitest run services/analysis-service/test/postgresJobStore.integration.test.ts --reporter=verbose",
+    "coverage:postgres": "npm run build:contracts && vitest run --config vitest.postgres.config.ts --coverage && node scripts/verify-postgres-coverage.mjs",
     "typecheck:contracts": "tsc -p packages/analysis-contracts/tsconfig.json --noEmit",
     "check:contracts": "npm run typecheck:contracts && npm run test:contracts && npm run lint:contracts",
     "test:watch": "vitest",

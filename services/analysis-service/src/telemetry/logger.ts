@@ -10,6 +10,9 @@ const REDACTED_PATHS = [
   'cookie',
   'token',
   'secret',
+  'connectionString',
+  'databaseUrl',
+  'encryptionKey',
 ] as const
 
 export const createLoggerOptions = (

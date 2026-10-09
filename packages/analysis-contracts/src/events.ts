@@ -67,6 +67,10 @@ export const runFailedEventSchema = eventBase
   .extend({ type: z.literal('run.failed'), error: analysisErrorSchema })
   .strict()
 
+export const runExpiredEventSchema = eventBase
+  .extend({ type: z.literal('run.expired'), reason: z.literal('retention_elapsed') })
+  .strict()
+
 export const analysisEventSchema = z.union([
   runAcceptedEventSchema,
   stageStartedEventSchema,
@@ -78,6 +82,7 @@ export const analysisEventSchema = z.union([
   runCompletedEventSchema,
   runCancelledEventSchema,
   runFailedEventSchema,
+  runExpiredEventSchema,
 ])
 
 export type AnalysisEventV1 = z.infer<typeof analysisEventSchema>

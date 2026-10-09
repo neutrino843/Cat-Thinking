@@ -118,6 +118,9 @@ export const applyAnalysisEvent = (
       next.status = 'failed'
       next.error = event.error
       break
+    case 'run.expired':
+      next.status = 'expired'
+      break
   }
 
   return { state: next, accepted: true }

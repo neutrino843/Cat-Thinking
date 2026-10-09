@@ -109,3 +109,36 @@ jobs:
             --header 'Origin: https://app.example.test' \
             http://127.0.0.1:8787/api/analysis/v1/capabilities \
             | grep --fixed-strings '"acceptsRuns":false'
+
+  analysis-service-postgres:
+    name: Analysis service PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+        env:
+          POSTGRES_DB: cat_analysis_test
+          POSTGRES_PASSWORD: integration-only-password
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cat_analysis_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          package-manager-cache: true
+      - run: npm ci --ignore-scripts
+      - name: Run durable store restart and concurrency tests
+        env:
+          ANALYSIS_TEST_DATABASE_URL: postgresql://postgres:integration-only-password@127.0.0.1:5432/cat_analysis_test
+        run: npm run coverage:postgres

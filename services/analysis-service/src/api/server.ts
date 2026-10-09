@@ -10,15 +10,18 @@ import {
   ServiceHttpError,
   createContractError,
   createErrorResponse,
-  serviceUnavailableError,
 } from '../errors.js'
 import { createLoggerOptions } from '../telemetry/logger.js'
 import { createAuthenticationHook } from './auth.js'
 import { createOriginGuard } from './originGuard.js'
+import { registerRunRoutes } from './runRoutes.js'
+import type { RunService } from '../domain/runService.js'
 
 export interface BuildAnalysisServerOptions {
   readonly logger?: false
   readonly now?: () => number
+  readonly runService?: RunService
+  readonly acceptsRuns?: boolean
 }
 
 const invalidRequestError = (messageKey: string): ServiceHttpError => new ServiceHttpError(
@@ -172,21 +175,27 @@ export const buildAnalysisServer = async (
     timestamp: now(),
   }))
 
-  server.get('/ready', { config: { rateLimit: false } }, async () => ({
-    status: 'ready',
-    service: 'cat-analysis-engine',
-    version: config.serviceVersion,
-    timestamp: now(),
-  }))
+  server.get('/ready', { config: { rateLimit: false } }, async (_request, reply) => {
+    const ready = options.runService ? await options.runService.checkHealth() : true
+    return reply.code(ready ? 200 : 503).send({
+      status: ready ? 'ready' : 'not-ready',
+      service: 'cat-analysis-engine',
+      version: config.serviceVersion,
+      timestamp: now(),
+    })
+  })
 
   await server.register(async (api) => {
     api.addHook('onRequest', createOriginGuard(config.corsOrigins))
     api.addHook('onRequest', createAuthenticationHook(config))
 
-    api.get('/capabilities', async () => createEngineCapabilities(config))
-    api.post('/runs', async () => {
-      throw serviceUnavailableError()
-    })
+    const acceptsRuns = options.acceptsRuns ?? false
+    api.get('/capabilities', async () => createEngineCapabilities(config, {
+      jobStoreReady: options.runService !== undefined,
+      providerReady: acceptsRuns,
+      acceptsRuns,
+    }))
+    registerRunRoutes(api, config, { runService: options.runService, acceptsRuns })
   }, { prefix: '/api/analysis/v1' })
 
   server.setNotFoundHandler(async () => {

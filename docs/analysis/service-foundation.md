@@ -1,6 +1,6 @@
 # Analysis service foundation
 
-AI-1 adds `services/analysis-service` as an independently compiled Node service. It intentionally does not call a model provider or accept analysis runs yet. Its job is to make the security and deployment boundary executable before durable jobs and provider code exist.
+AI-1 added `services/analysis-service` as an independently compiled Node service. AI-2 builds durable jobs on that boundary while preserving its fail-closed defaults. See `docs/analysis/durable-jobs.md` for the current persistence and recovery design.
 
 ## Topology
 
@@ -17,9 +17,9 @@ The browser only calls `/api/analysis/v1`. The gateway authenticates the user, r
 | `GET /health` | none | process liveness |
 | `GET /ready` | none | HTTP boundary readiness |
 | `GET /api/analysis/v1/capabilities` | production service token | version and degraded capability negotiation |
-| `POST /api/analysis/v1/runs` | production service token | returns stable 503 until AI-2 durable jobs exist |
+| `POST /api/analysis/v1/runs` | production service token | remains 503 until the AI-3 provider/evidence path is ready |
 
-Capabilities report `acceptsRuns: false`, `supportsSse: false`, and the reasons `provider.not-configured` and `job-store.not-configured`. This is deliberate fail-closed behavior.
+With no JobStore, capabilities report `acceptsRuns: false`, `supportsSse: false`, and the reasons `provider.not-configured` and `job-store.not-configured`. With PostgreSQL ready, SSE/cancellation are true and only the provider reason remains. This is deliberate fail-closed behavior.
 
 ## Production configuration
 
@@ -54,15 +54,15 @@ The contracts workspace builds first and publishes JavaScript plus declarations 
 
 The Dockerfile uses an exact official Node 24.13.1 multi-platform digest, separate build and production-dependency stages, ignored build context, no lifecycle scripts, a non-root runtime user, no source maps, and an internal health check. CI builds and starts the image, probes health, authenticates capabilities, and checks that run acceptance remains disabled.
 
-## AI-2 handoff
+## AI-2/AI-3 handoff
 
-AI-2 may enable run creation only after it provides:
+AI-2 provides:
 
-- a JobStore interface and durable implementation contract;
+- a JobStore interface plus PostgreSQL durable implementation;
 - request-key uniqueness and revision-checked state transitions;
 - source receipt persistence and content TTL deletion;
-- persisted SSE sequence/event IDs and reconnect replay;
-- cancellation and artifact retry state machines;
+- persisted SSE sequence/event IDs, reconnect replay and `run.expired`;
+- cancellation, artifact retry and encrypted content cleanup state machines;
 - lease expiry, process restart, stale worker, duplicate request, and late-result tests.
 
-When those gates pass, capabilities can change to `acceptsRuns: true`, `supportsSse: true`, and `supportsCancellation: true`. Provider integration remains a later phase and must not be used to bypass the durable lifecycle.
+With the store ready, `supportsSse` and `supportsCancellation` may be true. `acceptsRuns` stays false until AI-3 supplies the controlled evidence/provider execution path; provider integration must not bypass the durable lifecycle.

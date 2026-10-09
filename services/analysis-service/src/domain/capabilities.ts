@@ -10,19 +10,27 @@ import type { AnalysisServiceConfig } from '../config.js'
 
 export const createEngineCapabilities = (
   config: AnalysisServiceConfig,
+  availability: Readonly<{
+    jobStoreReady?: boolean
+    providerReady?: boolean
+    acceptsRuns?: boolean
+  }> = {},
 ): EngineCapabilitiesV1 => engineCapabilitiesSchema.parse({
   service: 'cat-analysis-engine',
   serviceVersion: config.serviceVersion,
-  acceptsRuns: false,
-  degradedReasons: ['provider.not-configured', 'job-store.not-configured'],
+  acceptsRuns: availability.acceptsRuns ?? false,
+  degradedReasons: [
+    ...(availability.providerReady ? [] : ['provider.not-configured']),
+    ...(availability.jobStoreReady ? [] : ['job-store.not-configured']),
+  ],
   contractVersions: [ANALYSIS_CONTRACT_VERSION],
   qualityProfiles: [...QUALITY_PROFILES],
   artifactKinds: [...ARTIFACT_KINDS],
   maxSourcesPerRun: ANALYSIS_LIMITS.maxSourcesPerRun,
   maxSourceCharacters: ANALYSIS_LIMITS.maxSourceCharacters,
   maxUploadPartBytes: ANALYSIS_LIMITS.maxUploadPartBytes,
-  supportsSse: false,
-  supportsCancellation: false,
+  supportsSse: availability.jobStoreReady ?? false,
+  supportsCancellation: availability.jobStoreReady ?? false,
   supportsExternalKnowledge: false,
   retentionSeconds: config.retentionSeconds,
 })

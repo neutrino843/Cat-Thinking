@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildAnalysisServer, classifyHttpError } from '../src/api/server.js'
 import { loadAnalysisServiceConfig } from '../src/config.js'
+import { createEngineCapabilities } from '../src/domain/capabilities.js'
+import { RunService } from '../src/domain/runService.js'
 import { ServiceHttpError, createContractError } from '../src/errors.js'
+import { InMemoryJobStore } from '../src/infrastructure/memoryJobStore.js'
 import { createLoggerOptions, loggerRedactionPaths } from '../src/telemetry/logger.js'
 
 const token = 'service-token-that-is-longer-than-thirty-two-bytes'
@@ -38,6 +41,20 @@ afterEach(async () => {
 })
 
 describe('analysis service security boundary', () => {
+  it('reports each unavailable capability independently', () => {
+    const config = loadAnalysisServiceConfig({ NODE_ENV: 'test' })
+    expect(createEngineCapabilities(config)).toMatchObject({
+      acceptsRuns: false,
+      supportsSse: false,
+      degradedReasons: ['provider.not-configured', 'job-store.not-configured'],
+    })
+    expect(createEngineCapabilities(config, { providerReady: true })).toMatchObject({
+      acceptsRuns: false,
+      supportsSse: false,
+      degradedReasons: ['job-store.not-configured'],
+    })
+  })
+
   it('serves unauthenticated liveness and readiness without consuming rate limit', async () => {
     const server = await createServer({ ANALYSIS_RATE_LIMIT_MAX: '1' })
 
@@ -218,6 +235,22 @@ describe('analysis service security boundary', () => {
     const response = await server.inject({ method: 'GET', url: '/health' })
 
     expect(response.headers['strict-transport-security']).toContain('max-age=31536000')
+  })
+
+  it('reports not-ready when a configured durable store loses health', async () => {
+    class UnhealthyStore extends InMemoryJobStore {
+      override checkHealth(): Promise<boolean> {
+        return Promise.resolve(false)
+      }
+    }
+    const config = loadAnalysisServiceConfig({ NODE_ENV: 'test', ANALYSIS_LOG_LEVEL: 'silent' })
+    const runService = new RunService({ store: new UnhealthyStore(), retentionSeconds: 3_600 })
+    const server = await buildAnalysisServer(config, { logger: false, runService })
+    openServers.push(server)
+
+    const response = await server.inject({ method: 'GET', url: '/ready' })
+    expect(response.statusCode).toBe(503)
+    expect(response.json()).toMatchObject({ status: 'not-ready' })
   })
 
   it('classifies framework and domain failures without exposing raw messages', () => {

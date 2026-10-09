@@ -21,7 +21,11 @@ export default defineConfig({
         'packages/analysis-contracts/src/**',
         'services/analysis-service/src/**',
       ],
-      exclude: ['src/lib/measure.ts', 'services/analysis-service/src/index.ts'],
+      exclude: [
+        'src/lib/measure.ts',
+        'services/analysis-service/src/index.ts',
+        'services/analysis-service/src/infrastructure/postgres/**',
+      ],
     },
   },
 })

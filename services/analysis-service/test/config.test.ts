@@ -72,4 +72,40 @@ describe('analysis service configuration', () => {
     })).toThrow()
     expect(() => loadAnalysisServiceConfig({ NODE_ENV: 'test', ANALYSIS_PORT: '0' })).toThrow()
   })
+
+  it('requires a PostgreSQL URL, canonical content key, and production TLS', () => {
+    const encryptionKey = Buffer.alloc(32, 7).toString('base64')
+    expect(() => loadAnalysisServiceConfig({
+      NODE_ENV: 'test',
+      ANALYSIS_JOB_STORE: 'postgres',
+    })).toThrow(/database URL|content encryption key/)
+    expect(() => loadAnalysisServiceConfig({
+      NODE_ENV: 'test',
+      ANALYSIS_JOB_STORE: 'postgres',
+      ANALYSIS_DATABASE_URL: 'https://not-postgres.example/database',
+      ANALYSIS_CONTENT_ENCRYPTION_KEY: encryptionKey,
+    })).toThrow(/postgres/)
+    expect(() => loadAnalysisServiceConfig({
+      NODE_ENV: 'production',
+      ANALYSIS_AUTH_MODE: 'service-token',
+      ANALYSIS_SERVICE_TOKEN: 'production-token-that-is-at-least-thirty-two-bytes',
+      ANALYSIS_CORS_ORIGINS: 'https://app.example.com',
+      ANALYSIS_JOB_STORE: 'postgres',
+      ANALYSIS_DATABASE_URL: 'postgresql://user:secret@db.example.com/cat_analysis',
+      ANALYSIS_CONTENT_ENCRYPTION_KEY: encryptionKey,
+      ANALYSIS_DATABASE_SSL: 'disable',
+    })).toThrow(/requires TLS/)
+
+    const config = loadAnalysisServiceConfig({
+      NODE_ENV: 'test',
+      ANALYSIS_JOB_STORE: 'postgres',
+      ANALYSIS_DATABASE_URL: 'postgresql://user:secret@127.0.0.1:5432/cat_analysis',
+      ANALYSIS_CONTENT_ENCRYPTION_KEY: encryptionKey,
+      ANALYSIS_DATABASE_SSL: 'disable',
+      ANALYSIS_DB_POOL_MAX: '4',
+      ANALYSIS_SSE_POLL_MS: '250',
+    })
+    expect(config.jobStore).toMatchObject({ mode: 'postgres', poolMax: 4 })
+    expect(config.ssePollMs).toBe(250)
+  })
 })

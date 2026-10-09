@@ -4,6 +4,7 @@
 node_modules
 dist
 coverage
+coverage-postgres
 test-results
 playwright-report
 reports

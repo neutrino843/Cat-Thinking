@@ -17,6 +17,7 @@ The analysis feature is split between Cat-Thinking and an independently deployab
 - Content and part hashes are lowercase SHA-256 over UTF-8 bytes.
 - `requestKey` identifies stable user intent: document, ordered source identities/ranges, requested artifacts, options, and the negotiated engine capability version. Provider/model/prompt versions belong to the engine's separate execution/cache key.
 - SSE events are ordered by a run-global `sequence`; `eventId` is used for reconnect and `runRevision` prevents stale workers from overwriting newer state.
+- TTL expiration is an explicit terminal `run.expired` event; content deletion and the expiration revision are atomic in the durable store.
 - A run can be partial. One failed artifact must not erase successful siblings.
 - `acceptsRuns` is authoritative. A client must not create a run while it is false and should surface `degradedReasons` instead of treating a reachable service as an operational AI engine.
 
