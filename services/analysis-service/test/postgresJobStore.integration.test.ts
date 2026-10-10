@@ -888,6 +888,54 @@ integration('PostgreSQL durable job store', () => {
     })).rejects.toThrow()
     expect(await reopened.getEvidenceGraph('tenant-postgres', created.run.id)).toBeUndefined()
     expect(await reopened.getRun('tenant-postgres', created.run.id)).toMatchObject({ revision: 3, status: 'merging' })
+    // A graph already recorded at the built revision under a different hash is a same-revision conflict.
+    // The placeholder row carries the legitimate graph hash so the subsequent commit upserts through it.
+    await rawPool!.query(`
+      INSERT INTO analysis_evidence_graphs(
+        run_id, tenant_id, run_revision, graph_hash, key_id, iv, auth_tag, ciphertext, created_at
+      ) VALUES ($1, $2, 4, $3, $4, $5, $5, $5, $6)
+    `, [
+      created.run.id,
+      'tenant-postgres',
+      graph.graphHash,
+      'placeholder-key',
+      Buffer.from([0]),
+      10_099,
+    ])
+    await expect(reopened.commitEvidenceGraph({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      expectedRevision: 3,
+      lease: identity,
+      graph: { ...graph, graphHash: hash('conflicting-graph-at-revision-4') },
+      now: 10_100,
+      build: (run, sequence) => {
+        const next = analysisRunSchema.parse({
+          ...run,
+          revision: run.revision + 1,
+          status: 'generating',
+          stage: undefined,
+          progress: 0.55,
+          updatedAt: 10_100,
+        })
+        return {
+          run: next,
+          event: analysisEventSchema.parse({
+            version: 1,
+            type: 'evidence.ready',
+            eventId: 'evidence-ready-conflicting',
+            runId: run.id,
+            runRevision: next.revision,
+            sequence,
+            createdAt: 10_100,
+            graphHash: hash('conflicting-graph-at-revision-4'),
+            cardCount: graph.cards.length,
+            claimCount: graph.claims.length,
+            coverage: graph.coverage,
+          }),
+        }
+      },
+    })).rejects.toBeInstanceOf(JobStoreConflictError)
     const committed = await reopened.commitEvidenceGraph({
       tenantId: 'tenant-postgres',
       runId: created.run.id,
@@ -1101,6 +1149,9 @@ integration('PostgreSQL durable job store', () => {
       invocationId: 'guard-deleted',
       nodeKey: 'guard-deleted-node',
     }))).rejects.toBeInstanceOf(JobStoreConflictError)
+
+    // A missing source/run resolves to undefined instead of surfacing the not-found error.
+    expect(await store.getSourceContent('tenant-postgres', 'missing-guard-run', 'source-postgres')).toBeUndefined()
 
     await closeStore(store)
   })
