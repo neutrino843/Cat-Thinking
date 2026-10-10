@@ -367,18 +367,7 @@ integration('PostgreSQL durable job store', () => {
     const identity = { tenantId: 'tenant-postgres', ...lease! }
     const cacheKey = hash('postgres-evidence-cache')
     const cardHash = hash(canonicalizeJson(card))
-    await expect(store.storeEvidenceCard({
-      tenantId: 'tenant-other',
-      runId: created.run.id,
-      lease: identity,
-      now: 10_000,
-      cacheKey,
-      cardHash,
-      chunk,
-      card,
-      expiresAt: 3_610_000,
-    })).rejects.toThrow(/lease identity/)
-    expect(await store.storeEvidenceCard({
+    const evidenceInput = {
       tenantId: 'tenant-postgres',
       runId: created.run.id,
       lease: identity,
@@ -388,8 +377,40 @@ integration('PostgreSQL durable job store', () => {
       chunk,
       card,
       expiresAt: 3_610_000,
-    })).toBe(true)
+    }
+    await expect(store.storeEvidenceCard({
+      ...evidenceInput,
+      tenantId: 'tenant-other',
+    })).rejects.toThrow(/lease identity/)
+    await expect(store.storeEvidenceCard({
+      ...evidenceInput,
+      lease: { ...identity, runId: 'different-run' },
+    })).rejects.toThrow(/lease identity/)
+    expect(await store.storeEvidenceCard(evidenceInput)).toBe(true)
+    expect(await store.storeEvidenceCard(evidenceInput)).toBe(true)
+
+    const changedCard = evidenceCardSchema.parse({
+      ...card,
+      claims: [{ ...card.claims[0]!, statement: 'A different grounded claim' }],
+    })
+    await expect(store.storeEvidenceCard({
+      ...evidenceInput,
+      card: changedCard,
+      cardHash: hash(canonicalizeJson(changedCard)),
+    })).rejects.toBeInstanceOf(JobStoreConflictError)
+    const conflictingCacheKey = hash('postgres-evidence-cache-conflict')
+    await expect(store.storeEvidenceCard({
+      ...evidenceInput,
+      cacheKey: conflictingCacheKey,
+    })).rejects.toBeInstanceOf(JobStoreConflictError)
+    expect(await store.getCachedEvidenceCard('tenant-postgres', conflictingCacheKey, 10_000)).toBeUndefined()
+    expect(await store.storeEvidenceCard({
+      ...evidenceInput,
+      lease: { ...identity, ownerId: 'inactive-worker' },
+    })).toBe(false)
     expect(await store.getCachedEvidenceCard('tenant-other', cacheKey, 10_000)).toBeUndefined()
+    expect(await store.getCachedEvidenceCard('tenant-postgres', cacheKey, 3_610_000)).toBeUndefined()
+    expect(await store.listEvidenceCards('tenant-postgres', 'missing-evidence-run')).toBeUndefined()
     await closeStore(store)
 
     const reopened = await connectStore()
@@ -437,6 +458,75 @@ integration('PostgreSQL durable job store', () => {
       generatorProfile: 'fixture-v1',
       createdAt: 10_100,
     })
+    await expect(reopened.commitEvidenceGraph({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      expectedRevision: 3,
+      lease: identity,
+      graph: { ...graph, runId: 'different-run' },
+      now: 10_100,
+      build: () => { throw new Error('must not build') },
+    })).rejects.toThrow(/graph run identity/)
+    expect(await reopened.commitEvidenceGraph({
+      tenantId: 'tenant-postgres',
+      runId: 'missing-evidence-run',
+      expectedRevision: 3,
+      lease: { ...identity, runId: 'missing-evidence-run' },
+      graph: { ...graph, runId: 'missing-evidence-run' },
+      now: 10_100,
+      build: () => { throw new Error('must not build') },
+    })).toEqual({ outcome: 'missing' })
+    expect(await reopened.commitEvidenceGraph({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      expectedRevision: 2,
+      lease: identity,
+      graph,
+      now: 10_100,
+      build: () => { throw new Error('must not build') },
+    })).toMatchObject({ outcome: 'revision_conflict', run: { revision: 3 } })
+    expect(await reopened.commitEvidenceGraph({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      expectedRevision: 3,
+      lease: { ...identity, ownerId: 'inactive-worker' },
+      graph,
+      now: 10_100,
+      build: () => { throw new Error('must not build') },
+    })).toEqual({ outcome: 'lease_conflict' })
+    await expect(reopened.commitEvidenceGraph({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      expectedRevision: 3,
+      lease: identity,
+      graph,
+      now: 10_100,
+      build: (run, sequence) => {
+        const next = analysisRunSchema.parse({
+          ...run,
+          revision: run.revision + 1,
+          status: 'generating',
+          stage: undefined,
+          updatedAt: 10_100,
+        })
+        return {
+          run: next,
+          event: analysisEventSchema.parse({
+            version: 1,
+            type: 'evidence.ready',
+            eventId: 'invalid-evidence-sequence',
+            runId: run.id,
+            runRevision: next.revision,
+            sequence: sequence + 1,
+            createdAt: 10_100,
+            graphHash: graph.graphHash,
+            cardCount: graph.cards.length,
+            claimCount: graph.claims.length,
+            coverage: graph.coverage,
+          }),
+        }
+      },
+    })).rejects.toThrow(/evidence commit identity/)
     await expect(reopened.commitEvidenceGraph({
       tenantId: 'tenant-postgres',
       runId: created.run.id,
