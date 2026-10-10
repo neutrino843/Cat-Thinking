@@ -317,6 +317,7 @@ integration('PostgreSQL durable job store', () => {
     const store = await connectStore()
     const service = new RunService({ store, retentionSeconds: 0 })
     const run = (await service.createRun('tenant-postgres', makeRequest())).run
+    await service.uploadSource('tenant-postgres', run.id, sourcePart())
     await expect(store.transitionRun('tenant-postgres', run.id, 1, (current, sequence) => ({
       run: { ...current, revision: 4 },
       event: {
@@ -341,6 +342,37 @@ integration('PostgreSQL durable job store', () => {
       .toEqual({ outcome: 'not_due' })
     expect(await store.cleanupExpiredRun('tenant-postgres', 'missing-run', 1, () => undefined))
       .toEqual({ outcome: 'missing' })
+    const cleanupNow = Number.MAX_SAFE_INTEGER
+    await expect(store.cleanupExpiredRun('tenant-postgres', run.id, cleanupNow, (current, sequence) => {
+      const next = analysisRunSchema.parse({
+        ...current,
+        revision: current.revision + 1,
+        status: 'expired',
+        stage: undefined,
+        artifactStates: {
+          ...current.artifactStates,
+          summary: { ...current.artifactStates.summary, status: 'cancelled', updatedAt: cleanupNow },
+        },
+        updatedAt: cleanupNow,
+        completedAt: cleanupNow,
+      })
+      return {
+        run: next,
+        event: analysisEventSchema.parse({
+          version: 1,
+          type: 'run.expired',
+          eventId: 'invalid-cleanup-transition',
+          runId: current.id,
+          runRevision: next.revision,
+          sequence: sequence + 1,
+          createdAt: cleanupNow,
+          reason: 'retention_elapsed',
+        }),
+      }
+    })).rejects.toThrow(/expired run transition/)
+    expect(await store.getSourceReceipt('tenant-postgres', run.id, 'source-postgres'))
+      .toMatchObject({ complete: true })
+    expect(await service.getRun('tenant-postgres', run.id)).toMatchObject({ revision: 1, status: 'receiving' })
     await closeStore(store)
   })
 
@@ -515,6 +547,16 @@ integration('PostgreSQL durable job store', () => {
       ...commitInput,
       build: (run, sequence) => {
         const transition = buildSuccess(run, sequence)
+        return {
+          ...transition,
+          run: analysisRunSchema.parse({ ...transition.run, revision: transition.run.revision + 1 }),
+        }
+      },
+    })).rejects.toThrow(/artifact transition identity/)
+    await expect(store.commitArtifact({
+      ...commitInput,
+      build: (run, sequence) => {
+        const transition = buildSuccess(run, sequence)
         const first = transition.events[0]
         if (!first || first.type !== 'artifact.ready') throw new Error('expected ready event fixture')
         return {
@@ -538,6 +580,27 @@ integration('PostgreSQL durable job store', () => {
         }
       },
     })).rejects.toThrow(/artifact event identity/)
+    await expect(store.commitArtifact({
+      ...commitInput,
+      build: (run, sequence) => {
+        const transition = buildSuccess(run, sequence)
+        const first = transition.events[0]
+        if (!first) throw new Error('expected ready event fixture')
+        return {
+          ...transition,
+          events: [first, analysisEventSchema.parse({
+            version: 1,
+            type: 'stage.started',
+            eventId: 'invalid-artifact-terminal-event',
+            runId: run.id,
+            runRevision: transition.run.revision,
+            sequence: sequence + 1,
+            createdAt: 20_100,
+            stage: 'summary',
+          })],
+        }
+      },
+    })).rejects.toThrow(/artifact terminal event/)
     expect(await store.getArtifact('tenant-postgres', created.run.id, 'summary')).toBeUndefined()
 
     const committed = await store.commitArtifact(commitInput)
