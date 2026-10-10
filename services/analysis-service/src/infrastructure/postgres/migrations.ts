@@ -7,7 +7,7 @@ interface Migration {
 
 const MIGRATION_LOCK_ID = 843_202_610
 
-export const ANALYSIS_SCHEMA_VERSION = 3
+export const ANALYSIS_SCHEMA_VERSION = 4
 
 export const ANALYSIS_MIGRATIONS: readonly Migration[] = [
   {
@@ -163,6 +163,65 @@ export const ANALYSIS_MIGRATIONS: readonly Migration[] = [
 
       CREATE INDEX analysis_artifacts_tenant_run_idx
         ON analysis_artifacts (tenant_id, run_id);
+    `,
+  },
+  {
+    version: 4,
+    sql: `
+      CREATE TABLE analysis_provider_invocations (
+        tenant_id TEXT NOT NULL,
+        invocation_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        node_key TEXT NOT NULL,
+        run_attempt INTEGER NOT NULL CHECK (run_attempt >= 0),
+        role TEXT NOT NULL CHECK (role IN (
+          'evidence-map', 'evidence-merge', 'artifact-summary', 'artifact-outline',
+          'artifact-mindmap', 'artifact-quiz', 'artifact-knowledge', 'repair'
+        )),
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        profile_version TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'outcome_unknown')),
+        estimated_input_tokens BIGINT NOT NULL CHECK (estimated_input_tokens >= 0),
+        reserved_output_tokens BIGINT NOT NULL CHECK (reserved_output_tokens > 0),
+        estimated_cost_micros BIGINT NOT NULL CHECK (estimated_cost_micros >= 0),
+        transport_attempts INTEGER NOT NULL DEFAULT 0 CHECK (transport_attempts >= 0),
+        actual_input_tokens BIGINT CHECK (actual_input_tokens >= 0),
+        actual_output_tokens BIGINT CHECK (actual_output_tokens >= 0),
+        provider_request_id TEXT,
+        failure_kind TEXT CHECK (failure_kind IS NULL OR failure_kind IN (
+          'aborted', 'timeout', 'rate_limited', 'unavailable', 'rejected',
+          'invalid_response', 'response_too_large'
+        )),
+        safe_code TEXT,
+        started_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        completed_at BIGINT,
+        PRIMARY KEY (tenant_id, invocation_id),
+        UNIQUE (run_id, node_key, run_attempt),
+        FOREIGN KEY (run_id, tenant_id)
+          REFERENCES analysis_runs(run_id, tenant_id) ON DELETE CASCADE,
+        CHECK (char_length(invocation_id) BETWEEN 1 AND 128),
+        CHECK (char_length(node_key) BETWEEN 1 AND 128),
+        CHECK (char_length(provider_id) BETWEEN 1 AND 128),
+        CHECK (char_length(model_id) BETWEEN 1 AND 200),
+        CHECK (char_length(profile_version) BETWEEN 1 AND 128),
+        CHECK (char_length(prompt_version) BETWEEN 1 AND 128),
+        CHECK (provider_request_id IS NULL OR char_length(provider_request_id) BETWEEN 1 AND 256),
+        CHECK (safe_code IS NULL OR char_length(safe_code) BETWEEN 1 AND 80),
+        CHECK (
+          (status = 'running' AND completed_at IS NULL)
+          OR (status <> 'running' AND completed_at IS NOT NULL)
+        )
+      );
+
+      CREATE INDEX analysis_provider_invocations_run_idx
+        ON analysis_provider_invocations (tenant_id, run_id);
+
+      CREATE INDEX analysis_provider_invocations_running_idx
+        ON analysis_provider_invocations (updated_at)
+        WHERE status = 'running';
     `,
   },
 ]

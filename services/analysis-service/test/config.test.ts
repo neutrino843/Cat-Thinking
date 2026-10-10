@@ -125,6 +125,9 @@ describe('analysis service configuration', () => {
       ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS: '50000',
       ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS: '4096',
       ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES: '500000',
+      ANALYSIS_PROVIDER_MAX_ATTEMPTS: '3',
+      ANALYSIS_PROVIDER_CIRCUIT_FAILURE_THRESHOLD: '4',
+      ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_TOKENS: '2500000',
     })
 
     expect(config.provider).toMatchObject({
@@ -134,10 +137,16 @@ describe('analysis service configuration', () => {
       apiStyle: 'chat-completions',
       modelId: 'approved/model-v1',
       timeoutMs: 45_000,
+      invocationPolicy: {
+        maxAttempts: 3,
+        circuitFailureThreshold: 4,
+        maxRunEstimatedTokens: 2_500_000,
+      },
     })
     expect(Object.isFrozen(config.provider)).toBe(true)
     if (config.provider.mode === 'openai-compatible') {
       expect(Object.isFrozen(config.provider.allowedHosts)).toBe(true)
+      expect(Object.isFrozen(config.provider.invocationPolicy)).toBe(true)
     }
   })
 
@@ -169,6 +178,11 @@ describe('analysis service configuration', () => {
       ...base,
       ANALYSIS_PROVIDER_ALLOWED_HOSTS: 'models.example.com/path',
     })).toThrow(/Invalid exact provider host/)
+    expect(() => loadAnalysisServiceConfig({
+      ...base,
+      ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS: '5000',
+      ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS: '1000',
+    })).toThrow(/base delay/)
   })
 
   it('requires HTTPS for a production provider', () => {

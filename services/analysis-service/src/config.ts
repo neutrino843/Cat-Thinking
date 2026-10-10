@@ -135,9 +135,24 @@ const selectedEnvironmentSchema = z
     ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS: integerFromEnvironment(200_000, 1_000, 10_000_000),
     ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS: integerFromEnvironment(16_384, 1, 1_000_000),
     ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES: integerFromEnvironment(2_000_000, 1_024, 20_000_000),
+    ANALYSIS_PROVIDER_MAX_ATTEMPTS: integerFromEnvironment(2, 1, 5),
+    ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS: integerFromEnvironment(250, 1, 60_000),
+    ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS: integerFromEnvironment(5_000, 1, 60_000),
+    ANALYSIS_PROVIDER_CIRCUIT_FAILURE_THRESHOLD: integerFromEnvironment(5, 1, 100),
+    ANALYSIS_PROVIDER_CIRCUIT_OPEN_MS: integerFromEnvironment(30_000, 1_000, 3_600_000),
+    ANALYSIS_PROVIDER_INVOCATION_STALE_MS: integerFromEnvironment(600_000, 1_000, 86_400_000),
+    ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_TOKENS: integerFromEnvironment(4_000_000, 1, 100_000_000),
+    ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_COST_MICROS: integerFromEnvironment(50_000_000, 0, 1_000_000_000),
   })
   .strict()
   .superRefine((environment, context) => {
+    if (environment.ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS > environment.ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS) {
+      context.addIssue({
+        code: 'custom',
+        path: ['ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS'],
+        message: 'provider retry base delay must not exceed the maximum delay',
+      })
+    }
     if (environment.ANALYSIS_AUTH_MODE === 'service-token') {
       const parsed = secretSchema.safeParse(environment.ANALYSIS_SERVICE_TOKEN)
       if (!parsed.success) {
@@ -295,6 +310,16 @@ export interface AnalysisServiceConfig {
         maxInputCharacters: number
         maxOutputTokens: number
         maxResponseBytes: number
+        invocationPolicy: Readonly<{
+          maxAttempts: number
+          retryBaseDelayMs: number
+          retryMaxDelayMs: number
+          circuitFailureThreshold: number
+          circuitOpenMs: number
+          staleAfterMs: number
+          maxRunEstimatedTokens: number
+          maxRunEstimatedCostMicros: number
+        }>
       }>
 }
 
@@ -339,6 +364,14 @@ const selectEnvironment = (environment: NodeJS.ProcessEnv): Record<string, strin
   ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS: environment.ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS,
   ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS: environment.ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS,
   ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES: environment.ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES,
+  ANALYSIS_PROVIDER_MAX_ATTEMPTS: environment.ANALYSIS_PROVIDER_MAX_ATTEMPTS,
+  ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS: environment.ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS,
+  ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS: environment.ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS,
+  ANALYSIS_PROVIDER_CIRCUIT_FAILURE_THRESHOLD: environment.ANALYSIS_PROVIDER_CIRCUIT_FAILURE_THRESHOLD,
+  ANALYSIS_PROVIDER_CIRCUIT_OPEN_MS: environment.ANALYSIS_PROVIDER_CIRCUIT_OPEN_MS,
+  ANALYSIS_PROVIDER_INVOCATION_STALE_MS: environment.ANALYSIS_PROVIDER_INVOCATION_STALE_MS,
+  ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_TOKENS: environment.ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_TOKENS,
+  ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_COST_MICROS: environment.ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_COST_MICROS,
 })
 
 export const loadAnalysisServiceConfig = (
@@ -372,6 +405,16 @@ export const loadAnalysisServiceConfig = (
         maxInputCharacters: parsed.ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS,
         maxOutputTokens: parsed.ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS,
         maxResponseBytes: parsed.ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES,
+        invocationPolicy: Object.freeze({
+          maxAttempts: parsed.ANALYSIS_PROVIDER_MAX_ATTEMPTS,
+          retryBaseDelayMs: parsed.ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS,
+          retryMaxDelayMs: parsed.ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS,
+          circuitFailureThreshold: parsed.ANALYSIS_PROVIDER_CIRCUIT_FAILURE_THRESHOLD,
+          circuitOpenMs: parsed.ANALYSIS_PROVIDER_CIRCUIT_OPEN_MS,
+          staleAfterMs: parsed.ANALYSIS_PROVIDER_INVOCATION_STALE_MS,
+          maxRunEstimatedTokens: parsed.ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_TOKENS,
+          maxRunEstimatedCostMicros: parsed.ANALYSIS_PROVIDER_MAX_RUN_ESTIMATED_COST_MICROS,
+        }),
       })
     : Object.freeze({ mode: 'disabled' as const })
 

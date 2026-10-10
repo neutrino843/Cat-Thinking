@@ -16,6 +16,7 @@ import {
   type UsageV1,
 } from '@cat-thinking/analysis-contracts'
 import { createContractError } from '../errors.js'
+import { providerContractError } from '../providers/providerContractError.js'
 import { ArtifactBudgetExceededError, planArtifactBudget } from './artifactBudget.js'
 import {
   ArtifactValidationError,
@@ -347,9 +348,7 @@ export class ArtifactDagWorker {
           : succeeded > 0
             ? 'partial'
             : 'failed'
-      const terminalError = status === 'failed'
-        ? createContractError('artifact_invalid', 'validation', false, 'analysis.artifacts.all_failed')
-        : undefined
+      const terminalError = status === 'failed' ? failureError : undefined
       const usage = output ? this.addUsage(run.usage, output.usage) : run.usage
       const providerRoutes = output ? this.addRoute(run.providerRoutes, output.route) : run.providerRoutes
       const next = analysisRunSchema.parse({
@@ -465,6 +464,8 @@ export class ArtifactDagWorker {
         maximumOutputTokens: error.maximumOutputTokens,
       })
     }
+    const providerError = providerContractError(error, kind)
+    if (providerError) return providerError
     return createContractError('internal_error', 'internal', true, 'analysis.artifact.generation_failed', { kind })
   }
 

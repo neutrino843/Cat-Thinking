@@ -18,6 +18,7 @@ import type {
 import { EvidencePipelineWorker } from '../src/domain/evidencePipelineWorker.js'
 import { RunService } from '../src/domain/runService.js'
 import { InMemoryJobStore } from '../src/infrastructure/memoryJobStore.js'
+import { ProviderGatewayError } from '../src/providers/providerError.js'
 
 const hash = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex')
 const text = [
@@ -326,6 +327,36 @@ describe('evidence pipeline worker', () => {
     expect(invalidResult).toMatchObject({
       outcome: 'failed',
       run: { status: 'failed', error: { code: 'citation_invalid', stage: 'mapping' } },
+    })
+  })
+
+  it('preserves a stable provider timeout instead of collapsing it into an internal error', async () => {
+    const store = new InMemoryJobStore()
+    const prepared = await prepareRun(store, 'tenant-a', hash('provider-timeout-run'))
+    const generator = new FixtureGenerator(() => {
+      throw new ProviderGatewayError({
+        providerId: 'fixture-provider',
+        kind: 'timeout',
+        retryable: true,
+        safeCode: 'request_timeout',
+      })
+    })
+
+    const result = await worker(store, generator, prepared.service.broker).runOnce(
+      'tenant-a', prepared.runId, 'provider-timeout-worker', new AbortController().signal,
+    )
+
+    expect(result).toMatchObject({
+      outcome: 'failed',
+      run: {
+        status: 'failed',
+        error: {
+          code: 'provider_timeout',
+          category: 'provider',
+          retryable: true,
+          stage: 'mapping',
+        },
+      },
     })
   })
 

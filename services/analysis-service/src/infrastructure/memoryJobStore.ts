@@ -38,6 +38,17 @@ import {
   type StoredSourceUpload,
 } from '../domain/jobStore.js'
 import { validateArtifactDescriptor } from '../domain/artifactValidator.js'
+import {
+  assertProviderInvocationCompletion,
+  assertProviderInvocationReservation,
+  cloneProviderInvocation,
+  providerInvocationIdentityMatches,
+  type CompleteProviderInvocationInput,
+  type CompleteProviderInvocationResult,
+  type ReserveProviderInvocationInput,
+  type ReserveProviderInvocationResult,
+  type StoredProviderInvocation,
+} from '../providers/invocationLedger.js'
 
 interface StoredRunRecord {
   tenantId: string
@@ -68,6 +79,8 @@ const runEvidenceKey = (tenantId: string, runId: string, chunkId: string): strin
   `${tenantId}\u0000${runId}\u0000${chunkId}`
 const artifactKey = (tenantId: string, runId: string, kind: ArtifactKind): string =>
   `${tenantId}\u0000${runId}\u0000${kind}`
+const invocationKey = (tenantId: string, invocationId: string): string =>
+  `${tenantId}\u0000${invocationId}`
 const terminalRunStatuses = new Set<AnalysisRunV1['status']>([
   'partial',
   'succeeded',
@@ -112,6 +125,7 @@ export class InMemoryJobStore implements JobStore {
   private readonly runEvidence = new Map<string, string>()
   private readonly evidenceGraphs = new Map<string, EvidenceGraphV1>()
   private readonly artifacts = new Map<string, StoredArtifact>()
+  private readonly providerInvocations = new Map<string, StoredProviderInvocation>()
 
   checkHealth(): Promise<boolean> {
     return Promise.resolve(true)
@@ -437,6 +451,135 @@ export class InMemoryJobStore implements JobStore {
       run: cloneRun(run),
       events: events.map(cloneEvent),
     } as const
+  }
+
+  async reserveProviderInvocation(
+    input: ReserveProviderInvocationInput,
+  ): Promise<ReserveProviderInvocationResult> {
+    assertProviderInvocationReservation(input)
+    const run = this.runs.get(runKey(input.tenantId, input.runId))
+    if (!run) throw new JobStoreNotFoundError('run')
+    if (run.contentDeleted || terminalRunStatuses.has(run.run.status)) {
+      throw new JobStoreConflictError('run cannot accept provider invocations')
+    }
+    const key = invocationKey(input.tenantId, input.invocationId)
+    const existing = this.providerInvocations.get(key)
+    if (existing) {
+      if (!providerInvocationIdentityMatches(existing, input)) {
+        throw new JobStoreConflictError('provider invocation identity changed')
+      }
+      if (existing.status === 'running' && input.now - existing.updatedAt >= input.staleAfterMs) {
+        const unknown = Object.freeze({
+          ...existing,
+          status: 'outcome_unknown' as const,
+          updatedAt: input.now,
+          completedAt: input.now,
+        })
+        this.providerInvocations.set(key, unknown)
+        return { outcome: 'existing', invocation: cloneProviderInvocation(unknown) }
+      }
+      return { outcome: 'existing', invocation: cloneProviderInvocation(existing) }
+    }
+    const sameNode = [...this.providerInvocations.values()].find((candidate) =>
+      candidate.tenantId === input.tenantId
+      && candidate.runId === input.runId
+      && candidate.nodeKey === input.nodeKey
+      && candidate.runAttempt === input.runAttempt,
+    )
+    if (sameNode) throw new JobStoreConflictError('provider invocation node already has a different identity')
+
+    let reservedTokens = 0
+    let reservedCost = 0
+    for (const candidate of this.providerInvocations.values()) {
+      if (candidate.tenantId !== input.tenantId || candidate.runId !== input.runId) continue
+      reservedTokens += candidate.estimatedInputTokens + candidate.reservedOutputTokens
+      reservedCost += candidate.estimatedCostMicros
+    }
+    const requestedTokens = input.estimatedInputTokens + input.reservedOutputTokens
+    const totalTokens = reservedTokens + requestedTokens
+    if (!Number.isSafeInteger(totalTokens) || totalTokens > input.maxRunEstimatedTokens) {
+      return {
+        outcome: 'budget_exceeded',
+        dimension: 'tokens',
+        actual: totalTokens,
+        maximum: input.maxRunEstimatedTokens,
+      }
+    }
+    const totalCost = reservedCost + input.estimatedCostMicros
+    if (!Number.isSafeInteger(totalCost) || totalCost > input.maxRunEstimatedCostMicros) {
+      return {
+        outcome: 'budget_exceeded',
+        dimension: 'cost',
+        actual: totalCost,
+        maximum: input.maxRunEstimatedCostMicros,
+      }
+    }
+    const invocation: StoredProviderInvocation = Object.freeze({
+      tenantId: input.tenantId,
+      runId: input.runId,
+      invocationId: input.invocationId,
+      nodeKey: input.nodeKey,
+      runAttempt: input.runAttempt,
+      role: input.role,
+      providerId: input.providerId,
+      modelId: input.modelId,
+      profileVersion: input.profileVersion,
+      promptVersion: input.promptVersion,
+      status: 'running',
+      estimatedInputTokens: input.estimatedInputTokens,
+      reservedOutputTokens: input.reservedOutputTokens,
+      estimatedCostMicros: input.estimatedCostMicros,
+      transportAttempts: 0,
+      startedAt: input.now,
+      updatedAt: input.now,
+    })
+    this.providerInvocations.set(key, invocation)
+    return { outcome: 'reserved', invocation: cloneProviderInvocation(invocation) }
+  }
+
+  async completeProviderInvocation(
+    input: CompleteProviderInvocationInput,
+  ): Promise<CompleteProviderInvocationResult> {
+    assertProviderInvocationCompletion(input)
+    const key = invocationKey(input.tenantId, input.invocationId)
+    const existing = this.providerInvocations.get(key)
+    if (!existing) return { outcome: 'missing' }
+    if (existing.status !== 'running') {
+      return { outcome: 'state_conflict', invocation: cloneProviderInvocation(existing) }
+    }
+    const completed: StoredProviderInvocation = input.result === 'succeeded'
+      ? Object.freeze({
+          ...existing,
+          status: 'succeeded' as const,
+          transportAttempts: input.transportAttempts,
+          actualInputTokens: input.actualInputTokens,
+          actualOutputTokens: input.actualOutputTokens,
+          providerRequestId: input.providerRequestId,
+          updatedAt: input.now,
+          completedAt: input.now,
+        })
+      : Object.freeze({
+          ...existing,
+          status: 'failed' as const,
+          transportAttempts: input.transportAttempts,
+          failureKind: input.failureKind,
+          safeCode: input.safeCode,
+          actualInputTokens: input.actualInputTokens,
+          actualOutputTokens: input.actualOutputTokens,
+          providerRequestId: input.providerRequestId,
+          updatedAt: input.now,
+          completedAt: input.now,
+        })
+    this.providerInvocations.set(key, completed)
+    return { outcome: 'updated', invocation: cloneProviderInvocation(completed) }
+  }
+
+  getProviderInvocation(
+    tenantId: string,
+    invocationId: string,
+  ): Promise<StoredProviderInvocation | undefined> {
+    const invocation = this.providerInvocations.get(invocationKey(tenantId, invocationId))
+    return Promise.resolve(invocation ? cloneProviderInvocation(invocation) : undefined)
   }
 
   async deleteContent(tenantId: string, runId: string): Promise<boolean | undefined> {

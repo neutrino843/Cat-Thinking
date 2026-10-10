@@ -13,6 +13,7 @@ import {
   type SourceSnapshotV1,
 } from '@cat-thinking/analysis-contracts'
 import { createContractError } from '../errors.js'
+import { providerContractError } from '../providers/providerContractError.js'
 import {
   EvidenceBudgetExceededError,
   planEvidenceBudget,
@@ -509,6 +510,8 @@ export class EvidencePipelineWorker {
     if (error instanceof EvidenceBudgetExceededError) {
       return withStage(createContractError('budget_exceeded', 'budget', false, 'analysis.evidence.budget_exceeded'))
     }
+    const providerError = providerContractError(error, stage)
+    if (providerError) return providerError
     return withStage(createContractError('internal_error', 'internal', true, 'analysis.evidence.failed'))
   }
 

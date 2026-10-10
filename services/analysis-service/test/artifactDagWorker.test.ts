@@ -26,6 +26,7 @@ import {
 } from '../src/domain/artifactValidator.js'
 import { RunService } from '../src/domain/runService.js'
 import { InMemoryJobStore } from '../src/infrastructure/memoryJobStore.js'
+import { ProviderGatewayError } from '../src/providers/providerError.js'
 
 const hash = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex')
 const tenantId = 'tenant-artifact'
@@ -810,9 +811,40 @@ describe('artifact DAG worker', () => {
     const result = await workerFor(store, service, generator)
       .runOnce(tenantId, runId, 'artifact-worker', new AbortController().signal)
 
-    expect(result.run).toMatchObject({ status: 'failed', error: { code: 'artifact_invalid' } })
+    expect(result.run).toMatchObject({ status: 'failed', error: { code: 'internal_error' } })
     expect((await service.listEvents(tenantId, runId)).slice(-2).map((event) => event.type))
       .toEqual(['artifact.failed', 'run.failed'])
+  })
+
+  it('preserves a provider timeout on both the artifact state and failed run', async () => {
+    const { store, service, runId } = await prepareGeneratingRun(['summary'])
+    const generator: ArtifactGenerator = {
+      async generate() {
+        throw new ProviderGatewayError({
+          providerId: 'fixture-provider',
+          kind: 'timeout',
+          retryable: true,
+          safeCode: 'request_timeout',
+        })
+      },
+    }
+
+    const result = await workerFor(store, service, generator).runOnce(
+      tenantId,
+      runId,
+      'provider-timeout-worker',
+      new AbortController().signal,
+    )
+    expect(result).toMatchObject({
+      outcome: 'completed',
+      run: {
+        status: 'failed',
+        error: { code: 'provider_timeout', stage: 'summary', retryable: true },
+        artifactStates: {
+          summary: { status: 'failed', error: { code: 'provider_timeout', stage: 'summary' } },
+        },
+      },
+    })
   })
 
   it('isolates a contract-valid artifact with the wrong run identity as an artifact validation failure', async () => {

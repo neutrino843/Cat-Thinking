@@ -40,6 +40,21 @@ import {
   type StoredSourcePart,
   type StoredSourceUpload,
 } from '../../domain/jobStore.js'
+import {
+  PROVIDER_INVOCATION_STATUSES,
+  assertProviderInvocationCompletion,
+  assertProviderInvocationReservation,
+  cloneProviderInvocation,
+  providerInvocationIdentityMatches,
+  type CompleteProviderInvocationInput,
+  type CompleteProviderInvocationResult,
+  type ProviderInvocationStatus,
+  type ReserveProviderInvocationInput,
+  type ReserveProviderInvocationResult,
+  type StoredProviderInvocation,
+} from '../../providers/invocationLedger.js'
+import { MODEL_TASK_ROLES, type ModelTaskRole } from '../../providers/modelProvider.js'
+import { PROVIDER_FAILURE_KINDS, type ProviderFailureKind } from '../../providers/providerError.js'
 import type { ContentCipher, EncryptedContent } from '../contentCipher.js'
 import {
   artifactEncryptionContext,
@@ -122,8 +137,92 @@ interface ArtifactRow extends QueryResultRow {
   updated_at: string | number
 }
 
+interface ProviderInvocationRow extends QueryResultRow {
+  tenant_id: string
+  invocation_id: string
+  run_id: string
+  node_key: string
+  run_attempt: number
+  role: string
+  provider_id: string
+  model_id: string
+  profile_version: string
+  prompt_version: string
+  status: string
+  estimated_input_tokens: string | number
+  reserved_output_tokens: string | number
+  estimated_cost_micros: string | number
+  transport_attempts: number
+  actual_input_tokens: string | number | null
+  actual_output_tokens: string | number | null
+  provider_request_id: string | null
+  failure_kind: string | null
+  safe_code: string | null
+  started_at: string | number
+  updated_at: string | number
+  completed_at: string | number | null
+}
+
 const decodeRun = (row: RunRow): AnalysisRunV1 => analysisRunSchema.parse(row.run_json)
 const decodeEvent = (row: EventRow): AnalysisEventV1 => analysisEventSchema.parse(row.event_json)
+
+const safeDatabaseInteger = (value: string | number, label: string): number => {
+  const decoded = Number(value)
+  if (!Number.isSafeInteger(decoded) || decoded < 0) {
+    throw new TypeError(`database ${label} is not a non-negative safe integer`)
+  }
+  return decoded
+}
+
+const decodeProviderInvocation = (row: ProviderInvocationRow): StoredProviderInvocation => {
+  if (!PROVIDER_INVOCATION_STATUSES.includes(row.status as ProviderInvocationStatus)) {
+    throw new TypeError('database provider invocation status is invalid')
+  }
+  if (!MODEL_TASK_ROLES.includes(row.role as ModelTaskRole)) {
+    throw new TypeError('database provider invocation role is invalid')
+  }
+  if (row.failure_kind !== null && !PROVIDER_FAILURE_KINDS.includes(row.failure_kind as ProviderFailureKind)) {
+    throw new TypeError('database provider invocation failure kind is invalid')
+  }
+  return cloneProviderInvocation({
+    tenantId: row.tenant_id,
+    invocationId: row.invocation_id,
+    runId: row.run_id,
+    nodeKey: row.node_key,
+    runAttempt: safeDatabaseInteger(row.run_attempt, 'run attempt'),
+    role: row.role as ModelTaskRole,
+    providerId: row.provider_id,
+    modelId: row.model_id,
+    profileVersion: row.profile_version,
+    promptVersion: row.prompt_version,
+    status: row.status as ProviderInvocationStatus,
+    estimatedInputTokens: safeDatabaseInteger(row.estimated_input_tokens, 'estimated input tokens'),
+    reservedOutputTokens: safeDatabaseInteger(row.reserved_output_tokens, 'reserved output tokens'),
+    estimatedCostMicros: safeDatabaseInteger(row.estimated_cost_micros, 'estimated cost'),
+    transportAttempts: safeDatabaseInteger(row.transport_attempts, 'transport attempts'),
+    actualInputTokens: row.actual_input_tokens === null
+      ? undefined
+      : safeDatabaseInteger(row.actual_input_tokens, 'actual input tokens'),
+    actualOutputTokens: row.actual_output_tokens === null
+      ? undefined
+      : safeDatabaseInteger(row.actual_output_tokens, 'actual output tokens'),
+    providerRequestId: row.provider_request_id ?? undefined,
+    failureKind: row.failure_kind === null ? undefined : row.failure_kind as ProviderFailureKind,
+    safeCode: row.safe_code ?? undefined,
+    startedAt: safeDatabaseInteger(row.started_at, 'started at'),
+    updatedAt: safeDatabaseInteger(row.updated_at, 'updated at'),
+    completedAt: row.completed_at === null
+      ? undefined
+      : safeDatabaseInteger(row.completed_at, 'completed at'),
+  })
+}
+
+const PROVIDER_INVOCATION_COLUMNS = `
+  tenant_id, invocation_id, run_id, node_key, run_attempt, role, provider_id, model_id,
+  profile_version, prompt_version, status, estimated_input_tokens, reserved_output_tokens,
+  estimated_cost_micros, transport_attempts, actual_input_tokens, actual_output_tokens,
+  provider_request_id, failure_kind, safe_code, started_at, updated_at, completed_at
+`
 
 const samePart = (left: StoredSourcePart, right: StoredSourcePart): boolean =>
   left.partIndex === right.partIndex
@@ -797,6 +896,184 @@ export class PostgresJobStore implements JobStore {
       for (const event of events) await this.insertEvent(client, event)
       return { outcome: 'updated', run, events } as const
     })
+  }
+
+  async reserveProviderInvocation(
+    input: ReserveProviderInvocationInput,
+  ): Promise<ReserveProviderInvocationResult> {
+    assertProviderInvocationReservation(input)
+    return this.transaction(async (client) => {
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`${input.tenantId.length}:${input.tenantId}${input.invocationId}`],
+      )
+      const run = await client.query<{ content_deleted_at: string | number | null; status: string }>(`
+        SELECT content_deleted_at, status FROM analysis_runs
+        WHERE tenant_id=$1 AND run_id=$2
+        FOR UPDATE
+      `, [input.tenantId, input.runId])
+      const runRow = run.rows[0]
+      if (!runRow) throw new JobStoreNotFoundError('run')
+      if (runRow.content_deleted_at !== null || ['partial', 'succeeded', 'cancelled', 'failed', 'expired'].includes(runRow.status)) {
+        throw new JobStoreConflictError('run cannot accept provider invocations')
+      }
+
+      const existingResult = await client.query<ProviderInvocationRow>(`
+        SELECT ${PROVIDER_INVOCATION_COLUMNS}
+        FROM analysis_provider_invocations
+        WHERE tenant_id=$1 AND invocation_id=$2
+      `, [input.tenantId, input.invocationId])
+      const existingRow = existingResult.rows[0]
+      if (existingRow) {
+        const existing = decodeProviderInvocation(existingRow)
+        if (!providerInvocationIdentityMatches(existing, input)) {
+          throw new JobStoreConflictError('provider invocation identity changed')
+        }
+        if (existing.status === 'running' && input.now - existing.updatedAt >= input.staleAfterMs) {
+          const unknownResult = await client.query<ProviderInvocationRow>(`
+            UPDATE analysis_provider_invocations
+            SET status='outcome_unknown', updated_at=$3, completed_at=$3
+            WHERE tenant_id=$1 AND invocation_id=$2 AND status='running'
+            RETURNING ${PROVIDER_INVOCATION_COLUMNS}
+          `, [input.tenantId, input.invocationId, input.now])
+          const unknown = unknownResult.rows[0]
+          if (!unknown) throw new JobStoreConflictError('provider invocation state changed while marking stale')
+          return { outcome: 'existing', invocation: decodeProviderInvocation(unknown) }
+        }
+        return { outcome: 'existing', invocation: existing }
+      }
+
+      const sameNode = await client.query<{ invocation_id: string }>(`
+        SELECT invocation_id FROM analysis_provider_invocations
+        WHERE run_id=$1 AND node_key=$2 AND run_attempt=$3
+      `, [input.runId, input.nodeKey, input.runAttempt])
+      if (sameNode.rowCount !== 0) {
+        throw new JobStoreConflictError('provider invocation node already has a different identity')
+      }
+
+      const totals = await client.query<{ tokens: string | number; cost: string | number }>(`
+        SELECT
+          COALESCE(SUM(estimated_input_tokens + reserved_output_tokens), 0) AS tokens,
+          COALESCE(SUM(estimated_cost_micros), 0) AS cost
+        FROM analysis_provider_invocations
+        WHERE tenant_id=$1 AND run_id=$2
+      `, [input.tenantId, input.runId])
+      const reservedTokens = safeDatabaseInteger(totals.rows[0]?.tokens ?? 0, 'reserved token total')
+      const reservedCost = safeDatabaseInteger(totals.rows[0]?.cost ?? 0, 'reserved cost total')
+      const totalTokens = reservedTokens + input.estimatedInputTokens + input.reservedOutputTokens
+      if (!Number.isSafeInteger(totalTokens) || totalTokens > input.maxRunEstimatedTokens) {
+        return {
+          outcome: 'budget_exceeded',
+          dimension: 'tokens',
+          actual: totalTokens,
+          maximum: input.maxRunEstimatedTokens,
+        }
+      }
+      const totalCost = reservedCost + input.estimatedCostMicros
+      if (!Number.isSafeInteger(totalCost) || totalCost > input.maxRunEstimatedCostMicros) {
+        return {
+          outcome: 'budget_exceeded',
+          dimension: 'cost',
+          actual: totalCost,
+          maximum: input.maxRunEstimatedCostMicros,
+        }
+      }
+
+      const inserted = await client.query<ProviderInvocationRow>(`
+        INSERT INTO analysis_provider_invocations(
+          tenant_id, invocation_id, run_id, node_key, run_attempt, role, provider_id, model_id,
+          profile_version, prompt_version, status, estimated_input_tokens, reserved_output_tokens,
+          estimated_cost_micros, transport_attempts, started_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'running',$11,$12,$13,0,$14,$14)
+        RETURNING ${PROVIDER_INVOCATION_COLUMNS}
+      `, [
+        input.tenantId,
+        input.invocationId,
+        input.runId,
+        input.nodeKey,
+        input.runAttempt,
+        input.role,
+        input.providerId,
+        input.modelId,
+        input.profileVersion,
+        input.promptVersion,
+        input.estimatedInputTokens,
+        input.reservedOutputTokens,
+        input.estimatedCostMicros,
+        input.now,
+      ])
+      const invocation = inserted.rows[0]
+      if (!invocation) throw new Error('provider invocation insert did not return a row')
+      return { outcome: 'reserved', invocation: decodeProviderInvocation(invocation) }
+    })
+  }
+
+  async completeProviderInvocation(
+    input: CompleteProviderInvocationInput,
+  ): Promise<CompleteProviderInvocationResult> {
+    assertProviderInvocationCompletion(input)
+    return this.transaction(async (client) => {
+      const values = input.result === 'succeeded'
+        ? {
+            status: 'succeeded',
+            actualInputTokens: input.actualInputTokens,
+            actualOutputTokens: input.actualOutputTokens,
+            providerRequestId: input.providerRequestId ?? null,
+            failureKind: null,
+            safeCode: null,
+          }
+        : {
+            status: 'failed',
+            actualInputTokens: input.actualInputTokens ?? null,
+            actualOutputTokens: input.actualOutputTokens ?? null,
+            providerRequestId: input.providerRequestId ?? null,
+            failureKind: input.failureKind ?? null,
+            safeCode: input.safeCode,
+          }
+      const updated = await client.query<ProviderInvocationRow>(`
+        UPDATE analysis_provider_invocations
+        SET status=$3, transport_attempts=$4, actual_input_tokens=$5, actual_output_tokens=$6,
+          provider_request_id=$7, failure_kind=$8, safe_code=$9, updated_at=$10, completed_at=$10
+        WHERE tenant_id=$1 AND invocation_id=$2 AND status='running'
+        RETURNING ${PROVIDER_INVOCATION_COLUMNS}
+      `, [
+        input.tenantId,
+        input.invocationId,
+        values.status,
+        input.transportAttempts,
+        values.actualInputTokens,
+        values.actualOutputTokens,
+        values.providerRequestId,
+        values.failureKind,
+        values.safeCode,
+        input.now,
+      ])
+      const invocation = updated.rows[0]
+      if (invocation) return { outcome: 'updated', invocation: decodeProviderInvocation(invocation) }
+
+      const existing = await client.query<ProviderInvocationRow>(`
+        SELECT ${PROVIDER_INVOCATION_COLUMNS}
+        FROM analysis_provider_invocations
+        WHERE tenant_id=$1 AND invocation_id=$2
+      `, [input.tenantId, input.invocationId])
+      const existingRow = existing.rows[0]
+      return existingRow
+        ? { outcome: 'state_conflict', invocation: decodeProviderInvocation(existingRow) }
+        : { outcome: 'missing' }
+    })
+  }
+
+  async getProviderInvocation(
+    tenantId: string,
+    invocationId: string,
+  ): Promise<StoredProviderInvocation | undefined> {
+    const result = await this.pool.query<ProviderInvocationRow>(`
+      SELECT ${PROVIDER_INVOCATION_COLUMNS}
+      FROM analysis_provider_invocations
+      WHERE tenant_id=$1 AND invocation_id=$2
+    `, [tenantId, invocationId])
+    const row = result.rows[0]
+    return row ? decodeProviderInvocation(row) : undefined
   }
 
   async deleteContent(tenantId: string, runId: string): Promise<boolean | undefined> {

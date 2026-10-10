@@ -10,6 +10,7 @@ import type {
   SourceReceiptV1,
   UploadSourcePartV1,
 } from '@cat-thinking/analysis-contracts'
+import type { ProviderInvocationLedger } from '../providers/invocationLedger.js'
 
 export class JobStoreNotFoundError extends Error {
   constructor(readonly entity: 'run' | 'source' | 'event') {
@@ -171,7 +172,7 @@ export type ExpiredRunCleanupResult =
   | Readonly<{ outcome: 'missing' | 'not_due' | 'already_clean' }>
   | Readonly<{ outcome: 'cleaned'; run: AnalysisRunV1; event?: AnalysisEventV1 }>
 
-export interface JobStore {
+export interface JobStore extends ProviderInvocationLedger {
   checkHealth(): Promise<boolean>
   createRun(
     tenantId: string,

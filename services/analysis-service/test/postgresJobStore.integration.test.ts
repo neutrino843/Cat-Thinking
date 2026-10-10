@@ -391,15 +391,16 @@ integration('PostgreSQL durable job store', () => {
     }
   })
 
-  it('upgrades an existing v2 schema to v3 without rebuilding earlier tables', async () => {
+  it('upgrades an existing v2 schema through v4 without rebuilding earlier tables', async () => {
+    await rawPool!.query('DROP TABLE analysis_provider_invocations')
     await rawPool!.query('DROP TABLE analysis_artifacts')
-    await rawPool!.query('DELETE FROM cat_analysis_schema_migrations WHERE version=3')
+    await rawPool!.query('DELETE FROM cat_analysis_schema_migrations WHERE version >= 3')
 
     const upgraded = await connectStore()
     expect(await upgraded.checkHealth()).toBe(true)
     expect(await rawPool!.query<{ version: number }>(
       'SELECT MAX(version)::integer AS version FROM cat_analysis_schema_migrations',
-    )).toMatchObject({ rows: [{ version: 3 }] })
+    )).toMatchObject({ rows: [{ version: 4 }] })
     expect(await rawPool!.query<{ table_name: string }>(`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema='public' AND table_name='analysis_artifacts'
@@ -408,6 +409,10 @@ integration('PostgreSQL durable job store', () => {
       SELECT table_name FROM information_schema.tables
       WHERE table_schema='public' AND table_name='analysis_runs'
     `)).toMatchObject({ rows: [{ table_name: 'analysis_runs' }] })
+    expect(await rawPool!.query<{ table_name: string }>(`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema='public' AND table_name='analysis_provider_invocations'
+    `)).toMatchObject({ rows: [{ table_name: 'analysis_provider_invocations' }] })
     await closeStore(upgraded)
   })
 
@@ -935,5 +940,102 @@ integration('PostgreSQL durable job store', () => {
     expect(await recovered.listEvidenceCards('tenant-postgres', created.run.id)).toEqual([])
     expect(await recovered.getCachedEvidenceCard('tenant-postgres', cacheKey, 10_200)).toBeUndefined()
     await closeStore(recovered)
+  })
+
+  it('atomically reserves provider budgets and recovers stale invocation metadata without replay', async () => {
+    const firstStore = await connectStore()
+    const secondStore = await connectStore()
+    const service = new RunService({
+      store: firstStore,
+      retentionSeconds: 3_600,
+      now: () => 30_000,
+      createId: (() => { let id = 0; return () => `provider-ledger-${++id}` })(),
+    })
+    const created = await service.createRun('tenant-postgres', makeRequest(hash('provider-ledger-request')))
+    const reservation = (invocationId: string, nodeKey: string, now: number, maxTokens = 400) => ({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      invocationId,
+      nodeKey,
+      runAttempt: 1,
+      role: 'evidence-map' as const,
+      providerId: 'approved-provider',
+      modelId: 'approved/model-v1',
+      profileVersion: 'profile-v1',
+      promptVersion: 'prompt-v1',
+      estimatedInputTokens: 100,
+      reservedOutputTokens: 200,
+      estimatedCostMicros: 500,
+      maxRunEstimatedTokens: maxTokens,
+      maxRunEstimatedCostMicros: 10_000,
+      staleAfterMs: 1_000,
+      now,
+    })
+
+    const concurrent = await Promise.all([
+      firstStore.reserveProviderInvocation(reservation('provider-call-a', 'provider-node-a', 30_000)),
+      secondStore.reserveProviderInvocation(reservation('provider-call-b', 'provider-node-b', 30_000)),
+    ])
+    expect(concurrent.map((result) => result.outcome).sort()).toEqual(['budget_exceeded', 'reserved'])
+    const reserved = concurrent.find((result) => result.outcome === 'reserved')
+    if (!reserved || reserved.outcome !== 'reserved') throw new Error('expected one provider reservation')
+
+    const completed = await firstStore.completeProviderInvocation({
+      tenantId: 'tenant-postgres',
+      invocationId: reserved.invocation.invocationId,
+      transportAttempts: 1,
+      now: 30_100,
+      result: 'succeeded',
+      actualInputTokens: 80,
+      actualOutputTokens: 40,
+      providerRequestId: 'provider-request-postgres',
+    })
+    expect(completed).toMatchObject({ outcome: 'updated', invocation: { status: 'succeeded' } })
+    await expect(firstStore.completeProviderInvocation({
+      tenantId: 'tenant-postgres',
+      invocationId: reserved.invocation.invocationId,
+      transportAttempts: 1,
+      now: 30_200,
+      result: 'failed',
+      safeCode: 'must_not_overwrite',
+    })).resolves.toMatchObject({ outcome: 'state_conflict', invocation: { status: 'succeeded' } })
+
+    const staleId = reserved.invocation.invocationId === 'provider-call-a' ? 'provider-call-b' : 'provider-call-a'
+    const staleNode = staleId === 'provider-call-a' ? 'provider-node-a' : 'provider-node-b'
+    expect(await firstStore.reserveProviderInvocation(reservation(staleId, staleNode, 31_000, 1_000)))
+      .toMatchObject({ outcome: 'reserved', invocation: { status: 'running' } })
+    expect(await secondStore.reserveProviderInvocation(reservation(staleId, staleNode, 32_000, 1_000)))
+      .toMatchObject({ outcome: 'existing', invocation: { status: 'outcome_unknown' } })
+    await expect(firstStore.reserveProviderInvocation({
+      ...reservation(staleId, 'different-node', 32_100, 1_000),
+    })).rejects.toBeInstanceOf(JobStoreConflictError)
+
+    await closeStore(firstStore)
+    await closeStore(secondStore)
+    const reopened = await connectStore()
+    expect(await reopened.getProviderInvocation('tenant-postgres', reserved.invocation.invocationId))
+      .toMatchObject({ status: 'succeeded', actualInputTokens: 80, actualOutputTokens: 40 })
+    expect(await reopened.getProviderInvocation('tenant-postgres', staleId))
+      .toMatchObject({ status: 'outcome_unknown' })
+    expect(await reopened.completeProviderInvocation({
+      tenantId: 'tenant-postgres',
+      invocationId: 'missing-provider-call',
+      transportAttempts: 0,
+      now: 32_200,
+      result: 'failed',
+      safeCode: 'missing',
+    })).toEqual({ outcome: 'missing' })
+
+    const columns = await rawPool!.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='analysis_provider_invocations'
+    `)
+    expect(columns.rows.map((row) => row.column_name)).not.toEqual(expect.arrayContaining([
+      'prompt',
+      'source_text',
+      'raw_response',
+      'api_key',
+    ]))
+    await closeStore(reopened)
   })
 })
