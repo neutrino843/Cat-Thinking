@@ -315,7 +315,7 @@ integration('PostgreSQL durable job store', () => {
 
   it('rolls back an invalid transition and reports direct cleanup edge cases', async () => {
     const store = await connectStore()
-    const service = new RunService({ store, retentionSeconds: 0 })
+    const service = new RunService({ store, retentionSeconds: 1, now: () => 1_000 })
     const run = (await service.createRun('tenant-postgres', makeRequest())).run
     await service.uploadSource('tenant-postgres', run.id, sourcePart())
     await expect(store.transitionRun('tenant-postgres', run.id, 1, (current, sequence) => ({
@@ -342,7 +342,7 @@ integration('PostgreSQL durable job store', () => {
       .toEqual({ outcome: 'not_due' })
     expect(await store.cleanupExpiredRun('tenant-postgres', 'missing-run', 1, () => undefined))
       .toEqual({ outcome: 'missing' })
-    const cleanupNow = Number.MAX_SAFE_INTEGER
+    const cleanupNow = 2_000
     await expect(store.cleanupExpiredRun('tenant-postgres', run.id, cleanupNow, (current, sequence) => {
       const next = analysisRunSchema.parse({
         ...current,
