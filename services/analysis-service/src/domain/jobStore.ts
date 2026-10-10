@@ -1,6 +1,9 @@
 import type {
   AnalysisEventV1,
   AnalysisRunV1,
+  ArtifactDescriptorV1,
+  ArtifactEnvelopeV1,
+  ArtifactKind,
   EvidenceCardV1,
   EvidenceChunkV1,
   EvidenceGraphV1,
@@ -75,6 +78,38 @@ export interface CommitEvidenceGraphInput {
   readonly build: (current: AnalysisRunV1, nextSequence: number) => RunTransition
 }
 
+export interface StoredArtifact {
+  readonly descriptor: ArtifactDescriptorV1
+  readonly artifact: ArtifactEnvelopeV1
+}
+
+export interface ArtifactTransition {
+  readonly run: AnalysisRunV1
+  readonly events: readonly AnalysisEventV1[]
+}
+
+interface CommitArtifactInputBase {
+  readonly tenantId: string
+  readonly runId: string
+  readonly kind: ArtifactKind
+  readonly expectedRevision: number
+  readonly expectedAttempt: number
+  readonly lease: LeaseIdentity
+  readonly now: number
+  readonly build: (current: AnalysisRunV1, nextSequence: number) => ArtifactTransition
+}
+
+export type CommitArtifactInput = CommitArtifactInputBase & (
+  | Readonly<{
+      result: 'succeeded'
+      descriptor: ArtifactDescriptorV1
+      artifact: ArtifactEnvelopeV1
+    }>
+  | Readonly<{
+      result: 'failed'
+    }>
+)
+
 export interface StoreSourcePartInput {
   readonly tenantId: string
   readonly runId: string
@@ -95,6 +130,12 @@ export type RunTransitionResult =
 export type EvidenceGraphCommitResult =
   | RunTransitionResult
   | Readonly<{ outcome: 'lease_conflict' }>
+
+export type ArtifactCommitResult =
+  | Readonly<{ outcome: 'updated'; run: AnalysisRunV1; events: readonly AnalysisEventV1[] }>
+  | Readonly<{ outcome: 'missing' }>
+  | Readonly<{ outcome: 'revision_conflict'; run: AnalysisRunV1 }>
+  | Readonly<{ outcome: 'lease_conflict' | 'attempt_conflict' }>
 
 export interface JobLease {
   readonly runId: string
@@ -158,6 +199,12 @@ export interface JobStore {
   listEvidenceCards(tenantId: string, runId: string): Promise<readonly StoredEvidenceCard[] | undefined>
   commitEvidenceGraph(input: CommitEvidenceGraphInput): Promise<EvidenceGraphCommitResult>
   getEvidenceGraph(tenantId: string, runId: string): Promise<EvidenceGraphV1 | undefined>
+  getArtifact(tenantId: string, runId: string, kind: ArtifactKind): Promise<StoredArtifact | undefined>
+  listArtifactDescriptors(
+    tenantId: string,
+    runId: string,
+  ): Promise<readonly ArtifactDescriptorV1[] | undefined>
+  commitArtifact(input: CommitArtifactInput): Promise<ArtifactCommitResult>
   deleteContent(tenantId: string, runId: string): Promise<boolean | undefined>
   listEvents(
     tenantId: string,

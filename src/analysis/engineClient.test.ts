@@ -4,6 +4,8 @@ import {
   analysisRunSchema,
   type AnalysisEventV1,
   type AnalysisRunV1,
+  type ArtifactEnvelopeV1,
+  type ArtifactKind,
 } from '@cat-thinking/analysis-contracts'
 import requestFixture from '../../packages/analysis-contracts/fixtures/analysis-request.valid.json'
 import {
@@ -61,6 +63,33 @@ const progressEvent: AnalysisEventV1 = {
   createdAt: 1791500000100,
   stage: 'mapping',
   progress: 0.5,
+}
+
+const summaryArtifact: ArtifactEnvelopeV1 = {
+  version: 1,
+  schemaVersion: 1,
+  id: 'artifact-summary',
+  runId: 'run-1',
+  docId: 'doc-photosynthesis',
+  kind: 'summary',
+  sourceContentHashes: ['a'.repeat(64)],
+  payload: {
+    overview: {
+      id: 'overview-1',
+      text: 'Overview',
+      evidenceIds: ['claim-1'],
+      citations: [{ version: 1, provenance: 'source', sourceId: 'source-photosynthesis', start: 0, end: 10 }],
+    },
+    keyPoints: [{
+      id: 'point-1',
+      text: 'Key point',
+      evidenceIds: ['claim-1'],
+      citations: [{ version: 1, provenance: 'source', sourceId: 'source-photosynthesis', start: 0, end: 10 }],
+    }],
+    confusions: [],
+  },
+  createdAt: 1791500000000,
+  updatedAt: 1791500000000,
 }
 
 const sseResponse = (frames: readonly string[]): Response => {
@@ -139,6 +168,14 @@ describe('HTTP analysis engine client', () => {
     await expect(oversized.capabilities(new AbortController().signal)).rejects.toMatchObject({
       code: 'response_too_large',
     })
+
+    const encoder = new TextEncoder()
+    const missingType = new HttpAnalysisEngineClient(fetcher(async () =>
+      new Response(encoder.encode(JSON.stringify(capabilities)))),
+    )
+    await expect(missingType.capabilities(new AbortController().signal)).rejects.toMatchObject({
+      code: 'invalid_response',
+    })
   })
 
   it('classifies retryable HTTP failures without exposing response bodies', async () => {
@@ -190,6 +227,7 @@ describe('HTTP analysis engine client', () => {
       if (url.endsWith('/artifacts/summary/retry')) {
         return jsonResponse({ version: 1, runId: 'run-1', kind: 'summary', revision: 2, accepted: true })
       }
+      if (url.endsWith('/artifacts/summary')) return jsonResponse(summaryArtifact)
       if (url.endsWith('/content')) return jsonResponse({ version: 1, runId: 'run-1', deleted: true })
       if (url.endsWith('/runs') && method === 'POST') {
         return jsonResponse({ version: 1, run, reused: false })
@@ -220,6 +258,7 @@ describe('HTTP analysis engine client', () => {
     await expect(client.retryArtifact('run-1', 'summary', 1, new AbortController().signal)).resolves.toMatchObject({
       kind: 'summary',
     })
+    await expect(client.getArtifact('run-1', 'summary', new AbortController().signal)).resolves.toEqual(summaryArtifact)
     await expect(client.deleteContent('run-1', new AbortController().signal)).resolves.toMatchObject({ deleted: true })
 
     expect(calls).toEqual(
@@ -227,9 +266,25 @@ describe('HTTP analysis engine client', () => {
         { url: `${ANALYSIS_API_PREFIX}/runs`, method: 'POST' },
         { url: `${ANALYSIS_API_PREFIX}/runs/run-1/start`, method: 'POST' },
         { url: `${ANALYSIS_API_PREFIX}/runs/run-1`, method: 'GET' },
+        { url: `${ANALYSIS_API_PREFIX}/runs/run-1/artifacts/summary`, method: 'GET' },
         { url: `${ANALYSIS_API_PREFIX}/runs/run-1/content`, method: 'DELETE' },
       ]),
     )
+  })
+
+  it('rejects an artifact whose identity differs from its route', async () => {
+    const client = new HttpAnalysisEngineClient(fetcher(async () => jsonResponse({
+      ...summaryArtifact,
+      runId: 'run-other',
+    })))
+
+    await expect(client.getArtifact('run-1', 'summary', new AbortController().signal)).rejects.toMatchObject({
+      code: 'invalid_response',
+    })
+    const wrongKind = new HttpAnalysisEngineClient(fetcher(async () => jsonResponse(summaryArtifact)))
+    await expect(wrongKind.getArtifact('run-1', 'quiz', new AbortController().signal)).rejects.toMatchObject({
+      code: 'invalid_response',
+    })
   })
 
   it('rejects invalid run identifiers before issuing a request', async () => {
@@ -237,6 +292,11 @@ describe('HTTP analysis engine client', () => {
     const client = new HttpAnalysisEngineClient(mockFetch)
 
     await expect(client.getRun('../secret', new AbortController().signal)).rejects.toBeDefined()
+    await expect(client.getArtifact(
+      'run-1',
+      '../summary' as ArtifactKind,
+      new AbortController().signal,
+    )).rejects.toBeDefined()
     expect(mockFetch).not.toHaveBeenCalled()
   })
 
@@ -290,6 +350,15 @@ describe('HTTP analysis engine client', () => {
     for await (const event of client.events('run-1', { signal: new AbortController().signal })) events.push(event)
 
     expect(events).toEqual([acceptedEvent])
+
+    const compact = new HttpAnalysisEngineClient(
+      fetcher(async () => sseResponse([`id:event-0\ndata:${JSON.stringify(acceptedEvent)}\n\n`])),
+    )
+    const compactEvents: AnalysisEventV1[] = []
+    for await (const event of compact.events('run-1', { signal: new AbortController().signal })) {
+      compactEvents.push(event)
+    }
+    expect(compactEvents).toEqual([acceptedEvent])
   })
 
   it('rejects invalid event-stream responses and oversized incomplete frames', async () => {
@@ -300,6 +369,18 @@ describe('HTTP analysis engine client', () => {
     const tooLarge = new HttpAnalysisEngineClient(
       fetcher(async () => sseResponse([`: ${'x'.repeat(MAX_ANALYSIS_EVENT_BYTES + 1)}`])),
     )
+    const tooLargeComplete = new HttpAnalysisEngineClient(
+      fetcher(async () => sseResponse([`: ${'x'.repeat(MAX_ANALYSIS_EVENT_BYTES + 1)}\n\n`])),
+    )
+    const missingType = new HttpAnalysisEngineClient(fetcher(async () => {
+      const encoder = new TextEncoder()
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(`id:event-0\ndata:${JSON.stringify(acceptedEvent)}\n\n`))
+          controller.close()
+        },
+      }))
+    }))
 
     const consume = async (client: HttpAnalysisEngineClient): Promise<void> => {
       for await (const event of client.events('run-1', { signal: new AbortController().signal })) void event
@@ -308,6 +389,8 @@ describe('HTTP analysis engine client', () => {
     await expect(consume(wrongType)).rejects.toMatchObject({ code: 'invalid_response' })
     await expect(consume(noBody)).rejects.toMatchObject({ code: 'invalid_response' })
     await expect(consume(tooLarge)).rejects.toMatchObject({ code: 'response_too_large' })
+    await expect(consume(tooLargeComplete)).rejects.toMatchObject({ code: 'response_too_large' })
+    await expect(consume(missingType)).rejects.toMatchObject({ code: 'invalid_response' })
   })
 
   it('rejects invalid JSON bodies and streamed JSON beyond the byte cap', async () => {

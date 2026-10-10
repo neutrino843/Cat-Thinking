@@ -1,6 +1,8 @@
 import {
   analysisEventSchema,
   analysisRunSchema,
+  artifactEnvelopeSchema,
+  artifactKindSchema,
   cancelRunRequestSchema,
   cancelRunResultSchema,
   createAnalysisRunSchema,
@@ -17,6 +19,7 @@ import {
   type AnalysisEventV1,
   type AnalysisRequestV1,
   type AnalysisRunV1,
+  type ArtifactEnvelopeV1,
   type ArtifactKind,
   type CancelRunResultV1,
   type DeleteRunContentResultV1,
@@ -29,7 +32,7 @@ import {
 
 export const ANALYSIS_API_PREFIX = '/api/analysis/v1' as const
 export const MAX_ANALYSIS_JSON_BYTES = 2_100_000
-export const MAX_ANALYSIS_EVENT_BYTES = 2_100_000
+export const MAX_ANALYSIS_EVENT_BYTES = 65_536
 
 type FetchLike = typeof fetch
 
@@ -73,6 +76,7 @@ export interface AnalysisEngineClient {
     expectedRevision: number,
     signal: AbortSignal,
   ): Promise<RetryArtifactAcceptedV1>
+  getArtifact(runId: string, kind: ArtifactKind, signal: AbortSignal): Promise<ArtifactEnvelopeV1>
   deleteContent(runId: string, signal: AbortSignal): Promise<DeleteRunContentResultV1>
 }
 
@@ -336,6 +340,24 @@ export class HttpAnalysisEngineClient implements AnalysisEngineClient {
       },
     )
     return decodeJsonResponse(response, retryArtifactAcceptedSchema)
+  }
+
+  async getArtifact(runId: string, kind: ArtifactKind, signal: AbortSignal): Promise<ArtifactEnvelopeV1> {
+    const decodedKind = artifactKindSchema.parse(kind)
+    const response = await this.fetcher(
+      apiPath(`${runPath(runId)}/artifacts/${encodeURIComponent(decodedKind)}`),
+      {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+        signal,
+      },
+    )
+    const artifact = await decodeJsonResponse(response, artifactEnvelopeSchema)
+    if (artifact.runId !== runId || artifact.kind !== decodedKind) {
+      throw new AnalysisClientError('invalid_response', 'Analysis artifact identity differs from its route', false)
+    }
+    return artifact
   }
 
   async deleteContent(runId: string, signal: AbortSignal): Promise<DeleteRunContentResultV1> {

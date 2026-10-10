@@ -41,6 +41,13 @@ export const analysisRequestSchema = z
     if (!uniqueValues(request.artifacts)) {
       context.addIssue({ code: 'custom', message: 'artifact kinds must be unique', path: ['artifacts'] })
     }
+    if (request.artifacts.includes('mindmap') && !request.artifacts.includes('outline')) {
+      context.addIssue({
+        code: 'custom',
+        message: 'mindmap requires outline',
+        path: ['artifacts'],
+      })
+    }
   })
 
 export const artifactStateSchema = z
@@ -147,4 +154,5 @@ export type AnalysisRequestV1 = z.infer<typeof analysisRequestSchema>
 export type ArtifactStateV1 = z.infer<typeof artifactStateSchema>
 export type CoverageV1 = z.infer<typeof coverageSchema>
 export type UsageV1 = z.infer<typeof usageSchema>
+export type ProviderRouteV1 = z.infer<typeof providerRouteSchema>
 export type AnalysisRunV1 = z.infer<typeof analysisRunSchema>

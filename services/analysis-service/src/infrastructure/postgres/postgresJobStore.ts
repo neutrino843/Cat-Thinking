@@ -1,6 +1,9 @@
 import {
   analysisEventSchema,
   analysisRunSchema,
+  artifactDescriptorSchema,
+  artifactEnvelopeSchema,
+  canonicalizeJson,
   evidenceCardSchema,
   evidenceChunkSchema,
   evidenceGraphSchema,
@@ -8,14 +11,18 @@ import {
   uploadSourcePartSchema,
   type AnalysisEventV1,
   type AnalysisRunV1,
+  type ArtifactDescriptorV1,
+  type ArtifactKind,
   type EvidenceGraphV1,
   type SourceReceiptV1,
 } from '@cat-thinking/analysis-contracts'
 import { Pool, type PoolClient, type QueryResultRow } from 'pg'
 import type { AnalysisServiceConfig } from '../../config.js'
+import { validateArtifactDescriptor } from '../../domain/artifactValidator.js'
 import {
   JobStoreConflictError,
   JobStoreNotFoundError,
+  type CommitArtifactInput,
   type CommitEvidenceGraphInput,
   type ExpiredRunReference,
   type ExpiredRunCleanupResult,
@@ -28,12 +35,14 @@ import {
   type StoreSourcePartInput,
   type StoreEvidenceCardInput,
   type StoredEvidenceCard,
+  type StoredArtifact,
   type StoredSourceContent,
   type StoredSourcePart,
   type StoredSourceUpload,
 } from '../../domain/jobStore.js'
 import type { ContentCipher, EncryptedContent } from '../contentCipher.js'
 import {
+  artifactEncryptionContext,
   evidenceCardEncryptionContext,
   evidenceGraphEncryptionContext,
   sourcePartEncryptionContext,
@@ -97,6 +106,20 @@ interface EvidenceGraphRow extends QueryResultRow {
   iv: Buffer
   auth_tag: Buffer
   ciphertext: Buffer
+}
+
+interface ArtifactRow extends QueryResultRow {
+  artifact_id: string
+  artifact_hash: string
+  schema_version: number
+  kind: string
+  byte_count: string | number
+  key_id: string
+  iv: Buffer
+  auth_tag: Buffer
+  ciphertext: Buffer
+  created_at: string | number
+  updated_at: string | number
 }
 
 const decodeRun = (row: RunRow): AnalysisRunV1 => analysisRunSchema.parse(row.run_json)
@@ -617,6 +640,165 @@ export class PostgresJobStore implements JobStore {
     }, context)))
   }
 
+  async getArtifact(tenantId: string, runId: string, kind: ArtifactKind): Promise<StoredArtifact | undefined> {
+    const result = await this.pool.query<ArtifactRow>(`
+      SELECT artifact.artifact_id, artifact.artifact_hash, artifact.schema_version,
+        artifact.kind, artifact.byte_count, artifact.key_id, artifact.iv,
+        artifact.auth_tag, artifact.ciphertext, artifact.created_at, artifact.updated_at
+      FROM analysis_artifacts artifact
+      JOIN analysis_runs run ON run.run_id=artifact.run_id
+      WHERE run.tenant_id=$1 AND artifact.run_id=$2 AND artifact.kind=$3
+    `, [tenantId, runId, kind])
+    const row = result.rows[0]
+    return row ? this.decodeArtifact(tenantId, runId, row) : undefined
+  }
+
+  async listArtifactDescriptors(
+    tenantId: string,
+    runId: string,
+  ): Promise<readonly ArtifactDescriptorV1[] | undefined> {
+    const run = await this.pool.query('SELECT 1 FROM analysis_runs WHERE tenant_id=$1 AND run_id=$2', [tenantId, runId])
+    if (run.rowCount !== 1) return undefined
+    const result = await this.pool.query<ArtifactRow>(`
+      SELECT artifact_id, artifact_hash, schema_version, kind, byte_count,
+        key_id, iv, auth_tag, ciphertext, created_at, updated_at
+      FROM analysis_artifacts
+      WHERE tenant_id=$1 AND run_id=$2
+      ORDER BY kind ASC
+    `, [tenantId, runId])
+    return result.rows.map((row) => this.artifactDescriptor(runId, row))
+  }
+
+  async commitArtifact(input: CommitArtifactInput) {
+    this.assertLeaseScope(input.tenantId, input.runId, input.lease)
+    const stored = input.result === 'succeeded'
+      ? {
+          descriptor: artifactDescriptorSchema.parse(input.descriptor),
+          artifact: artifactEnvelopeSchema.parse(input.artifact),
+        }
+      : undefined
+    if (stored && (
+      stored.descriptor.runId !== input.runId
+      || stored.descriptor.kind !== input.kind
+      || stored.artifact.runId !== input.runId
+      || stored.artifact.kind !== input.kind
+      || stored.descriptor.id !== stored.artifact.id
+    )) throw new TypeError('artifact identity differs from commit scope')
+    if (stored) validateArtifactDescriptor(stored.artifact, stored.descriptor)
+    const encrypted = stored
+      ? this.cipher.encrypt(
+          JSON.stringify(stored.artifact),
+          artifactEncryptionContext(input.tenantId, input.runId, input.kind, stored.descriptor.artifactHash),
+        )
+      : undefined
+
+    return this.transaction(async (client) => {
+      const selected = await client.query<LockedRunRow>(`
+        SELECT run_json, content_deleted_at FROM analysis_runs
+        WHERE tenant_id=$1 AND run_id=$2 FOR UPDATE
+      `, [input.tenantId, input.runId])
+      const row = selected.rows[0]
+      if (!row) return { outcome: 'missing' } as const
+      const current = decodeRun(row)
+      if (current.revision !== input.expectedRevision) {
+        return { outcome: 'revision_conflict', run: current } as const
+      }
+      if (
+        row.content_deleted_at !== null
+        || !await this.hasActiveLease(client, input.lease, input.now, true)
+      ) return { outcome: 'lease_conflict' } as const
+      const state = current.artifactStates[input.kind]
+      if (!state || state.status !== 'running' || state.attempt !== input.expectedAttempt) {
+        return { outcome: 'attempt_conflict' } as const
+      }
+
+      const sequenceResult = await client.query<{ next_sequence: string | number }>(`
+        SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence
+        FROM analysis_events WHERE run_id=$1
+      `, [input.runId])
+      const nextSequence = Number(sequenceResult.rows[0]?.next_sequence ?? 0)
+      const transition = input.build(current, nextSequence)
+      const run = analysisRunSchema.parse(transition.run)
+      const events = transition.events.map((event) => analysisEventSchema.parse(event))
+      if (run.id !== input.runId || run.revision !== input.expectedRevision + 1 || events.length < 1 || events.length > 2) {
+        throw new TypeError('artifact transition identity or revision is invalid')
+      }
+      for (const [index, event] of events.entries()) {
+        if (
+          event.runId !== input.runId
+          || event.runRevision !== run.revision
+          || event.sequence !== nextSequence + index
+        ) throw new TypeError('artifact event identity, revision, or sequence is invalid')
+      }
+      const first = events[0]
+      if (
+        !first
+        || (input.result === 'succeeded'
+          ? first.type !== 'artifact.ready'
+            || first.descriptor.kind !== input.kind
+            || !stored
+            || canonicalizeJson(first.descriptor) !== canonicalizeJson(stored.descriptor)
+          : first.type !== 'artifact.failed' || first.kind !== input.kind)
+      ) throw new TypeError('artifact commit event does not match its result')
+      const terminal = events[1]
+      if (terminal && terminal.type !== 'run.completed' && terminal.type !== 'run.failed') {
+        throw new TypeError('artifact terminal event is invalid')
+      }
+
+      if (stored && encrypted) {
+        await client.query(`
+          INSERT INTO analysis_artifacts(
+            run_id, kind, tenant_id, artifact_id, artifact_hash, schema_version,
+            byte_count, key_id, iv, auth_tag, ciphertext, created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          ON CONFLICT (run_id,kind) DO UPDATE SET
+            tenant_id=EXCLUDED.tenant_id,
+            artifact_id=EXCLUDED.artifact_id,
+            artifact_hash=EXCLUDED.artifact_hash,
+            schema_version=EXCLUDED.schema_version,
+            byte_count=EXCLUDED.byte_count,
+            key_id=EXCLUDED.key_id,
+            iv=EXCLUDED.iv,
+            auth_tag=EXCLUDED.auth_tag,
+            ciphertext=EXCLUDED.ciphertext,
+            created_at=EXCLUDED.created_at,
+            updated_at=EXCLUDED.updated_at
+        `, [
+          input.runId,
+          input.kind,
+          input.tenantId,
+          stored.descriptor.id,
+          stored.descriptor.artifactHash,
+          stored.descriptor.schemaVersion,
+          stored.descriptor.byteCount,
+          encrypted.keyId,
+          encrypted.iv,
+          encrypted.authTag,
+          encrypted.ciphertext,
+          stored.descriptor.createdAt,
+          stored.descriptor.updatedAt,
+        ])
+      }
+      const updated = await client.query(`
+        UPDATE analysis_runs
+        SET revision=$1, status=$2, run_json=$3, expires_at=$4, updated_at=$5
+        WHERE tenant_id=$6 AND run_id=$7 AND revision=$8
+      `, [
+        run.revision,
+        run.status,
+        run,
+        run.expiresAt ?? null,
+        run.updatedAt,
+        input.tenantId,
+        input.runId,
+        input.expectedRevision,
+      ])
+      if (updated.rowCount !== 1) throw new Error('locked run revision changed unexpectedly')
+      for (const event of events) await this.insertEvent(client, event)
+      return { outcome: 'updated', run, events } as const
+    })
+  }
+
   async deleteContent(tenantId: string, runId: string): Promise<boolean | undefined> {
     return this.transaction(async (client) => {
       const selected = await client.query<{ content_deleted_at: string | number | null }>(`
@@ -721,7 +903,9 @@ export class PostgresJobStore implements JobStore {
     if (request.durationMs <= 0) throw new RangeError('lease duration must be positive')
     return this.transaction(async (client) => {
       const run = await client.query(
-        'SELECT 1 FROM analysis_runs WHERE tenant_id=$1 AND run_id=$2',
+        `SELECT 1 FROM analysis_runs
+         WHERE tenant_id=$1 AND run_id=$2 AND content_deleted_at IS NULL
+           AND status NOT IN ('partial','succeeded','cancelled','failed','expired')`,
         [request.tenantId, request.runId],
       )
       if (run.rowCount !== 1) return undefined
@@ -765,6 +949,8 @@ export class PostgresJobStore implements JobStore {
       WHERE lease.run_id=run.run_id
         AND run.tenant_id=$3 AND lease.run_id=$4 AND lease.node_key=$5
         AND lease.owner_id=$6 AND lease.attempt=$7 AND lease.expires_at>$2
+        AND run.content_deleted_at IS NULL
+        AND run.status NOT IN ('partial','succeeded','cancelled','failed','expired')
       RETURNING lease.owner_id, lease.attempt, lease.expires_at
     `, [expiresAt, now, identity.tenantId, identity.runId, identity.nodeKey, identity.ownerId, identity.attempt])
     if (!result.rows[0]) return undefined
@@ -878,6 +1064,33 @@ export class PostgresJobStore implements JobStore {
     }
   }
 
+  private artifactDescriptor(runId: string, row: ArtifactRow): ArtifactDescriptorV1 {
+    return artifactDescriptorSchema.parse({
+      version: row.schema_version,
+      schemaVersion: row.schema_version,
+      id: row.artifact_id,
+      runId,
+      kind: row.kind,
+      artifactHash: row.artifact_hash,
+      byteCount: Number(row.byte_count),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    })
+  }
+
+  private decodeArtifact(tenantId: string, runId: string, row: ArtifactRow): StoredArtifact {
+    const descriptor = this.artifactDescriptor(runId, row)
+    const context = artifactEncryptionContext(tenantId, runId, descriptor.kind, descriptor.artifactHash)
+    const artifact = artifactEnvelopeSchema.parse(JSON.parse(this.cipher.decrypt({
+      keyId: row.key_id,
+      iv: row.iv,
+      authTag: row.auth_tag,
+      ciphertext: row.ciphertext,
+    }, context)))
+    validateArtifactDescriptor(artifact, descriptor)
+    return { descriptor, artifact }
+  }
+
   private async hasActiveLease(
     client: PoolClient,
     identity: LeaseIdentity,
@@ -897,11 +1110,12 @@ export class PostgresJobStore implements JobStore {
 
   private assertLeaseScope(tenantId: string, runId: string, identity: LeaseIdentity): void {
     if (identity.tenantId !== tenantId || identity.runId !== runId) {
-      throw new JobStoreConflictError('lease identity does not match evidence scope')
+      throw new JobStoreConflictError('lease identity does not match run scope')
     }
   }
 
   private async deleteEvidenceForRun(client: PoolClient, tenantId: string, runId: string): Promise<void> {
+    await client.query('DELETE FROM analysis_artifacts WHERE run_id=$1', [runId])
     await client.query('DELETE FROM analysis_evidence_graphs WHERE run_id=$1', [runId])
     await client.query('DELETE FROM analysis_run_evidence WHERE run_id=$1', [runId])
     await client.query(`

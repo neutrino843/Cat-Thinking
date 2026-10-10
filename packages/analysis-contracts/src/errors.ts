@@ -12,6 +12,7 @@ export const analysisErrorCodeSchema = z.enum([
   'schema_invalid',
   'citation_invalid',
   'artifact_invalid',
+  'dependency_failed',
   'unauthorized',
   'forbidden',
   'rate_limited',

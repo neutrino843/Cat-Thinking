@@ -15,6 +15,7 @@ import {
   type AnalysisEventV1,
   type AnalysisRequestV1,
   type AnalysisRunV1,
+  type ArtifactEnvelopeV1,
   type ArtifactKind,
   type CancelRunResultV1,
   type DeleteRunContentResultV1,
@@ -371,8 +372,8 @@ export class RunService {
         const next = analysisRunSchema.parse({
           ...run,
           revision: run.revision + 1,
-          status: 'queued',
-          stage: 'planning',
+          status: 'generating',
+          stage: kind,
           updatedAt: now,
           completedAt: undefined,
           error: undefined,
@@ -391,7 +392,7 @@ export class RunService {
             runRevision: next.revision,
             sequence: nextSequence,
             createdAt: now,
-            stage: 'planning',
+            stage: kind,
           }),
         }
       },
@@ -405,6 +406,13 @@ export class RunService {
       revision: run.revision,
       accepted: true,
     })
+  }
+
+  async getArtifact(tenantId: string, runId: string, kind: ArtifactKind): Promise<ArtifactEnvelopeV1> {
+    await this.requireRun(tenantId, runId)
+    const stored = await this.store.getArtifact(tenantId, runId, kind)
+    if (!stored) throw httpError(404, 'invalid_request', 'client', false, 'analysis.artifact.not_found', { kind })
+    return stored.artifact
   }
 
   async deleteContent(tenantId: string, runId: string): Promise<DeleteRunContentResultV1> {

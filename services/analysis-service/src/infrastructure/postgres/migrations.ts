@@ -7,7 +7,7 @@ interface Migration {
 
 const MIGRATION_LOCK_ID = 843_202_610
 
-export const ANALYSIS_SCHEMA_VERSION = 2
+export const ANALYSIS_SCHEMA_VERSION = 3
 
 export const ANALYSIS_MIGRATIONS: readonly Migration[] = [
   {
@@ -137,6 +137,32 @@ export const ANALYSIS_MIGRATIONS: readonly Migration[] = [
         FOREIGN KEY (run_id, tenant_id)
           REFERENCES analysis_runs(run_id, tenant_id) ON DELETE CASCADE
       );
+    `,
+  },
+  {
+    version: 3,
+    sql: `
+      CREATE TABLE analysis_artifacts (
+        run_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        artifact_hash CHAR(64) NOT NULL,
+        schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+        byte_count BIGINT NOT NULL CHECK (byte_count >= 0),
+        key_id TEXT NOT NULL,
+        iv BYTEA NOT NULL,
+        auth_tag BYTEA NOT NULL,
+        ciphertext BYTEA NOT NULL,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY (run_id, kind),
+        FOREIGN KEY (run_id, tenant_id)
+          REFERENCES analysis_runs(run_id, tenant_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX analysis_artifacts_tenant_run_idx
+        ON analysis_artifacts (tenant_id, run_id);
     `,
   },
 ]

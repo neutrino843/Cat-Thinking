@@ -196,7 +196,11 @@ describe('durable run service with the reference store', () => {
     const retried = await service.retryArtifact('tenant-1', created.run.id, 'summary', 2)
     const run = await service.getRun('tenant-1', created.run.id)
     expect(retried).toMatchObject({ accepted: true, revision: 3, kind: 'summary' })
-    expect(run).toMatchObject({ status: 'queued', artifactStates: { summary: { status: 'pending', attempt: 1 } } })
+    expect(run).toMatchObject({
+      status: 'generating',
+      stage: 'summary',
+      artifactStates: { summary: { status: 'pending', attempt: 1 } },
+    })
     await expectServiceError(service.retryArtifact('tenant-1', created.run.id, 'summary', 3), 409, 'conflict')
     await expectServiceError(service.retryArtifact('tenant-1', created.run.id, 'mindmap', 3), 409, 'conflict')
     await expectServiceError(service.retryArtifact('tenant-1', 'missing-run', 'summary', 1), 404, 'invalid_request')

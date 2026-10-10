@@ -240,6 +240,24 @@ describe('durable analysis HTTP lifecycle', () => {
       payload: { version: 1, kind: 'summary', expectedRevision: cancelled.revision },
     })
     expect(retried.json()).toMatchObject({ accepted: true, kind: 'summary', revision: 3 })
+    const missingArtifact = await server.inject({
+      method: 'GET',
+      url: `/api/analysis/v1/runs/${created.run.id}/artifacts/summary`,
+      headers,
+    })
+    expect(missingArtifact.statusCode).toBe(404)
+    expect(analysisErrorResponseSchema.parse(missingArtifact.json()).error.messageKey).toBe(
+      'analysis.artifact.not_found',
+    )
+    const invalidArtifactKind = await server.inject({
+      method: 'GET',
+      url: `/api/analysis/v1/runs/${created.run.id}/artifacts/not-a-kind`,
+      headers,
+    })
+    expect(invalidArtifactKind.statusCode).toBe(400)
+    expect(analysisErrorResponseSchema.parse(invalidArtifactKind.json()).error.messageKey).toBe(
+      'analysis.artifact.kind_invalid',
+    )
     const retryMismatch = await server.inject({
       method: 'POST',
       url: `/api/analysis/v1/runs/${created.run.id}/artifacts/quiz/retry`,

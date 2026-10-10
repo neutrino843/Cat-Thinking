@@ -3,6 +3,7 @@ import {
   analysisEventSchema,
   analysisRequestSchema,
   analysisRunSchema,
+  artifactEnvelopeSchema,
   canonicalizeJson,
   evidenceCardSchema,
   type AnalysisRequestV1,
@@ -11,6 +12,7 @@ import {
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { RunService } from '../src/domain/runService.js'
+import { createArtifactDescriptor } from '../src/domain/artifactValidator.js'
 import { hashChunkPlan, planEvidenceChunks } from '../src/domain/chunkPlanner.js'
 import { calculateEvidenceCoverage, mergeEvidenceCards } from '../src/domain/evidenceMerger.js'
 import { JobStoreConflictError, JobStoreNotFoundError } from '../src/domain/jobStore.js'
@@ -61,6 +63,45 @@ const sourcePart = (): UploadSourcePartV1 => ({
   end: plaintext.length,
   totalChars: plaintext.length,
   text: plaintext,
+})
+
+const summaryArtifactFor = (runId: string) => artifactEnvelopeSchema.parse({
+  version: 1,
+  schemaVersion: 1,
+  id: 'artifact-postgres-summary',
+  runId,
+  docId: 'doc-postgres',
+  kind: 'summary',
+  sourceContentHashes: [hash(plaintext)],
+  payload: {
+    overview: {
+      id: 'summary-overview',
+      text: 'Encrypted artifact marker',
+      evidenceIds: ['claim-postgres'],
+      citations: [{
+        version: 1,
+        provenance: 'source',
+        sourceId: 'source-postgres',
+        start: 0,
+        end: 10,
+      }],
+    },
+    keyPoints: [{
+      id: 'summary-key-point',
+      text: 'Persisted key point',
+      evidenceIds: ['claim-postgres'],
+      citations: [{
+        version: 1,
+        provenance: 'source',
+        sourceId: 'source-postgres',
+        start: 0,
+        end: 10,
+      }],
+    }],
+    confusions: [],
+  },
+  createdAt: 20_100,
+  updatedAt: 20_100,
 })
 
 const openStores = new Set<PostgresJobStore>()
@@ -260,6 +301,11 @@ integration('PostgreSQL durable job store', () => {
       tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'worker', now: 1, durationMs: 0,
     })).rejects.toThrow(/positive/)
 
+    await service.cancel('tenant-postgres', run.id, 1)
+    expect(await store.acquireLease({
+      tenantId: 'tenant-postgres', runId: run.id, nodeKey: 'planning', ownerId: 'late-worker', now: 200, durationMs: 100,
+    })).toBeUndefined()
+
     expect(await service.deleteContent('tenant-postgres', run.id)).toMatchObject({ deleted: true })
     expect(await service.deleteContent('tenant-postgres', run.id)).toMatchObject({ deleted: false })
     await expect(service.uploadSource('tenant-postgres', run.id, sourcePart()))
@@ -311,6 +357,208 @@ integration('PostgreSQL durable job store', () => {
     } finally {
       await rawPool!.query('DELETE FROM cat_analysis_schema_migrations WHERE version=999')
     }
+  })
+
+  it('upgrades an existing v2 schema to v3 without rebuilding earlier tables', async () => {
+    await rawPool!.query('DROP TABLE analysis_artifacts')
+    await rawPool!.query('DELETE FROM cat_analysis_schema_migrations WHERE version=3')
+
+    const upgraded = await connectStore()
+    expect(await upgraded.checkHealth()).toBe(true)
+    expect(await rawPool!.query<{ version: number }>(
+      'SELECT MAX(version)::integer AS version FROM cat_analysis_schema_migrations',
+    )).toMatchObject({ rows: [{ version: 3 }] })
+    expect(await rawPool!.query<{ table_name: string }>(`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema='public' AND table_name='analysis_artifacts'
+    `)).toMatchObject({ rows: [{ table_name: 'analysis_artifacts' }] })
+    expect(await rawPool!.query<{ table_name: string }>(`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema='public' AND table_name='analysis_runs'
+    `)).toMatchObject({ rows: [{ table_name: 'analysis_runs' }] })
+    await closeStore(upgraded)
+  })
+
+  it('atomically encrypts, restores, isolates, and deletes generated artifacts', async () => {
+    const store = await connectStore()
+    const service = new RunService({
+      store,
+      retentionSeconds: 3_600,
+      now: () => 20_000,
+      createId: (() => { let id = 0; return () => `artifact-postgres-${++id}` })(),
+    })
+    const created = await service.createRun('tenant-postgres', makeRequest('9'.repeat(64)))
+    const generating = await store.transitionRun('tenant-postgres', created.run.id, 1, (run, sequence) => {
+      const next = analysisRunSchema.parse({
+        ...run,
+        revision: 2,
+        status: 'generating',
+        stage: 'summary',
+        progress: 0.55,
+        artifactStates: {
+          ...run.artifactStates,
+          summary: { status: 'running', attempt: 1, updatedAt: 20_000 },
+        },
+        updatedAt: 20_000,
+      })
+      return {
+        run: next,
+        event: analysisEventSchema.parse({
+          version: 1,
+          type: 'stage.started',
+          eventId: 'artifact-stage-started',
+          runId: run.id,
+          runRevision: next.revision,
+          sequence,
+          createdAt: 20_000,
+          stage: 'summary',
+        }),
+      }
+    })
+    expect(generating.outcome).toBe('updated')
+    const lease = await store.acquireLease({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      nodeKey: 'artifacts:dag',
+      ownerId: 'artifact-worker',
+      now: 20_000,
+      durationMs: 10_000,
+    })
+    expect(lease).toBeDefined()
+    const identity = { tenantId: 'tenant-postgres', ...lease! }
+    const artifact = summaryArtifactFor(created.run.id)
+    const descriptor = createArtifactDescriptor(artifact)
+    const buildSuccess = (run: typeof created.run, sequence: number) => {
+      const next = analysisRunSchema.parse({
+        ...run,
+        revision: run.revision + 1,
+        status: 'succeeded',
+        stage: undefined,
+        progress: 1,
+        artifactStates: {
+          ...run.artifactStates,
+          summary: {
+            status: 'succeeded',
+            attempt: 1,
+            artifactId: artifact.id,
+            updatedAt: 20_100,
+          },
+        },
+        updatedAt: 20_100,
+        completedAt: 20_100,
+      })
+      return {
+        run: next,
+        events: [
+          analysisEventSchema.parse({
+            version: 1,
+            type: 'artifact.ready',
+            eventId: 'artifact-ready',
+            runId: run.id,
+            runRevision: next.revision,
+            sequence,
+            createdAt: 20_100,
+            descriptor,
+          }),
+          analysisEventSchema.parse({
+            version: 1,
+            type: 'run.completed',
+            eventId: 'artifact-run-completed',
+            runId: run.id,
+            runRevision: next.revision,
+            sequence: sequence + 1,
+            createdAt: 20_100,
+            status: 'succeeded',
+            coverage: next.coverage,
+          }),
+        ],
+      }
+    }
+    const commitInput = {
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      kind: 'summary' as const,
+      expectedRevision: 2,
+      expectedAttempt: 1,
+      lease: identity,
+      now: 20_100,
+      result: 'succeeded' as const,
+      artifact,
+      descriptor,
+      build: buildSuccess,
+    }
+
+    await expect(store.commitArtifact({
+      ...commitInput,
+      descriptor: { ...descriptor, artifactHash: hash('incorrect artifact hash') },
+    })).rejects.toThrow(/descriptor/)
+    expect(await store.getArtifact('tenant-postgres', created.run.id, 'summary')).toBeUndefined()
+    expect(await store.getRun('tenant-postgres', created.run.id)).toMatchObject({ revision: 2, status: 'generating' })
+    expect(await store.commitArtifact({ ...commitInput, expectedRevision: 1 })).toMatchObject({
+      outcome: 'revision_conflict',
+    })
+    expect(await store.commitArtifact({
+      ...commitInput,
+      lease: { ...identity, ownerId: 'inactive-worker' },
+    })).toEqual({ outcome: 'lease_conflict' })
+    expect(await store.commitArtifact({ ...commitInput, expectedAttempt: 2 })).toEqual({
+      outcome: 'attempt_conflict',
+    })
+    await expect(store.commitArtifact({
+      ...commitInput,
+      build: (run, sequence) => {
+        const transition = buildSuccess(run, sequence)
+        const first = transition.events[0]
+        if (!first || first.type !== 'artifact.ready') throw new Error('expected ready event fixture')
+        return {
+          ...transition,
+          events: [{
+            ...first,
+            descriptor: { ...first.descriptor, artifactHash: hash('wrong event descriptor') },
+          }, ...transition.events.slice(1)],
+        }
+      },
+    })).rejects.toThrow(/does not match its result/)
+    await expect(store.commitArtifact({
+      ...commitInput,
+      build: (run, sequence) => {
+        const transition = buildSuccess(run, sequence)
+        return {
+          ...transition,
+          events: transition.events.map((event, index) => index === 0
+            ? { ...event, sequence: event.sequence + 1 }
+            : event),
+        }
+      },
+    })).rejects.toThrow(/artifact event identity/)
+    expect(await store.getArtifact('tenant-postgres', created.run.id, 'summary')).toBeUndefined()
+
+    const committed = await store.commitArtifact(commitInput)
+    expect(committed).toMatchObject({ outcome: 'updated', run: { status: 'succeeded', revision: 3 } })
+    expect(await store.getArtifact('tenant-other', created.run.id, 'summary')).toBeUndefined()
+    expect(await store.listArtifactDescriptors('tenant-other', created.run.id)).toBeUndefined()
+    await closeStore(store)
+
+    const recovered = await connectStore()
+    expect(await recovered.getArtifact('tenant-postgres', created.run.id, 'summary'))
+      .toEqual({ artifact, descriptor })
+    expect(await recovered.listArtifactDescriptors('tenant-postgres', created.run.id)).toEqual([descriptor])
+    expect(await new RunService({ store: recovered, retentionSeconds: 3_600 })
+      .getArtifact('tenant-postgres', created.run.id, 'summary')).toEqual(artifact)
+    const encrypted = await rawPool!.query<{ ciphertext: Buffer }>(
+      'SELECT ciphertext FROM analysis_artifacts WHERE tenant_id=$1 AND run_id=$2 AND kind=$3',
+      ['tenant-postgres', created.run.id, 'summary'],
+    )
+    expect(encrypted.rows[0]?.ciphertext.includes(Buffer.from('Encrypted artifact marker', 'utf8'))).toBe(false)
+    expect(await rawPool!.query<{ version: number }>(
+      'SELECT MAX(version)::integer AS version FROM cat_analysis_schema_migrations',
+    )).toMatchObject({ rows: [{ version: 3 }] })
+    expect(await recovered.deleteContent('tenant-postgres', created.run.id)).toBe(true)
+    expect(await recovered.getArtifact('tenant-postgres', created.run.id, 'summary')).toBeUndefined()
+    expect(await recovered.listArtifactDescriptors('tenant-postgres', created.run.id)).toEqual([])
+    expect(await rawPool!.query('SELECT 1 FROM analysis_artifacts WHERE run_id=$1', [created.run.id]))
+      .toMatchObject({ rowCount: 0 })
+    await closeStore(recovered)
   })
 
   it('encrypts exact evidence cache and graph data across restart and deletes derived content', async () => {

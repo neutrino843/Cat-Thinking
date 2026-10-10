@@ -67,7 +67,26 @@ describe('analysis contract fixtures', () => {
       runRevision: 1,
       sequence: 3,
       createdAt: 1791500002000,
-      artifact: validSummaryFixture,
+      descriptor: {
+        version: 1,
+        schemaVersion: 1,
+        id: 'artifact-summary-1',
+        runId: 'run-1',
+        kind: 'summary',
+        artifactHash: 'a'.repeat(64),
+        byteCount: 1_024,
+        createdAt: 1791500001000,
+        updatedAt: 1791500001000,
+      },
+    })
+
+    expect(result.success).toBe(false)
+  })
+
+  it('requires outline whenever a mind map is requested', () => {
+    const result = analysisRequestSchema.safeParse({
+      ...validRequestFixture,
+      artifacts: ['mindmap'],
     })
 
     expect(result.success).toBe(false)

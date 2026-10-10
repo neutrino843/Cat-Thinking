@@ -178,6 +178,15 @@ export const registerRunRoutes = (
     )
   })
 
+  api.get<{ Params: ArtifactParams }>('/runs/:runId/artifacts/:kind', async (request) => {
+    const kind = decode(artifactKindSchema, request.params.kind, 'analysis.artifact.kind_invalid')
+    return requireService().getArtifact(
+      readIdentity(request),
+      readRunId(request.params.runId),
+      kind,
+    )
+  })
+
   api.delete<{ Params: RunParams }>('/runs/:runId/content', async (request) => {
     return requireService().deleteContent(readIdentity(request), readRunId(request.params.runId))
   })

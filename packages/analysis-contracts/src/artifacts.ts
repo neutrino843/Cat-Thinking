@@ -1,6 +1,13 @@
 import { z } from 'zod'
 import { ANALYSIS_CONTRACT_VERSION, ANALYSIS_LIMITS, ARTIFACT_KINDS } from './constants.js'
-import { boundedTextSchema, identifierSchema, timestampSchema, uniqueValues } from './common.js'
+import {
+  boundedTextSchema,
+  byteCountSchema,
+  identifierSchema,
+  sha256Schema,
+  timestampSchema,
+  uniqueValues,
+} from './common.js'
 import { citationSchema } from './citations.js'
 
 export const artifactKindSchema = z.enum(ARTIFACT_KINDS)
@@ -213,6 +220,20 @@ export const artifactEnvelopeSchema = z.discriminatedUnion('kind', [
   knowledgeArtifactEnvelopeSchema,
 ])
 
+export const artifactDescriptorSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    schemaVersion: z.literal(ANALYSIS_CONTRACT_VERSION),
+    id: identifierSchema,
+    runId: identifierSchema,
+    kind: artifactKindSchema,
+    artifactHash: sha256Schema,
+    byteCount: byteCountSchema.max(ANALYSIS_LIMITS.maxArtifactBytes),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict()
+
 export type ArtifactKind = z.infer<typeof artifactKindSchema>
 export type SummaryArtifactV1 = z.infer<typeof summaryArtifactSchema>
 export type OutlineArtifactV1 = z.infer<typeof outlineArtifactSchema>
@@ -220,3 +241,4 @@ export type MindMapArtifactV1 = z.infer<typeof mindMapArtifactSchema>
 export type QuizArtifactV1 = z.infer<typeof quizArtifactSchema>
 export type KnowledgeArtifactV1 = z.infer<typeof knowledgeArtifactSchema>
 export type ArtifactEnvelopeV1 = z.infer<typeof artifactEnvelopeSchema>
+export type ArtifactDescriptorV1 = z.infer<typeof artifactDescriptorSchema>

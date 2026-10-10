@@ -4,6 +4,7 @@ import {
   ARTIFACT_KINDS,
   analysisRequestSchema,
   analysisRunSchema,
+  artifactEnvelopeSchema,
   cancelRunResultSchema,
   deleteRunContentResultSchema,
   engineCapabilitiesSchema,
@@ -14,6 +15,7 @@ import {
   type AnalysisEventV1,
   type AnalysisRequestV1,
   type AnalysisRunV1,
+  type ArtifactEnvelopeV1,
   type ArtifactKind,
   type CancelRunResultV1,
   type DeleteRunContentResultV1,
@@ -28,6 +30,7 @@ import { sha256Hex } from './fingerprint'
 
 export interface MockEngineOptions {
   events?: readonly AnalysisEventV1[]
+  artifacts?: readonly ArtifactEnvelopeV1[]
   now?: () => number
   createRunId?: () => string
 }
@@ -63,12 +66,17 @@ export class MockAnalysisEngineClient implements AnalysisEngineClient {
   private readonly runs = new Map<string, AnalysisRunV1>()
   private readonly requestKeys = new Map<string, string>()
   private readonly receivedParts = new Map<string, MockUploadState>()
+  private readonly artifacts = new Map<string, ArtifactEnvelopeV1>()
   private readonly eventsToReplay: readonly AnalysisEventV1[]
   private readonly now: () => number
   private readonly createRunId: () => string
 
   constructor(options: MockEngineOptions = {}) {
     this.eventsToReplay = options.events ?? []
+    for (const artifact of options.artifacts ?? []) {
+      const decoded = artifactEnvelopeSchema.parse(artifact)
+      this.artifacts.set(`${decoded.runId}:${decoded.kind}`, decoded)
+    }
     this.now = options.now ?? (() => Date.now())
     this.createRunId = options.createRunId ?? (() => crypto.randomUUID())
   }
@@ -291,8 +299,8 @@ export class MockAnalysisEngineClient implements AnalysisEngineClient {
     const run = analysisRunSchema.parse({
       ...current,
       revision,
-      status: 'queued',
-      stage: 'planning',
+      status: 'generating',
+      stage: kind,
       updatedAt: this.now(),
       artifactStates: {
         ...current.artifactStates,
@@ -303,11 +311,22 @@ export class MockAnalysisEngineClient implements AnalysisEngineClient {
     return retryArtifactAcceptedSchema.parse({ version: 1, runId, kind, revision, accepted: true })
   }
 
+  async getArtifact(runId: string, kind: ArtifactKind, signal: AbortSignal): Promise<ArtifactEnvelopeV1> {
+    throwIfAborted(signal)
+    this.requireRun(runId)
+    const artifact = this.artifacts.get(`${runId}:${kind}`)
+    if (!artifact) throw new Error(`Unknown mock artifact: ${runId}:${kind}`)
+    return artifactEnvelopeSchema.parse(artifact)
+  }
+
   async deleteContent(runId: string, signal: AbortSignal): Promise<DeleteRunContentResultV1> {
     throwIfAborted(signal)
     this.requireRun(runId)
     for (const key of [...this.receivedParts.keys()]) {
       if (key.startsWith(`${runId}:`)) this.receivedParts.delete(key)
+    }
+    for (const key of [...this.artifacts.keys()]) {
+      if (key.startsWith(`${runId}:`)) this.artifacts.delete(key)
     }
     return deleteRunContentResultSchema.parse({ version: 1, runId, deleted: true })
   }

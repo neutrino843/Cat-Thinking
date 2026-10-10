@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ANALYSIS_CONTRACT_VERSION, CANCEL_EFFECTS } from './constants.js'
 import { identifierSchema, timestampSchema, unitIntervalSchema } from './common.js'
 import { analysisErrorSchema } from './errors.js'
-import { artifactEnvelopeSchema, artifactKindSchema } from './artifacts.js'
+import { artifactDescriptorSchema, artifactKindSchema } from './artifacts.js'
 import { coverageSchema, runStageSchema, usageSchema } from './runs.js'
 
 const eventBase = z.object({
@@ -53,11 +53,15 @@ export const usageEventSchema = eventBase
   .strict()
 
 export const artifactReadyEventSchema = eventBase
-  .extend({ type: z.literal('artifact.ready'), artifact: artifactEnvelopeSchema })
+  .extend({ type: z.literal('artifact.ready'), descriptor: artifactDescriptorSchema })
   .strict()
   .superRefine((event, context) => {
-    if (event.artifact.runId !== event.runId) {
-      context.addIssue({ code: 'custom', message: 'artifact runId differs from event runId', path: ['artifact', 'runId'] })
+    if (event.descriptor.runId !== event.runId) {
+      context.addIssue({
+        code: 'custom',
+        message: 'artifact descriptor runId differs from event runId',
+        path: ['descriptor', 'runId'],
+      })
     }
   })
 

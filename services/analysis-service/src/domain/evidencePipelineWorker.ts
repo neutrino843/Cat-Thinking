@@ -34,6 +34,7 @@ import type {
   StoredEvidenceCard,
   StoredSourceContent,
 } from './jobStore.js'
+import { LeaseGuard } from './leaseGuard.js'
 import type { RunEventBroker } from './eventBroker.js'
 
 const NODE_KEY = 'evidence:pipeline'
@@ -121,15 +122,24 @@ export class EvidencePipelineWorker {
     })
     if (!lease) return { outcome: 'busy', run: initial }
     const identity: LeaseIdentity = { tenantId, ...lease }
+    const guard = new LeaseGuard({
+      store: this.store,
+      identity,
+      leaseMs: this.leaseMs,
+      parentSignal: signal,
+      now: this.now,
+    })
+    guard.start()
     try {
-      return await this.execute(tenantId, runId, identity, signal)
+      return await this.execute(tenantId, runId, identity, guard.signal)
     } catch (error) {
-      if (error instanceof EvidencePipelineStoppedError || signal.aborted) {
+      if (error instanceof EvidencePipelineStoppedError || guard.signal.aborted) {
         return { outcome: 'stopped', run: await this.requireRun(tenantId, runId) }
       }
       const run = await this.failRun(tenantId, runId, identity, error)
       return { outcome: 'failed', run }
     } finally {
+      await guard.stop()
       await this.store.releaseLease(identity)
     }
   }

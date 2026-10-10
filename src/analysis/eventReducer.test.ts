@@ -2,12 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   analysisRequestSchema,
   analysisRunSchema,
-  summaryArtifactEnvelopeSchema,
   type AnalysisErrorV1,
   type AnalysisEventV1,
 } from '@cat-thinking/analysis-contracts'
 import requestFixture from '../../packages/analysis-contracts/fixtures/analysis-request.valid.json'
-import summaryFixture from '../../packages/analysis-contracts/fixtures/summary-artifact.valid.json'
 import {
   applyAnalysisEvent,
   createRunMirror,
@@ -197,7 +195,6 @@ describe('analysis event reducer', () => {
       kind: 'summary',
       error,
     }).state
-    const artifact = summaryArtifactEnvelopeSchema.parse(summaryFixture)
     const recovered = applyAnalysisEvent(failed, {
       version: 1,
       type: 'artifact.ready',
@@ -206,13 +203,24 @@ describe('analysis event reducer', () => {
       runRevision: 1,
       sequence: 5,
       createdAt: 1791500000500,
-      artifact,
+      descriptor: {
+        version: 1,
+        schemaVersion: 1,
+        id: 'artifact-summary-1',
+        runId: 'run-1',
+        kind: 'summary',
+        artifactHash: 'a'.repeat(64),
+        byteCount: 1_024,
+        createdAt: 1791500000500,
+        updatedAt: 1791500000500,
+      },
     }).state
 
     expect(stage.status).toBe('generating')
     expect(evidence.coverage?.chunksCompleted).toBe(1)
     expect(usage.usage?.actualCostMicros).toBe(25)
-    expect(recovered.artifacts.summary?.id).toBe('artifact-summary-1')
+    expect(recovered.artifactDescriptors.summary?.id).toBe('artifact-summary-1')
+    expect(recovered.artifacts.summary).toBeUndefined()
     expect(recovered.artifactErrors.summary).toBeUndefined()
   })
 

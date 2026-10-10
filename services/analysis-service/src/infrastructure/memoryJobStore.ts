@@ -1,6 +1,9 @@
 import {
   analysisEventSchema,
   analysisRunSchema,
+  artifactDescriptorSchema,
+  artifactEnvelopeSchema,
+  canonicalizeJson,
   evidenceCardSchema,
   evidenceChunkSchema,
   evidenceGraphSchema,
@@ -8,12 +11,15 @@ import {
   uploadSourcePartSchema,
   type AnalysisEventV1,
   type AnalysisRunV1,
+  type ArtifactDescriptorV1,
+  type ArtifactKind,
   type EvidenceGraphV1,
   type SourceReceiptV1,
 } from '@cat-thinking/analysis-contracts'
 import {
   JobStoreConflictError,
   JobStoreNotFoundError,
+  type CommitArtifactInput,
   type CommitEvidenceGraphInput,
   type ExpiredRunReference,
   type ExpiredRunCleanupResult,
@@ -26,10 +32,12 @@ import {
   type StoreSourcePartInput,
   type StoreEvidenceCardInput,
   type StoredEvidenceCard,
+  type StoredArtifact,
   type StoredSourceContent,
   type StoredSourcePart,
   type StoredSourceUpload,
 } from '../domain/jobStore.js'
+import { validateArtifactDescriptor } from '../domain/artifactValidator.js'
 
 interface StoredRunRecord {
   tenantId: string
@@ -58,6 +66,15 @@ const leaseKey = (tenantId: string, runId: string, nodeKey: string): string =>
 const cacheKey = (tenantId: string, value: string): string => `${tenantId}\u0000${value}`
 const runEvidenceKey = (tenantId: string, runId: string, chunkId: string): string =>
   `${tenantId}\u0000${runId}\u0000${chunkId}`
+const artifactKey = (tenantId: string, runId: string, kind: ArtifactKind): string =>
+  `${tenantId}\u0000${runId}\u0000${kind}`
+const terminalRunStatuses = new Set<AnalysisRunV1['status']>([
+  'partial',
+  'succeeded',
+  'cancelled',
+  'failed',
+  'expired',
+])
 
 const cloneRun = (run: AnalysisRunV1): AnalysisRunV1 => analysisRunSchema.parse(run)
 const cloneEvent = (event: AnalysisEventV1): AnalysisEventV1 => analysisEventSchema.parse(event)
@@ -66,6 +83,12 @@ const cloneEvidenceCard = (card: StoredEvidenceCard): StoredEvidenceCard => ({
   chunk: evidenceChunkSchema.parse(card.chunk),
   card: evidenceCardSchema.parse(card.card),
 })
+const cloneArtifact = (stored: StoredArtifact): StoredArtifact => {
+  const descriptor = artifactDescriptorSchema.parse(stored.descriptor)
+  const artifact = artifactEnvelopeSchema.parse(stored.artifact)
+  validateArtifactDescriptor(artifact, descriptor)
+  return { descriptor, artifact }
+}
 
 const sourceView = (source: MutableSourceUpload): StoredSourceUpload => ({
   sourceId: source.sourceId,
@@ -88,6 +111,7 @@ export class InMemoryJobStore implements JobStore {
   private readonly evidenceCache = new Map<string, StoredEvidenceCard>()
   private readonly runEvidence = new Map<string, string>()
   private readonly evidenceGraphs = new Map<string, EvidenceGraphV1>()
+  private readonly artifacts = new Map<string, StoredArtifact>()
 
   checkHealth(): Promise<boolean> {
     return Promise.resolve(true)
@@ -330,6 +354,91 @@ export class InMemoryJobStore implements JobStore {
     return graph ? evidenceGraphSchema.parse(graph) : undefined
   }
 
+  async getArtifact(tenantId: string, runId: string, kind: ArtifactKind): Promise<StoredArtifact | undefined> {
+    if (!this.runs.has(runKey(tenantId, runId))) return undefined
+    const stored = this.artifacts.get(artifactKey(tenantId, runId, kind))
+    return stored ? cloneArtifact(stored) : undefined
+  }
+
+  async listArtifactDescriptors(
+    tenantId: string,
+    runId: string,
+  ): Promise<readonly ArtifactDescriptorV1[] | undefined> {
+    if (!this.runs.has(runKey(tenantId, runId))) return undefined
+    const prefix = `${tenantId}\u0000${runId}\u0000`
+    return [...this.artifacts.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, stored]) => artifactDescriptorSchema.parse(stored.descriptor))
+      .sort((left, right) => left.kind.localeCompare(right.kind))
+  }
+
+  async commitArtifact(input: CommitArtifactInput) {
+    this.assertLeaseScope(input.tenantId, input.runId, input.lease)
+    const record = this.runs.get(runKey(input.tenantId, input.runId))
+    if (!record) return { outcome: 'missing' } as const
+    if (record.run.revision !== input.expectedRevision) {
+      return { outcome: 'revision_conflict', run: cloneRun(record.run) } as const
+    }
+    if (record.contentDeleted || !this.hasActiveLease(input.lease, input.now)) {
+      return { outcome: 'lease_conflict' } as const
+    }
+    const state = record.run.artifactStates[input.kind]
+    if (!state || state.status !== 'running' || state.attempt !== input.expectedAttempt) {
+      return { outcome: 'attempt_conflict' } as const
+    }
+
+    const stored = input.result === 'succeeded'
+      ? cloneArtifact({ descriptor: input.descriptor, artifact: input.artifact })
+      : undefined
+    if (stored) {
+      if (
+        stored.descriptor.runId !== input.runId
+        || stored.descriptor.kind !== input.kind
+        || stored.artifact.runId !== input.runId
+        || stored.artifact.kind !== input.kind
+        || stored.descriptor.id !== stored.artifact.id
+      ) throw new TypeError('artifact identity differs from commit scope')
+    }
+
+    const nextSequence = (record.events.at(-1)?.sequence ?? -1) + 1
+    const transition = input.build(cloneRun(record.run), nextSequence)
+    const run = cloneRun(transition.run)
+    const events = transition.events.map(cloneEvent)
+    if (run.id !== input.runId || run.revision !== input.expectedRevision + 1 || events.length < 1 || events.length > 2) {
+      throw new TypeError('artifact transition identity or revision is invalid')
+    }
+    for (const [index, event] of events.entries()) {
+      if (
+        event.runId !== input.runId
+        || event.runRevision !== run.revision
+        || event.sequence !== nextSequence + index
+      ) throw new TypeError('artifact event identity, revision, or sequence is invalid')
+    }
+    const first = events[0]
+    if (
+      !first
+      || (input.result === 'succeeded'
+        ? first.type !== 'artifact.ready'
+          || first.descriptor.kind !== input.kind
+          || !stored
+          || canonicalizeJson(first.descriptor) !== canonicalizeJson(stored.descriptor)
+        : first.type !== 'artifact.failed' || first.kind !== input.kind)
+    ) throw new TypeError('artifact commit event does not match its result')
+    const terminal = events[1]
+    if (terminal && terminal.type !== 'run.completed' && terminal.type !== 'run.failed') {
+      throw new TypeError('artifact terminal event is invalid')
+    }
+
+    if (stored) this.artifacts.set(artifactKey(input.tenantId, input.runId, input.kind), stored)
+    record.run = run
+    record.events.push(...events)
+    return {
+      outcome: 'updated',
+      run: cloneRun(run),
+      events: events.map(cloneEvent),
+    } as const
+  }
+
   async deleteContent(tenantId: string, runId: string): Promise<boolean | undefined> {
     const record = this.runs.get(runKey(tenantId, runId))
     if (!record) return undefined
@@ -338,6 +447,7 @@ export class InMemoryJobStore implements JobStore {
       if (key.startsWith(`${tenantId}\u0000${runId}\u0000`)) this.sources.delete(key)
     }
     this.deleteEvidenceForRun(tenantId, runId)
+    this.deleteArtifactsForRun(tenantId, runId)
     record.contentDeleted = true
     return true
   }
@@ -383,6 +493,7 @@ export class InMemoryJobStore implements JobStore {
       if (key.startsWith(`${tenantId}\u0000${runId}\u0000`)) this.sources.delete(key)
     }
     this.deleteEvidenceForRun(tenantId, runId)
+    this.deleteArtifactsForRun(tenantId, runId)
     record.contentDeleted = true
     const nextSequence = (record.events.at(-1)?.sequence ?? -1) + 1
     const transition = buildTransition(cloneRun(record.run), nextSequence)
@@ -402,7 +513,8 @@ export class InMemoryJobStore implements JobStore {
 
   async acquireLease(request: LeaseRequest): Promise<JobLease | undefined> {
     if (request.durationMs <= 0) throw new RangeError('lease duration must be positive')
-    if (!this.runs.has(runKey(request.tenantId, request.runId))) return undefined
+    const record = this.runs.get(runKey(request.tenantId, request.runId))
+    if (!record || record.contentDeleted || terminalRunStatuses.has(record.run.status)) return undefined
     const key = leaseKey(request.tenantId, request.runId, request.nodeKey)
     const current = this.leases.get(key)
     if (current && current.expiresAt > request.now && current.ownerId !== request.ownerId) return undefined
@@ -426,8 +538,12 @@ export class InMemoryJobStore implements JobStore {
     if (durationMs <= 0) throw new RangeError('lease duration must be positive')
     const key = leaseKey(identity.tenantId, identity.runId, identity.nodeKey)
     const current = this.leases.get(key)
+    const record = this.runs.get(runKey(identity.tenantId, identity.runId))
     if (
       !current
+      || !record
+      || record.contentDeleted
+      || terminalRunStatuses.has(record.run.status)
       || current.ownerId !== identity.ownerId
       || current.attempt !== identity.attempt
       || current.expiresAt <= now
@@ -454,7 +570,7 @@ export class InMemoryJobStore implements JobStore {
 
   private assertLeaseScope(tenantId: string, runId: string, identity: LeaseIdentity): void {
     if (identity.tenantId !== tenantId || identity.runId !== runId) {
-      throw new JobStoreConflictError('lease identity does not match evidence scope')
+      throw new JobStoreConflictError('lease identity does not match run scope')
     }
   }
 
@@ -472,6 +588,13 @@ export class InMemoryJobStore implements JobStore {
         key.startsWith(`${tenantId}\u0000`) && candidate === value,
       )
       if (!stillReferenced) this.evidenceCache.delete(cacheKey(tenantId, value))
+    }
+  }
+
+  private deleteArtifactsForRun(tenantId: string, runId: string): void {
+    const prefix = `${tenantId}\u0000${runId}\u0000`
+    for (const key of [...this.artifacts.keys()]) {
+      if (key.startsWith(prefix)) this.artifacts.delete(key)
     }
   }
 

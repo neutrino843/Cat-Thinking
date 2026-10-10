@@ -2,6 +2,7 @@ import {
   type AnalysisErrorV1,
   type AnalysisEventV1,
   type AnalysisRunV1,
+  type ArtifactDescriptorV1,
   type ArtifactEnvelopeV1,
   type ArtifactKind,
   type CoverageV1,
@@ -26,6 +27,7 @@ export interface AnalysisRunMirror {
   progress: number
   coverage?: CoverageV1
   usage?: UsageV1
+  artifactDescriptors: Partial<Record<ArtifactKind, ArtifactDescriptorV1>>
   artifacts: Partial<Record<ArtifactKind, ArtifactEnvelopeV1>>
   artifactErrors: Partial<Record<ArtifactKind, AnalysisErrorV1>>
   error?: AnalysisErrorV1
@@ -44,6 +46,7 @@ export const createRunMirror = (runId: string): AnalysisRunMirror => ({
   connection: 'connecting',
   status: 'connecting',
   progress: 0,
+  artifactDescriptors: {},
   artifacts: {},
   artifactErrors: {},
 })
@@ -75,6 +78,7 @@ export const applyAnalysisEvent = (
     lastSequence: event.sequence,
     lastEventId: event.eventId,
     connection: 'connected',
+    artifactDescriptors: { ...current.artifactDescriptors },
     artifacts: { ...current.artifacts },
     artifactErrors: { ...current.artifactErrors },
   }
@@ -105,8 +109,8 @@ export const applyAnalysisEvent = (
       next.usage = event.usage
       break
     case 'artifact.ready':
-      next.artifacts[event.artifact.kind] = event.artifact
-      delete next.artifactErrors[event.artifact.kind]
+      next.artifactDescriptors[event.descriptor.kind] = event.descriptor
+      delete next.artifactErrors[event.descriptor.kind]
       break
     case 'artifact.failed':
       next.artifactErrors[event.kind] = event.error

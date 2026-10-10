@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { analysisRequestSchema, type AnalysisEventV1 } from '@cat-thinking/analysis-contracts'
+import { analysisRequestSchema, artifactEnvelopeSchema, type AnalysisEventV1 } from '@cat-thinking/analysis-contracts'
 import requestFixture from '../../packages/analysis-contracts/fixtures/analysis-request.valid.json'
+import summaryFixture from '../../packages/analysis-contracts/fixtures/summary-artifact.valid.json'
 import { sha256Hex } from './fingerprint'
 import { MockAnalysisEngineClient } from './mockEngine'
 
@@ -236,6 +237,7 @@ describe('deterministic mock analysis engine', () => {
     const snapshot = await client.getRun('run-1', signal())
 
     expect(retried.revision).toBe(2)
+    expect(snapshot).toMatchObject({ status: 'generating', stage: 'summary' })
     expect(snapshot.artifactStates.summary?.attempt).toBe(1)
     await expect(client.retryArtifact('run-1', 'quiz', 2, signal())).rejects.toThrow(/not requested/)
   })
@@ -253,5 +255,19 @@ describe('deterministic mock analysis engine', () => {
 
     expect(replayed.map((event) => event.eventId)).toEqual(['event-0'])
     await expect(client.getRun('missing-run', signal())).rejects.toThrow(/Unknown mock run/)
+  })
+
+  it('reads configured artifacts and removes them with run content', async () => {
+    const request = analysisRequestSchema.parse(requestFixture)
+    const artifact = artifactEnvelopeSchema.parse(summaryFixture)
+    const client = new MockAnalysisEngineClient({
+      createRunId: () => 'run-1',
+      artifacts: [artifact],
+    })
+    await client.createRun(request, signal())
+
+    await expect(client.getArtifact('run-1', 'summary', signal())).resolves.toEqual(artifact)
+    await client.deleteContent('run-1', signal())
+    await expect(client.getArtifact('run-1', 'summary', signal())).rejects.toThrow(/Unknown mock artifact/)
   })
 })

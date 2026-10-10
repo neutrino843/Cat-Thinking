@@ -68,3 +68,10 @@ export const evidenceGraphEncryptionContext = (
   runId: string,
   graphHash: string,
 ): string => `cat-analysis-evidence-graph-v1:${tenantId}:${runId}:${graphHash}`
+
+export const artifactEncryptionContext = (
+  tenantId: string,
+  runId: string,
+  kind: string,
+  artifactHash: string,
+): string => `cat-analysis-artifact-v1:${tenantId}:${runId}:${kind}:${artifactHash}`
