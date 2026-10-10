@@ -69,7 +69,9 @@ function cleanNode(node: Node, out: Node[]): void {
 
   if (ALLOWED.has(tag)) {
     // 克隆并清空属性
-    const clone = el.ownerDocument!.createElement(tag.toLowerCase())
+    const ownerDocument = el.ownerDocument
+    if (!ownerDocument) return
+    const clone = ownerDocument.createElement(tag.toLowerCase())
     if (tag === 'A') {
       const href = safeHref(el.getAttribute('href'))
       if (href) clone.setAttribute('href', href)
@@ -186,6 +188,8 @@ export function richNoteToText(html: string): string {
         for (const c of el.childNodes) walk(c, orderedAncestor)
     }
   }
-  walk(doc.body || doc.documentElement!, false)
+  const root = doc.body ?? doc.documentElement
+  if (!root) return ''
+  walk(root, false)
   return buf.join('').replace(/\n{3,}/g, '\n\n').trim()
 }

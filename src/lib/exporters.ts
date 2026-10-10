@@ -320,7 +320,9 @@ export function validateDoc(d: unknown): DocData {
   {
     const stack: [string, number][] = [[o.rootId, 1]]
     while (stack.length) {
-      const [id, depth] = stack.pop()!
+      const entry = stack.pop()
+      if (!entry) break
+      const [id, depth] = entry
       if (depth > MAX_IMPORT_DEPTH) throw new Error(`节点树深度超过上限 ${MAX_IMPORT_DEPTH}`)
       for (const c of (nodeMap[id] as Record<string, unknown>).children as string[]) {
         stack.push([c, depth + 1])

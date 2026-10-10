@@ -176,6 +176,8 @@ export default function NodePanel() {
   if (selection.length >= 2) return <BatchPanel ids={selection} />
 
   if (!selId || !node) return null
+  const selectedId = selId
+  const selectedNode = node
 
   const tags = node.tags ?? []
   const icons = node.icons ?? []
@@ -187,17 +189,17 @@ export default function NodePanel() {
     const text = tagInput.trim()
     if (!text) return
     const tag: NodeTag = { id: genId(), text, color: tagColor }
-    setNode(selId!, { tags: [...(node!.tags ?? []), tag] })
+    setNode(selectedId, { tags: [...(selectedNode.tags ?? []), tag] })
     setTagInput('')
   }
 
   function removeTag(id: string) {
-    setNode(selId!, { tags: tags.filter((t) => t.id !== id) })
+    setNode(selectedId, { tags: tags.filter((t) => t.id !== id) })
   }
 
   function toggleIcon(iconId: string) {
     const has = icons.includes(iconId)
-    setNode(selId!, {
+    setNode(selectedId, {
       icons: has ? icons.filter((i) => i !== iconId) : [...icons, iconId],
     })
   }
@@ -210,7 +212,7 @@ export default function NodePanel() {
         return
       }
       const link: NodeLink = { id: genId(), kind: 'url', url: u }
-      setNode(selId!, { links: [...links, link] })
+      setNode(selectedId, { links: [...links, link] })
       setLinkUrl('')
     } else {
       const nid = linkNode
@@ -219,13 +221,13 @@ export default function NodePanel() {
         return
       }
       const link: NodeLink = { id: genId(), kind: 'node', nodeId: nid }
-      setNode(selId!, { links: [...links, link] })
+      setNode(selectedId, { links: [...links, link] })
       setLinkNode('')
     }
   }
 
   function removeLink(id: string) {
-    setNode(selId!, { links: links.filter((l) => l.id !== id) })
+    setNode(selectedId, { links: links.filter((l) => l.id !== id) })
   }
 
   function gotoLink(l: NodeLink) {
@@ -241,7 +243,7 @@ export default function NodePanel() {
   }
 
   function setRichNote(html: string) {
-    setNode(selId!, { richNote: { html } })
+    setNode(selectedId, { richNote: { html } })
   }
 
   /* ---- M7-P3：图片方法 ---- */
@@ -270,7 +272,7 @@ export default function NodePanel() {
   function removeImage(id: string) {
     const im = images.find((i) => i.id === id)
     if (im) revokeBlobURL(im.blobId)
-    setNode(selId!, { images: images.filter((i) => i.id !== id) })
+    setNode(selectedId, { images: images.filter((i) => i.id !== id) })
   }
 
   /* ---- M7-P3：附件方法 ---- */
@@ -294,7 +296,7 @@ export default function NodePanel() {
   function removeAttachment(id: string) {
     const at = attachments.find((a) => a.id === id)
     if (at) revokeBlobURL(at.blobId)
-    setNode(selId!, { attachments: attachments.filter((a) => a.id !== id) })
+    setNode(selectedId, { attachments: attachments.filter((a) => a.id !== id) })
   }
 
   async function previewAttachment(att: Attachment) {

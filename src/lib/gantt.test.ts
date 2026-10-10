@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { barGeom, computeGantt, criticalPath, depEdges, ROW_H, SCALE_PX, wouldCreateCycle } from '../lib/gantt'
+import { barGeom, computeGantt, criticalPath, depEdges, HEADER_H, ROW_H, SCALE_PX, wouldCreateCycle } from '../lib/gantt'
 import { addDays, diffDays, todayISO } from '../lib/date'
 import { buildFixture } from '../test/fixture'
 import type { MindNodeData } from '../types'
@@ -56,6 +56,15 @@ describe('甘特模型', () => {
     expect(m.rows.length).toBe(2)
     expect(m.dayCount).toBeGreaterThanOrEqual(14)
     expect(m.pxPerDay).toBe(SCALE_PX.week)
+  })
+
+  it('缺少开始日期的损坏任务不会进入计算，直接绘制时给出明确错误', () => {
+    const doc = buildFixture({ children: [{ text: '坏里程碑', task: { milestone: true } }] })
+    const model = computeGantt(doc, 'day', '2026-01-01')
+    expect(model.day0).toBe('2025-12-26')
+    expect(depEdges(doc)).toEqual([])
+    expect(criticalPath(doc)).toEqual(new Set())
+    expect(() => barGeom({ milestone: true }, HEADER_H, model)).toThrow(/开始日期/)
   })
 
   it('barGeom：普通任务条宽 = 工期*pxPerDay，里程碑为方形', () => {

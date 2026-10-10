@@ -628,9 +628,10 @@ export default function Canvas({ query }: { query: string }) {
     }
     const onGestureChange = (e: Event) => {
       e.preventDefault()
-      if (!gStart) return
+      const start = gStart
+      if (!start) return
       const scale = (e as Event & { scale?: number }).scale ?? 1
-      setView((v) => zoomAt(v, gStart!.mx, gStart!.my, (gStart!.k * scale) / v.k))
+      setView((v) => zoomAt(v, start.mx, start.my, (start.k * scale) / v.k))
     }
     const onGestureEnd = () => {
       gStart = null
@@ -720,8 +721,10 @@ export default function Canvas({ query }: { query: string }) {
     return () => window.removeEventListener('msz:center', h)
   }, [])
 
-  const toWorld = useCallback((cx: number, cy: number): [number, number] => {
-    const rect = wrapRef.current!.getBoundingClientRect()
+  const toWorld = useCallback((cx: number, cy: number): [number, number] | null => {
+    const el = wrapRef.current
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
     const v = viewRef.current
     return [(cx - rect.left - v.tx) / v.k, (cy - rect.top - v.ty) / v.k]
   }, [])
@@ -814,7 +817,9 @@ export default function Canvas({ query }: { query: string }) {
           guides = r.guides
         }
         setDrag({ subs, primary: id, dx, dy, snapDx, snapDy, guides })
-        const [wx, wy] = toWorld(ev.clientX, ev.clientY)
+        const world = toWorld(ev.clientX, ev.clientY)
+        if (!world) return
+        const [wx, wy] = world
         let best: string | null = null
         let bestArea = Infinity
         for (const n of layoutRef.current.nodes.values()) {
@@ -907,8 +912,8 @@ export default function Canvas({ query }: { query: string }) {
                 selected={selection.includes(n.id)}
                 match={presenting ? false : matches.has(n.id)}
                 hovered={hover === n.id}
-                dx={sub?.has(n.id) ? drag!.dx + drag!.snapDx : 0}
-                dy={sub?.has(n.id) ? drag!.dy + drag!.snapDy : 0}
+                dx={sub?.has(n.id) ? (drag?.dx ?? 0) + (drag?.snapDx ?? 0) : 0}
+                dy={sub?.has(n.id) ? (drag?.dy ?? 0) + (drag?.snapDy ?? 0) : 0}
                 viewK={view.k}
                 focusable={!presenting && selection.includes(n.id)}
                 onDown={onNodeDown}

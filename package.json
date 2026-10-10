@@ -20,7 +20,7 @@
     "build": "npm run build:contracts && npm run typecheck:app && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
-    "lint:ci": "eslint . --max-warnings 50",
+    "lint:ci": "eslint . --max-warnings 0",
     "lint:contracts": "eslint packages/analysis-contracts/src packages/analysis-contracts/test evals/analysis",
     "lint:foundation": "eslint src/analysis packages/analysis-contracts/src packages/analysis-contracts/test services/analysis-service/src services/analysis-service/test evals/analysis scripts",
     "test": "npm run build:contracts && vitest run",

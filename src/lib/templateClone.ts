@@ -28,18 +28,17 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
 
   const nodes: Record<string, MindNodeData> = {}
   for (const [oldId, n] of Object.entries(src.nodes)) {
-    const id = idMap.get(oldId)!
+    const id = idMap.get(oldId)
+    if (!id) throw new Error(`模板节点 ${oldId} 缺少 ID 映射`)
     // M7-P2：内部节点链接 nodeId 重映射；目标不在本模板内则丢弃该链接（不悬空）
     let links = n.links
     if (links && links.length) {
       links = links
-        .map((l) =>
-          l.kind === 'node' && l.nodeId
-            ? idMap.has(l.nodeId)
-              ? { ...l, nodeId: idMap.get(l.nodeId)! }
-              : null
-            : l,
-        )
+        .map((l) => {
+          if (l.kind !== 'node' || !l.nodeId) return l
+          const nodeId = idMap.get(l.nodeId)
+          return nodeId ? { ...l, nodeId } : null
+        })
         .filter((l): l is NonNullable<typeof l> => !!l)
     }
     // M7-P3：图片/附件 blobId 重映射
@@ -65,7 +64,10 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
             task: {
               ...n.task,
               deps: n.task.deps
-                ?.map((d) => (idMap.has(d.from) ? { from: idMap.get(d.from)!, type: d.type } : null))
+                ?.map((d) => {
+                  const from = idMap.get(d.from)
+                  return from ? { from, type: d.type } : null
+                })
                 .filter((d): d is { from: string; type: 'FS' | 'SS' | 'FF' | 'SF' } => !!d),
             },
           }
@@ -76,14 +78,20 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
   // M9：关系表达 overlay 字段 id 重映射（from/to/members）
   const remappedRelations = src.relations?.length
     ? src.relations
-        .filter((r) => idMap.has(r.from) && idMap.has(r.to))
-        .map((r) => ({ ...r, from: idMap.get(r.from)!, to: idMap.get(r.to)! }))
+        .map((r) => {
+          const from = idMap.get(r.from)
+          const to = idMap.get(r.to)
+          return from && to ? { ...r, from, to } : null
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null)
     : undefined
   const remappedSummaries = src.summaries?.length
     ? src.summaries
         .map((s) => ({
           ...s,
-          members: s.members.filter((m) => idMap.has(m)).map((m) => idMap.get(m)!),
+          members: s.members
+            .map((m) => idMap.get(m))
+            .filter((m): m is string => m !== undefined),
         }))
         .filter((s) => s.members.length > 0)
     : undefined
@@ -91,7 +99,9 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
     ? src.boundaryBoxes
         .map((b) => ({
           ...b,
-          members: b.members.filter((m) => idMap.has(m)).map((m) => idMap.get(m)!),
+          members: b.members
+            .map((m) => idMap.get(m))
+            .filter((m): m is string => m !== undefined),
         }))
         .filter((b) => b.members.length > 0)
     : undefined

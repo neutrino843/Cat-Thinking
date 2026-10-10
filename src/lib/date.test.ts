@@ -50,6 +50,8 @@ describe('date 工具', () => {
   it('clampRange 纠正颠倒区间', () => {
     expect(clampRange('2026-09-30', '2026-09-01')).toEqual({ start: '2026-09-01', end: '2026-09-30' })
     expect(clampRange('2026-09-01', '2026-09-30')).toEqual({ start: '2026-09-01', end: '2026-09-30' })
+    expect(clampRange('2026-09-01', undefined)).toEqual({ start: '2026-09-01', end: '2026-09-01' })
+    expect(clampRange(undefined, '2026-09-30')).toEqual({ start: '2026-09-30', end: '2026-09-30' })
     expect(clampRange(undefined, undefined)).toBeNull()
   })
 })
