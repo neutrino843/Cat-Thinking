@@ -18,7 +18,7 @@ import { calculateEvidenceCoverage, mergeEvidenceCards } from '../src/domain/evi
 import { JobStoreConflictError, JobStoreNotFoundError } from '../src/domain/jobStore.js'
 import { ServiceHttpError } from '../src/errors.js'
 import { AesGcmContentCipher } from '../src/infrastructure/contentCipher.js'
-import { ANALYSIS_SCHEMA_VERSION } from '../src/infrastructure/postgres/migrations.js'
+import { ANALYSIS_SCHEMA_VERSION, migrateAnalysisDatabase } from '../src/infrastructure/postgres/migrations.js'
 import { PostgresJobStore } from '../src/infrastructure/postgres/postgresJobStore.js'
 
 const databaseUrl = process.env.ANALYSIS_TEST_DATABASE_URL
@@ -1038,5 +1038,92 @@ integration('PostgreSQL durable job store', () => {
       'api_key',
     ]))
     await closeStore(reopened)
+  })
+
+  it('guards provider reservations against terminal runs, duplicate nodes, and cost overruns', async () => {
+    const store = await connectStore()
+    const service = new RunService({
+      store,
+      retentionSeconds: 3_600,
+      now: () => 40_000,
+      createId: (() => { let id = 0; return () => `provider-guard-${++id}` })(),
+    })
+    const created = await service.createRun('tenant-postgres', makeRequest(hash('provider-guard-request')))
+    type ReservationInput = Parameters<PostgresJobStore['reserveProviderInvocation']>[0]
+    const reserve = (overrides: Partial<ReservationInput> = {}): ReservationInput => ({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      invocationId: 'guard-call',
+      nodeKey: 'guard-node',
+      runAttempt: 1,
+      role: 'evidence-map',
+      providerId: 'approved-provider',
+      modelId: 'approved/model-v1',
+      profileVersion: 'profile-v1',
+      promptVersion: 'prompt-v1',
+      estimatedInputTokens: 100,
+      reservedOutputTokens: 200,
+      estimatedCostMicros: 500,
+      maxRunEstimatedTokens: 400,
+      maxRunEstimatedCostMicros: 10_000,
+      staleAfterMs: 1_000,
+      now: 40_000,
+      ...overrides,
+    })
+
+    // Cost ceiling is checked before any ledger row is written.
+    await expect(store.reserveProviderInvocation(reserve({ maxRunEstimatedCostMicros: 100 })))
+      .resolves.toMatchObject({ outcome: 'budget_exceeded', dimension: 'cost' })
+
+    expect(await store.reserveProviderInvocation(reserve()))
+      .toMatchObject({ outcome: 'reserved', invocation: { invocationId: 'guard-call', status: 'running' } })
+
+    // A fresh duplicate returns the existing row without marking it stale or reserving twice.
+    expect(await store.reserveProviderInvocation(reserve({ now: 40_500 })))
+      .toMatchObject({ outcome: 'existing', invocation: { status: 'running' } })
+
+    // Same run/node/attempt under a different invocation identity is a conflict.
+    await expect(store.reserveProviderInvocation(reserve({ invocationId: 'guard-call-other' })))
+      .rejects.toBeInstanceOf(JobStoreConflictError)
+
+    const terminal = await service.createRun('tenant-postgres', makeRequest(hash('provider-terminal-request')))
+    await rawPool!.query("UPDATE analysis_runs SET status='succeeded' WHERE run_id=$1", [terminal.run.id])
+    await expect(store.reserveProviderInvocation(reserve({
+      runId: terminal.run.id,
+      invocationId: 'guard-terminal',
+      nodeKey: 'guard-terminal-node',
+    }))).rejects.toBeInstanceOf(JobStoreConflictError)
+
+    const deleted = await service.createRun('tenant-postgres', makeRequest(hash('provider-deleted-request')))
+    expect(await store.deleteContent('tenant-postgres', deleted.run.id)).toBe(true)
+    await expect(store.reserveProviderInvocation(reserve({
+      runId: deleted.run.id,
+      invocationId: 'guard-deleted',
+      nodeKey: 'guard-deleted-node',
+    }))).rejects.toBeInstanceOf(JobStoreConflictError)
+
+    await closeStore(store)
+  })
+
+  it('rolls back a failed migration without recording its version', async () => {
+    // Isolated schema: pre-create an incompatible analysis_runs so v1 DDL aborts mid-transaction.
+    const schemaName = `migfail_${Date.now().toString(36)}`
+    await rawPool!.query(`CREATE SCHEMA ${schemaName}`)
+    const failPool = new Pool({ connectionString: databaseUrl! })
+    const client = await failPool.connect()
+    try {
+      await client.query(`SET search_path TO ${schemaName}`)
+      await client.query('CREATE TABLE analysis_runs (obstacle INTEGER)')
+      await expect(migrateAnalysisDatabase(client)).rejects.toThrow()
+      const result = await client.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM cat_analysis_schema_migrations',
+      )
+      // The bookkeeping row for the aborted v1 migration must not survive its rollback.
+      expect(Number(result.rows[0]?.count)).toBe(0)
+    } finally {
+      client.release()
+      await failPool.end()
+      await rawPool!.query(`DROP SCHEMA ${schemaName} CASCADE`)
+    }
   })
 })
