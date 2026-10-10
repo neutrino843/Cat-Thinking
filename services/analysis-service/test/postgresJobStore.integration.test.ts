@@ -491,7 +491,14 @@ integration('PostgreSQL durable job store', () => {
     await expect(store.commitArtifact({
       ...commitInput,
       descriptor: { ...descriptor, artifactHash: hash('incorrect artifact hash') },
-    })).rejects.toThrow(/descriptor/)
+    })).rejects.toMatchObject({
+      name: 'ArtifactValidationError',
+      issues: [{
+        code: 'identity_invalid',
+        path: 'descriptor',
+        message: 'artifact descriptor does not match its payload',
+      }],
+    })
     expect(await store.getArtifact('tenant-postgres', created.run.id, 'summary')).toBeUndefined()
     expect(await store.getRun('tenant-postgres', created.run.id)).toMatchObject({ revision: 2, status: 'generating' })
     expect(await store.commitArtifact({ ...commitInput, expectedRevision: 1 })).toMatchObject({
