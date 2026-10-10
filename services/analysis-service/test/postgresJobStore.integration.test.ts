@@ -18,6 +18,7 @@ import { calculateEvidenceCoverage, mergeEvidenceCards } from '../src/domain/evi
 import { JobStoreConflictError, JobStoreNotFoundError } from '../src/domain/jobStore.js'
 import { ServiceHttpError } from '../src/errors.js'
 import { AesGcmContentCipher } from '../src/infrastructure/contentCipher.js'
+import { ANALYSIS_SCHEMA_VERSION } from '../src/infrastructure/postgres/migrations.js'
 import { PostgresJobStore } from '../src/infrastructure/postgres/postgresJobStore.js'
 
 const databaseUrl = process.env.ANALYSIS_TEST_DATABASE_URL
@@ -627,7 +628,7 @@ integration('PostgreSQL durable job store', () => {
     expect(encrypted.rows[0]?.ciphertext.includes(Buffer.from('Encrypted artifact marker', 'utf8'))).toBe(false)
     expect(await rawPool!.query<{ version: number }>(
       'SELECT MAX(version)::integer AS version FROM cat_analysis_schema_migrations',
-    )).toMatchObject({ rows: [{ version: 3 }] })
+    )).toMatchObject({ rows: [{ version: ANALYSIS_SCHEMA_VERSION }] })
     expect(await recovered.deleteContent('tenant-postgres', created.run.id)).toBe(true)
     expect(await recovered.getArtifact('tenant-postgres', created.run.id, 'summary')).toBeUndefined()
     expect(await recovered.listArtifactDescriptors('tenant-postgres', created.run.id)).toEqual([])
