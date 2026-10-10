@@ -991,9 +991,11 @@ function NodeTextEditor({
   theme: Theme
 }) {
   const [val, setVal] = useState(() => useDoc.getState().doc.nodes[id]?.text ?? '')
-  const commit = (cancel: boolean) => {
+  // liveValue 取事件发生时 textarea 的 DOM 真值：输入事件的 React state 刷新与
+  // Enter/blur 提交之间理论上存在调度窗口，直接读 DOM 可杜绝「键已敲入但提交了旧值」。
+  const commit = (cancel: boolean, liveValue?: string) => {
     const s = useDoc.getState()
-    if (!cancel) s.setText(id, val.replace(/\n+/g, ' '))
+    if (!cancel) s.setText(id, (liveValue ?? val).replace(/\n+/g, ' '))
     s.setEditing(null)
   }
   return (
@@ -1002,11 +1004,11 @@ function NodeTextEditor({
       autoFocus
       value={val}
       onChange={(e) => setVal(e.target.value)}
-      onBlur={() => commit(false)}
+      onBlur={(e) => commit(false, e.currentTarget.value)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault()
-          commit(false)
+          commit(false, e.currentTarget.value)
         } else if (e.key === 'Escape') {
           e.preventDefault()
           commit(true)

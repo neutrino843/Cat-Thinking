@@ -159,23 +159,15 @@ export default function App() {
       }
 
       const t = e.target as HTMLElement | null
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) {
-        if (e.key === 'Escape') t.blur()
-        return
-      }
       const mod = e.ctrlKey || e.metaKey
       const s = useDoc.getState()
       const key = e.key.toLowerCase()
-      if (mod && key === 'k') {
-        e.preventDefault()
-        const st = useSettings.getState()
-        st.setPalette(!st.paletteOpen)
-        return
-      }
-      /* M10：Ctrl/Cmd+S 保存到已绑定的 .msz（未绑定则首次走另存为）；
-         必须在 INPUT 早退之前处理——编辑标题/节点时也要拦截浏览器保存对话框 */
+      /* M10：Ctrl/Cmd+S 必须在输入框早退之前处理——编辑节点/标题时也要拦截浏览器保存对话框。
+         画布节点文本在 Enter/blur 时才提交入 store，故保存前先 blur 当前编辑控件，
+         让 onBlur 同步提交 DOM 中的最新值，避免存出未落盘的旧文档。 */
       if (mod && key === 's') {
         e.preventDefault()
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) t.blur()
         void quickSaveCurrent()
           .then((r) => {
             if (r === 'unsupported') {
@@ -187,6 +179,17 @@ export default function App() {
           .catch((err) => window.alert('保存 .msz 失败：' + (err as Error).message))
         return
       }
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) {
+        if (e.key === 'Escape') t.blur()
+        return
+      }
+      if (mod && key === 'k') {
+        e.preventDefault()
+        const st = useSettings.getState()
+        st.setPalette(!st.paletteOpen)
+        return
+      }
+      /* M10：Ctrl/Cmd+S 已在输入框早退之前统一处理（见上方） */
       if (mod && key === 'f') {
         e.preventDefault()
         searchRef.current?.focus()

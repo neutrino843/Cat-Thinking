@@ -168,8 +168,15 @@ test('另存为 .msz → Ctrl+S 覆写 → 打开 .msz 全流程', async ({ page
   const editor3 = page.locator('textarea.node-editor').first()
   await editor3.fill('子C')
   await editor3.press('Enter')
+  // Enter 必须已把子C 提交进画布且编辑器关闭（不依赖 toast 等间接信号）
+  await expect(page.locator('textarea.node-editor')).toHaveCount(0)
+  await expect(page.locator('svg.canvas-svg')).toContainText('子C')
 
   await page.keyboard.press('Control+s')
+  // 确定性等待第二次写入落盘：首次保存的 toast 此时可能仍在显示，不能拿它当写入完成信号
+  await expect
+    .poll(async () => (await mockCall(page, 'content', names1[0])) ?? '', { timeout: 5000 })
+    .toContain('子C')
   await expect(page.locator('.file-toast')).toContainText('已保存到')
   const names2 = await mockCall(page, 'names')
   const content2 = await mockCall(page, 'content', names2[0])
