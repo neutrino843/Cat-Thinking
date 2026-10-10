@@ -4,13 +4,29 @@ import { byteCountSchema, identifierSchema, sha256Schema, uniqueValues } from '.
 
 export const sourceKindSchema = z.enum(['text', 'markdown', 'pdf', 'docx'])
 
+const sourceRangeShape = {
+  start: z.number().int().nonnegative(),
+  end: z.number().int().positive(),
+}
+
+const hasPositiveRange = (range: { start: number; end: number }): boolean => range.end > range.start
+
 export const sourceRangeSchema = z
+  .object(sourceRangeShape)
+  .strict()
+  .refine(hasPositiveRange, {
+    message: 'end must be greater than start',
+    path: ['end'],
+  })
+
+export const sourceLocatorSchema = z
   .object({
-    start: z.number().int().nonnegative(),
-    end: z.number().int().positive(),
+    ...sourceRangeShape,
+    titlePath: z.array(z.string().trim().min(1).max(500)).max(32),
+    page: z.number().int().positive().max(100_000).optional(),
   })
   .strict()
-  .refine((range) => range.end > range.start, {
+  .refine(hasPositiveRange, {
     message: 'end must be greater than start',
     path: ['end'],
   })
@@ -26,6 +42,7 @@ export const sourceSnapshotSchema = z
     byteCount: byteCountSchema,
     pageCount: z.number().int().positive().max(100_000).optional(),
     selectedRange: sourceRangeSchema.optional(),
+    locators: z.array(sourceLocatorSchema).max(ANALYSIS_LIMITS.maxSourceLocators).optional(),
   })
   .strict()
   .superRefine((source, context) => {
@@ -42,6 +59,22 @@ export const sourceSnapshotSchema = z
         message: 'PDF sources require pageCount',
         path: ['pageCount'],
       })
+    }
+    for (const [index, locator] of (source.locators ?? []).entries()) {
+      if (locator.end > source.charCount) {
+        context.addIssue({
+          code: 'custom',
+          message: 'locator range exceeds source length',
+          path: ['locators', index, 'end'],
+        })
+      }
+      if (locator.page !== undefined && (source.pageCount === undefined || locator.page > source.pageCount)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'locator page exceeds source page count',
+          path: ['locators', index, 'page'],
+        })
+      }
     }
   })
 
@@ -112,6 +145,7 @@ export const sourceReceiptSchema = z
 
 export type SourceKind = z.infer<typeof sourceKindSchema>
 export type SourceRangeV1 = z.infer<typeof sourceRangeSchema>
+export type SourceLocatorV1 = z.infer<typeof sourceLocatorSchema>
 export type SourceSnapshotV1 = z.infer<typeof sourceSnapshotSchema>
 export type SourceManifestV1 = z.infer<typeof sourceManifestSchema>
 export type UploadSourcePartV1 = z.infer<typeof uploadSourcePartSchema>

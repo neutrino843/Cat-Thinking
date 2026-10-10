@@ -57,10 +57,26 @@ describe('source fingerprint', () => {
 
     expect(metadataChanged.contentHash).toBe(first.contentHash)
     expect(textChanged.contentHash).not.toBe(first.contentHash)
+    expect(first.locators).toEqual([{ start: 0, end: 4, titlePath: ['第一节'] }])
   })
 
   it('rejects a selected range beyond the normalized source', async () => {
     await expect(createSourceSnapshot(source(), { start: 0, end: 5 }, digest)).rejects.toThrow(RangeError)
+  })
+
+  it('uses independent locators and crops metadata to the selected range', async () => {
+    const snapshot = await createSourceSnapshot(source({
+      text: 'abcdefghij',
+      charCount: 10,
+      anchors: [{ nodeId: 'node-1', start: 0, end: 2, locator: 'legacy' }],
+      locators: [
+        { start: 0, end: 4, titlePath: ['before'] },
+        { start: 3, end: 8, titlePath: ['selected'] },
+        { start: 8, end: 10, titlePath: ['after'] },
+      ],
+    }), { start: 4, end: 7 }, digest)
+
+    expect(snapshot.locators).toEqual([{ start: 4, end: 7, titlePath: ['selected'] }])
   })
 
   it('derives PDF page count from persisted anchors', async () => {
@@ -79,6 +95,10 @@ describe('source fingerprint', () => {
     )
 
     expect(snapshot.pageCount).toBe(3)
+    expect(snapshot.locators).toEqual([
+      { start: 0, end: 2, titlePath: [], page: 1 },
+      { start: 2, end: 4, titlePath: [], page: 3 },
+    ])
   })
 })
 

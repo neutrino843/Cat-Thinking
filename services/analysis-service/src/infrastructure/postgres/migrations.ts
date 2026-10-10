@@ -7,7 +7,7 @@ interface Migration {
 
 const MIGRATION_LOCK_ID = 843_202_610
 
-export const ANALYSIS_SCHEMA_VERSION = 1
+export const ANALYSIS_SCHEMA_VERSION = 2
 
 export const ANALYSIS_MIGRATIONS: readonly Migration[] = [
   {
@@ -82,6 +82,61 @@ export const ANALYSIS_MIGRATIONS: readonly Migration[] = [
       );
 
       CREATE INDEX analysis_leases_expiry_idx ON analysis_leases (expires_at);
+    `,
+  },
+  {
+    version: 2,
+    sql: `
+      ALTER TABLE analysis_runs
+        ADD CONSTRAINT analysis_runs_run_tenant_unique UNIQUE (run_id, tenant_id);
+
+      CREATE TABLE analysis_evidence_cache (
+        tenant_id TEXT NOT NULL,
+        cache_key CHAR(64) NOT NULL,
+        chunk_hash CHAR(64) NOT NULL,
+        card_hash CHAR(64) NOT NULL,
+        chunk_json JSONB NOT NULL,
+        key_id TEXT NOT NULL,
+        iv BYTEA NOT NULL,
+        auth_tag BYTEA NOT NULL,
+        ciphertext BYTEA NOT NULL,
+        expires_at BIGINT NOT NULL,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY (tenant_id, cache_key)
+      );
+
+      CREATE INDEX analysis_evidence_cache_expiry_idx
+        ON analysis_evidence_cache (expires_at);
+
+      CREATE TABLE analysis_run_evidence (
+        run_id TEXT NOT NULL,
+        chunk_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        cache_key CHAR(64) NOT NULL,
+        chunk_json JSONB NOT NULL,
+        PRIMARY KEY (run_id, chunk_id),
+        FOREIGN KEY (run_id, tenant_id)
+          REFERENCES analysis_runs(run_id, tenant_id) ON DELETE CASCADE,
+        FOREIGN KEY (tenant_id, cache_key)
+          REFERENCES analysis_evidence_cache(tenant_id, cache_key) ON DELETE RESTRICT
+      );
+
+      CREATE INDEX analysis_run_evidence_cache_idx
+        ON analysis_run_evidence (tenant_id, cache_key);
+
+      CREATE TABLE analysis_evidence_graphs (
+        run_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        run_revision INTEGER NOT NULL CHECK (run_revision > 0),
+        graph_hash CHAR(64) NOT NULL,
+        key_id TEXT NOT NULL,
+        iv BYTEA NOT NULL,
+        auth_tag BYTEA NOT NULL,
+        ciphertext BYTEA NOT NULL,
+        created_at BIGINT NOT NULL,
+        FOREIGN KEY (run_id, tenant_id)
+          REFERENCES analysis_runs(run_id, tenant_id) ON DELETE CASCADE
+      );
     `,
   },
 ]

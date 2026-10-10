@@ -63,5 +63,7 @@ describe('文档导入与内容提取', () => {
     expect(draft.source.anchors.every((anchor) => (
       !!draft.doc.nodes[anchor.nodeId] && anchor.start >= 0 && anchor.end <= draft.source.text.length
     ))).toBe(true)
+    expect(draft.source.anchors.length).toBeLessThan(draft.source.locators?.length ?? 0)
+    expect(draft.source.locators?.at(-1)?.end).toBe(draft.source.text.length)
   })
 })

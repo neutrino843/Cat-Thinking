@@ -1,10 +1,14 @@
 import {
   analysisEventSchema,
   analysisRunSchema,
+  evidenceCardSchema,
+  evidenceChunkSchema,
+  evidenceGraphSchema,
   sourceReceiptSchema,
   uploadSourcePartSchema,
   type AnalysisEventV1,
   type AnalysisRunV1,
+  type EvidenceGraphV1,
   type SourceReceiptV1,
 } from '@cat-thinking/analysis-contracts'
 import { Pool, type PoolClient, type QueryResultRow } from 'pg'
@@ -12,6 +16,7 @@ import type { AnalysisServiceConfig } from '../../config.js'
 import {
   JobStoreConflictError,
   JobStoreNotFoundError,
+  type CommitEvidenceGraphInput,
   type ExpiredRunReference,
   type ExpiredRunCleanupResult,
   type JobLease,
@@ -21,15 +26,26 @@ import {
   type RunTransition,
   type RunTransitionResult,
   type StoreSourcePartInput,
+  type StoreEvidenceCardInput,
+  type StoredEvidenceCard,
+  type StoredSourceContent,
   type StoredSourcePart,
   type StoredSourceUpload,
 } from '../../domain/jobStore.js'
 import type { ContentCipher, EncryptedContent } from '../contentCipher.js'
-import { sourcePartEncryptionContext } from '../contentCipher.js'
+import {
+  evidenceCardEncryptionContext,
+  evidenceGraphEncryptionContext,
+  sourcePartEncryptionContext,
+} from '../contentCipher.js'
 import { migrateAnalysisDatabase } from './migrations.js'
 
 interface RunRow extends QueryResultRow {
   run_json: unknown
+}
+
+interface LockedRunRow extends RunRow {
+  content_deleted_at: string | number | null
 }
 
 interface SourceRow extends QueryResultRow {
@@ -61,6 +77,26 @@ interface LeaseRow extends QueryResultRow {
   owner_id: string
   attempt: number
   expires_at: string | number
+}
+
+interface EvidenceCacheRow extends QueryResultRow {
+  cache_key: string
+  chunk_hash: string
+  card_hash: string
+  chunk_json: unknown
+  key_id: string
+  iv: Buffer
+  auth_tag: Buffer
+  ciphertext: Buffer
+  expires_at: string | number
+}
+
+interface EvidenceGraphRow extends QueryResultRow {
+  graph_hash: string
+  key_id: string
+  iv: Buffer
+  auth_tag: Buffer
+  ciphertext: Buffer
 }
 
 const decodeRun = (row: RunRow): AnalysisRunV1 => analysisRunSchema.parse(row.run_json)
@@ -366,6 +402,221 @@ export class PostgresJobStore implements JobStore {
     })
   }
 
+  async getSourceContent(
+    tenantId: string,
+    runId: string,
+    sourceId: string,
+  ): Promise<StoredSourceContent | undefined> {
+    try {
+      const source = await this.transaction((client) => this.loadSource(client, tenantId, runId, sourceId))
+      if (!source.complete || source.computedHash !== source.contentHash || source.parts.length !== source.partCount) {
+        return undefined
+      }
+      return {
+        sourceId,
+        contentHash: source.contentHash,
+        text: source.parts.map((part) => part.text).join(''),
+      }
+    } catch (error) {
+      if (error instanceof JobStoreNotFoundError) return undefined
+      throw error
+    }
+  }
+
+  async getCachedEvidenceCard(
+    tenantId: string,
+    cacheKey: string,
+    now: number,
+  ): Promise<StoredEvidenceCard | undefined> {
+    const result = await this.pool.query<EvidenceCacheRow>(`
+      SELECT cache_key, chunk_hash, card_hash, chunk_json, key_id, iv, auth_tag, ciphertext, expires_at
+      FROM analysis_evidence_cache
+      WHERE tenant_id=$1 AND cache_key=$2 AND expires_at>$3
+    `, [tenantId, cacheKey, now])
+    const row = result.rows[0]
+    return row ? this.decodeEvidenceCard(tenantId, row) : undefined
+  }
+
+  async storeEvidenceCard(input: StoreEvidenceCardInput): Promise<boolean> {
+    this.assertLeaseScope(input.tenantId, input.runId, input.lease)
+    const chunk = evidenceChunkSchema.parse(input.chunk)
+    const card = evidenceCardSchema.parse(input.card)
+    const context = evidenceCardEncryptionContext(input.tenantId, input.cacheKey)
+    const encrypted = this.cipher.encrypt(JSON.stringify(card), context)
+    return this.transaction(async (client) => {
+      if (!await this.hasActiveLease(client, input.lease, input.now, true)) return false
+      await client.query(`
+        INSERT INTO analysis_evidence_cache(
+          tenant_id, cache_key, chunk_hash, card_hash, chunk_json,
+          key_id, iv, auth_tag, ciphertext, expires_at, created_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        ON CONFLICT (tenant_id, cache_key) DO NOTHING
+      `, [
+        input.tenantId,
+        input.cacheKey,
+        chunk.chunkHash,
+        input.cardHash,
+        chunk,
+        encrypted.keyId,
+        encrypted.iv,
+        encrypted.authTag,
+        encrypted.ciphertext,
+        input.expiresAt,
+        input.now,
+      ])
+      const cached = await client.query<EvidenceCacheRow>(`
+        SELECT cache_key, chunk_hash, card_hash, chunk_json, key_id, iv, auth_tag, ciphertext, expires_at
+        FROM analysis_evidence_cache
+        WHERE tenant_id=$1 AND cache_key=$2 FOR UPDATE
+      `, [input.tenantId, input.cacheKey])
+      const existing = cached.rows[0]
+      if (!existing) throw new Error('evidence cache insert did not produce a row')
+      if (existing.chunk_hash !== chunk.chunkHash || existing.card_hash !== input.cardHash) {
+        throw new JobStoreConflictError('evidence cache key collision')
+      }
+      await client.query(`
+        UPDATE analysis_evidence_cache SET expires_at=GREATEST(expires_at,$1)
+        WHERE tenant_id=$2 AND cache_key=$3
+      `, [input.expiresAt, input.tenantId, input.cacheKey])
+      const linked = await client.query<{ cache_key: string }>(`
+        SELECT cache_key FROM analysis_run_evidence WHERE run_id=$1 AND chunk_id=$2 FOR UPDATE
+      `, [input.runId, chunk.chunkId])
+      if (linked.rows[0] && linked.rows[0].cache_key !== input.cacheKey) {
+        throw new JobStoreConflictError('run evidence chunk changed')
+      }
+      await client.query(`
+        INSERT INTO analysis_run_evidence(run_id,chunk_id,tenant_id,cache_key,chunk_json)
+        VALUES ($1,$2,$3,$4,$5)
+        ON CONFLICT (run_id,chunk_id) DO NOTHING
+      `, [input.runId, chunk.chunkId, input.tenantId, input.cacheKey, chunk])
+      return true
+    })
+  }
+
+  async listEvidenceCards(
+    tenantId: string,
+    runId: string,
+  ): Promise<readonly StoredEvidenceCard[] | undefined> {
+    const run = await this.pool.query('SELECT 1 FROM analysis_runs WHERE tenant_id=$1 AND run_id=$2', [tenantId, runId])
+    if (run.rowCount !== 1) return undefined
+    const result = await this.pool.query<EvidenceCacheRow>(`
+      SELECT cache.cache_key, cache.chunk_hash, cache.card_hash, link.chunk_json,
+        cache.key_id, cache.iv, cache.auth_tag, cache.ciphertext, cache.expires_at
+      FROM analysis_run_evidence link
+      JOIN analysis_evidence_cache cache
+        ON cache.tenant_id=link.tenant_id AND cache.cache_key=link.cache_key
+      WHERE link.tenant_id=$1 AND link.run_id=$2
+      ORDER BY (link.chunk_json->>'ordinal')::integer ASC
+    `, [tenantId, runId])
+    return result.rows.map((row) => this.decodeEvidenceCard(tenantId, row))
+  }
+
+  async commitEvidenceGraph(input: CommitEvidenceGraphInput) {
+    this.assertLeaseScope(input.tenantId, input.runId, input.lease)
+    const graph = evidenceGraphSchema.parse(input.graph)
+    if (graph.runId !== input.runId) throw new TypeError('evidence graph run identity is invalid')
+    const context = evidenceGraphEncryptionContext(input.tenantId, input.runId, graph.graphHash)
+    const encrypted = this.cipher.encrypt(JSON.stringify(graph), context)
+    return this.transaction(async (client) => {
+      const selected = await client.query<LockedRunRow>(`
+        SELECT run_json, content_deleted_at FROM analysis_runs
+        WHERE tenant_id=$1 AND run_id=$2 FOR UPDATE
+      `, [input.tenantId, input.runId])
+      const selectedRow = selected.rows[0]
+      if (!selectedRow) return { outcome: 'missing' } as const
+      const currentRun = decodeRun(selectedRow)
+      if (currentRun.revision !== input.expectedRevision || currentRun.status !== 'merging') {
+        return { outcome: 'revision_conflict', run: currentRun } as const
+      }
+      if (
+        selectedRow.content_deleted_at !== null
+        || !await this.hasActiveLease(client, input.lease, input.now, true)
+      ) return { outcome: 'lease_conflict' } as const
+      const sequenceResult = await client.query<{ next_sequence: string | number }>(`
+        SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence
+        FROM analysis_events WHERE run_id=$1
+      `, [input.runId])
+      const nextSequence = Number(sequenceResult.rows[0]?.next_sequence ?? 0)
+      const transition = input.build(currentRun, nextSequence)
+      const run = analysisRunSchema.parse(transition.run)
+      const event = analysisEventSchema.parse(transition.event)
+      if (
+        run.id !== input.runId
+        || run.revision !== input.expectedRevision + 1
+        || event.runId !== input.runId
+        || event.runRevision !== run.revision
+        || event.sequence !== nextSequence
+        || event.type !== 'evidence.ready'
+      ) throw new TypeError('evidence commit identity, revision, or event sequence is invalid')
+      const existing = await client.query<{ run_revision: number; graph_hash: string }>(`
+        SELECT run_revision, graph_hash FROM analysis_evidence_graphs WHERE run_id=$1 FOR UPDATE
+      `, [input.runId])
+      const current = existing.rows[0]
+      if (current && current.run_revision === run.revision && current.graph_hash !== graph.graphHash) {
+        throw new JobStoreConflictError('evidence graph changed at the same revision')
+      }
+      await client.query(`
+        INSERT INTO analysis_evidence_graphs(
+          run_id, tenant_id, run_revision, graph_hash, key_id, iv, auth_tag, ciphertext, created_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        ON CONFLICT (run_id) DO UPDATE SET
+          tenant_id=EXCLUDED.tenant_id,
+          run_revision=EXCLUDED.run_revision,
+          graph_hash=EXCLUDED.graph_hash,
+          key_id=EXCLUDED.key_id,
+          iv=EXCLUDED.iv,
+          auth_tag=EXCLUDED.auth_tag,
+          ciphertext=EXCLUDED.ciphertext,
+          created_at=EXCLUDED.created_at
+      `, [
+        input.runId,
+        input.tenantId,
+        run.revision,
+        graph.graphHash,
+        encrypted.keyId,
+        encrypted.iv,
+        encrypted.authTag,
+        encrypted.ciphertext,
+        input.now,
+      ])
+      const updated = await client.query(`
+        UPDATE analysis_runs
+        SET revision=$1, status=$2, run_json=$3, expires_at=$4, updated_at=$5
+        WHERE tenant_id=$6 AND run_id=$7 AND revision=$8
+      `, [
+        run.revision,
+        run.status,
+        run,
+        run.expiresAt ?? null,
+        run.updatedAt,
+        input.tenantId,
+        input.runId,
+        input.expectedRevision,
+      ])
+      if (updated.rowCount !== 1) throw new Error('locked run revision changed unexpectedly')
+      await this.insertEvent(client, event)
+      return { outcome: 'updated', run, event } as const
+    })
+  }
+
+  async getEvidenceGraph(tenantId: string, runId: string): Promise<EvidenceGraphV1 | undefined> {
+    const result = await this.pool.query<EvidenceGraphRow>(`
+      SELECT graph.graph_hash, graph.key_id, graph.iv, graph.auth_tag, graph.ciphertext
+      FROM analysis_evidence_graphs graph
+      JOIN analysis_runs run ON run.run_id=graph.run_id
+      WHERE run.tenant_id=$1 AND graph.run_id=$2
+    `, [tenantId, runId])
+    const row = result.rows[0]
+    if (!row) return undefined
+    const context = evidenceGraphEncryptionContext(tenantId, runId, row.graph_hash)
+    return evidenceGraphSchema.parse(JSON.parse(this.cipher.decrypt({
+      keyId: row.key_id,
+      iv: row.iv,
+      authTag: row.auth_tag,
+      ciphertext: row.ciphertext,
+    }, context)))
+  }
+
   async deleteContent(tenantId: string, runId: string): Promise<boolean | undefined> {
     return this.transaction(async (client) => {
       const selected = await client.query<{ content_deleted_at: string | number | null }>(`
@@ -375,6 +626,7 @@ export class PostgresJobStore implements JobStore {
       const row = selected.rows[0]
       if (!row) return undefined
       if (row.content_deleted_at !== null) return false
+      await this.deleteEvidenceForRun(client, tenantId, runId)
       await client.query('DELETE FROM analysis_sources WHERE run_id=$1', [runId])
       await client.query(
         'UPDATE analysis_runs SET content_deleted_at=$1 WHERE tenant_id=$2 AND run_id=$3',
@@ -434,6 +686,7 @@ export class PostgresJobStore implements JobStore {
       if (row.content_deleted_at !== null) return { outcome: 'already_clean' }
       if (row.expires_at === null || Number(row.expires_at) > now) return { outcome: 'not_due' }
 
+      await this.deleteEvidenceForRun(client, tenantId, runId)
       await client.query('DELETE FROM analysis_sources WHERE run_id=$1', [runId])
       await client.query(
         'UPDATE analysis_runs SET content_deleted_at=$1 WHERE tenant_id=$2 AND run_id=$3',
@@ -607,6 +860,58 @@ export class PostgresJobStore implements JobStore {
       partHash: row.part_hash,
       text: this.cipher.decrypt(encrypted, context),
     }
+  }
+
+  private decodeEvidenceCard(tenantId: string, row: EvidenceCacheRow): StoredEvidenceCard {
+    const context = evidenceCardEncryptionContext(tenantId, row.cache_key)
+    return {
+      cacheKey: row.cache_key,
+      cardHash: row.card_hash,
+      chunk: evidenceChunkSchema.parse(row.chunk_json),
+      card: evidenceCardSchema.parse(JSON.parse(this.cipher.decrypt({
+        keyId: row.key_id,
+        iv: row.iv,
+        authTag: row.auth_tag,
+        ciphertext: row.ciphertext,
+      }, context))),
+      expiresAt: Number(row.expires_at),
+    }
+  }
+
+  private async hasActiveLease(
+    client: PoolClient,
+    identity: LeaseIdentity,
+    now: number,
+    requireContent: boolean,
+  ): Promise<boolean> {
+    const result = await client.query(`
+      SELECT 1 FROM analysis_leases lease
+      JOIN analysis_runs run ON run.run_id=lease.run_id
+      WHERE run.tenant_id=$1 AND lease.run_id=$2 AND lease.node_key=$3
+        AND lease.owner_id=$4 AND lease.attempt=$5 AND lease.expires_at>$6
+        ${requireContent ? "AND run.content_deleted_at IS NULL AND run.status NOT IN ('partial','succeeded','cancelled','failed','expired')" : ''}
+      FOR UPDATE OF lease
+    `, [identity.tenantId, identity.runId, identity.nodeKey, identity.ownerId, identity.attempt, now])
+    return result.rowCount === 1
+  }
+
+  private assertLeaseScope(tenantId: string, runId: string, identity: LeaseIdentity): void {
+    if (identity.tenantId !== tenantId || identity.runId !== runId) {
+      throw new JobStoreConflictError('lease identity does not match evidence scope')
+    }
+  }
+
+  private async deleteEvidenceForRun(client: PoolClient, tenantId: string, runId: string): Promise<void> {
+    await client.query('DELETE FROM analysis_evidence_graphs WHERE run_id=$1', [runId])
+    await client.query('DELETE FROM analysis_run_evidence WHERE run_id=$1', [runId])
+    await client.query(`
+      DELETE FROM analysis_evidence_cache cache
+      WHERE cache.tenant_id=$1
+        AND NOT EXISTS (
+          SELECT 1 FROM analysis_run_evidence link
+          WHERE link.tenant_id=cache.tenant_id AND link.cache_key=cache.cache_key
+        )
+    `, [tenantId])
   }
 
   private async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {

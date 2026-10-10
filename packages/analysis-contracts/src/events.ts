@@ -38,6 +38,16 @@ export const evidenceProgressEventSchema = eventBase
   })
   .strict()
 
+export const evidenceReadyEventSchema = eventBase
+  .extend({
+    type: z.literal('evidence.ready'),
+    graphHash: z.string().regex(/^[a-f0-9]{64}$/),
+    cardCount: z.number().int().nonnegative(),
+    claimCount: z.number().int().nonnegative(),
+    coverage: coverageSchema,
+  })
+  .strict()
+
 export const usageEventSchema = eventBase
   .extend({ type: z.literal('usage.updated'), usage: usageSchema })
   .strict()
@@ -76,6 +86,7 @@ export const analysisEventSchema = z.union([
   stageStartedEventSchema,
   progressEventSchema,
   evidenceProgressEventSchema,
+  evidenceReadyEventSchema,
   usageEventSchema,
   artifactReadyEventSchema,
   artifactFailedEventSchema,

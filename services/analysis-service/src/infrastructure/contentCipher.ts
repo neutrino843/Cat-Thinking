@@ -57,3 +57,14 @@ export const sourcePartEncryptionContext = (
   sourceId: string,
   partIndex: number,
 ): string => `cat-analysis-source-v1:${tenantId}:${runId}:${sourceId}:${partIndex}`
+
+export const evidenceCardEncryptionContext = (
+  tenantId: string,
+  cacheKey: string,
+): string => `cat-analysis-evidence-card-v1:${tenantId}:${cacheKey}`
+
+export const evidenceGraphEncryptionContext = (
+  tenantId: string,
+  runId: string,
+  graphHash: string,
+): string => `cat-analysis-evidence-graph-v1:${tenantId}:${runId}:${graphHash}`

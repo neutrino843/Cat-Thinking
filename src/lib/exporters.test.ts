@@ -236,6 +236,7 @@ describe('导入校验 parseImported', () => {
         text: '# 课程',
         charCount: 999,
         anchors: [{ nodeId: base.rootId, start: 0, end: 4, locator: '课程' }],
+        locators: [{ start: 0, end: 4, titlePath: ['课程'], page: 1 }],
       }],
     }
     const { doc, sources } = parseImported(JSON.stringify(payload))
@@ -243,6 +244,7 @@ describe('导入校验 parseImported', () => {
     expect(sources[0].docId).toBe(doc.id)
     expect(sources[0].name).toBe('课程.md')
     expect(sources[0].charCount).toBe(4)
+    expect(sources[0].locators).toEqual([{ start: 0, end: 4, titlePath: ['课程'], page: 1 }])
     expect((doc as unknown as Record<string, unknown>)._sources).toBeUndefined()
   })
 

@@ -1,8 +1,18 @@
 import { createHash } from 'node:crypto'
-import { analysisRequestSchema, type AnalysisRequestV1, type UploadSourcePartV1 } from '@cat-thinking/analysis-contracts'
+import {
+  analysisEventSchema,
+  analysisRequestSchema,
+  analysisRunSchema,
+  canonicalizeJson,
+  evidenceCardSchema,
+  type AnalysisRequestV1,
+  type UploadSourcePartV1,
+} from '@cat-thinking/analysis-contracts'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { RunService } from '../src/domain/runService.js'
+import { hashChunkPlan, planEvidenceChunks } from '../src/domain/chunkPlanner.js'
+import { calculateEvidenceCoverage, mergeEvidenceCards } from '../src/domain/evidenceMerger.js'
 import { JobStoreConflictError, JobStoreNotFoundError } from '../src/domain/jobStore.js'
 import { ServiceHttpError } from '../src/errors.js'
 import { AesGcmContentCipher } from '../src/infrastructure/contentCipher.js'
@@ -77,7 +87,7 @@ beforeEach(async () => {
   if (!rawPool) return
   const store = await connectStore()
   await closeStore(store)
-  await rawPool.query('TRUNCATE analysis_runs CASCADE')
+  await rawPool.query('TRUNCATE analysis_runs, analysis_evidence_cache CASCADE')
 })
 
 afterEach(async () => {
@@ -301,5 +311,221 @@ integration('PostgreSQL durable job store', () => {
     } finally {
       await rawPool!.query('DELETE FROM cat_analysis_schema_migrations WHERE version=999')
     }
+  })
+
+  it('encrypts exact evidence cache and graph data across restart and deletes derived content', async () => {
+    const store = await connectStore()
+    const service = new RunService({
+      store,
+      retentionSeconds: 3_600,
+      now: () => 10_000,
+      createId: (() => { let id = 0; return () => `evidence-postgres-${++id}` })(),
+    })
+    const created = await service.createRun('tenant-postgres', makeRequest('8'.repeat(64)))
+    await service.uploadSource('tenant-postgres', created.run.id, sourcePart())
+    await service.startRun('tenant-postgres', created.run.id, 1)
+    expect(await store.getSourceContent('tenant-postgres', created.run.id, 'source-postgres'))
+      .toMatchObject({ text: plaintext, contentHash: hash(plaintext) })
+
+    const snapshot = created.run.request.manifest.sources[0]!
+    const chunks = planEvidenceChunks([{ snapshot, text: plaintext }], {
+      version: 'postgres-evidence-v1',
+      targetCharacters: 100,
+      maxCharacters: 140,
+      overlapCharacters: 10,
+      minimumBoundaryRatio: 0.5,
+    })
+    const chunk = chunks[0]!
+    const citationEnd = Math.min(chunk.end, chunk.start + 12)
+    const citation = {
+      version: 1 as const,
+      provenance: 'source' as const,
+      sourceId: chunk.sourceId,
+      start: chunk.start,
+      end: citationEnd,
+      quote: plaintext.slice(chunk.start, citationEnd),
+    }
+    const card = evidenceCardSchema.parse({
+      version: 1,
+      chunkId: chunk.chunkId,
+      chunkHash: chunk.chunkHash,
+      sourceId: chunk.sourceId,
+      titlePath: [],
+      claims: [{ id: 'claim-local', kind: 'fact', statement: '持久证据正文', conceptIds: [], citations: [citation] }],
+      terms: [],
+      learningObjectives: [{ id: 'objective-local', text: '验证持久证据', evidenceIds: ['claim-local'] }],
+    })
+    const lease = await store.acquireLease({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      nodeKey: 'evidence:pipeline',
+      ownerId: 'worker-evidence',
+      now: 10_000,
+      durationMs: 10_000,
+    })
+    expect(lease).toBeDefined()
+    const identity = { tenantId: 'tenant-postgres', ...lease! }
+    const cacheKey = hash('postgres-evidence-cache')
+    const cardHash = hash(canonicalizeJson(card))
+    await expect(store.storeEvidenceCard({
+      tenantId: 'tenant-other',
+      runId: created.run.id,
+      lease: identity,
+      now: 10_000,
+      cacheKey,
+      cardHash,
+      chunk,
+      card,
+      expiresAt: 3_610_000,
+    })).rejects.toThrow(/lease identity/)
+    expect(await store.storeEvidenceCard({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      lease: identity,
+      now: 10_000,
+      cacheKey,
+      cardHash,
+      chunk,
+      card,
+      expiresAt: 3_610_000,
+    })).toBe(true)
+    expect(await store.getCachedEvidenceCard('tenant-other', cacheKey, 10_000)).toBeUndefined()
+    await closeStore(store)
+
+    const reopened = await connectStore()
+    expect(await reopened.getCachedEvidenceCard('tenant-postgres', cacheKey, 10_000))
+      .toMatchObject({ cardHash, card: { claims: [{ statement: '持久证据正文' }] } })
+    expect(await reopened.listEvidenceCards('tenant-postgres', created.run.id)).toHaveLength(1)
+    const transitioned = await reopened.transitionRun('tenant-postgres', created.run.id, 2, (run, sequence) => {
+      const next = analysisRunSchema.parse({
+        ...run,
+        revision: 3,
+        status: 'merging',
+        stage: 'merging',
+        updatedAt: 10_100,
+      })
+      return {
+        run: next,
+        event: analysisEventSchema.parse({
+          version: 1,
+          type: 'stage.started',
+          eventId: 'evidence-merging-event',
+          runId: run.id,
+          runRevision: 3,
+          sequence,
+          createdAt: 10_100,
+          stage: 'merging',
+        }),
+      }
+    })
+    expect(transitioned.outcome).toBe('updated')
+    const coverage = calculateEvidenceCoverage({
+      selectedRanges: { 'source-postgres': { start: 0, end: plaintext.length } },
+      chunks: [chunk],
+      cards: [card],
+    })
+    const graph = mergeEvidenceCards({
+      runId: created.run.id,
+      chunks: [chunk],
+      cards: [card],
+      sourceContentHashes: [hash(plaintext)],
+      coverage,
+      missingChunkIds: [],
+      chunkPlanHash: hashChunkPlan([chunk]),
+      policyVersion: 'postgres-evidence-v1',
+      promptVersion: 'evidence-map-v1',
+      generatorProfile: 'fixture-v1',
+      createdAt: 10_100,
+    })
+    await expect(reopened.commitEvidenceGraph({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      expectedRevision: 3,
+      lease: identity,
+      graph,
+      now: 10_100,
+      build: (run, sequence) => {
+        const next = analysisRunSchema.parse({
+          ...run,
+          revision: run.revision + 1,
+          status: 'generating',
+          stage: undefined,
+          progress: 0.55,
+          coverage: graph.coverage,
+          updatedAt: 10_100,
+        })
+        return {
+          run: next,
+          event: analysisEventSchema.parse({
+            version: 1,
+            type: 'evidence.ready',
+            eventId: 'evidence-merging-event',
+            runId: run.id,
+            runRevision: next.revision,
+            sequence,
+            createdAt: 10_100,
+            graphHash: graph.graphHash,
+            cardCount: graph.cards.length,
+            claimCount: graph.claims.length,
+            coverage: graph.coverage,
+          }),
+        }
+      },
+    })).rejects.toThrow()
+    expect(await reopened.getEvidenceGraph('tenant-postgres', created.run.id)).toBeUndefined()
+    expect(await reopened.getRun('tenant-postgres', created.run.id)).toMatchObject({ revision: 3, status: 'merging' })
+    const committed = await reopened.commitEvidenceGraph({
+      tenantId: 'tenant-postgres',
+      runId: created.run.id,
+      expectedRevision: 3,
+      lease: identity,
+      graph,
+      now: 10_100,
+      build: (run, sequence) => {
+        const next = analysisRunSchema.parse({
+          ...run,
+          revision: run.revision + 1,
+          status: 'generating',
+          stage: undefined,
+          progress: 0.55,
+          coverage: graph.coverage,
+          updatedAt: 10_100,
+        })
+        return {
+          run: next,
+          event: analysisEventSchema.parse({
+            version: 1,
+            type: 'evidence.ready',
+            eventId: 'evidence-ready-event',
+            runId: run.id,
+            runRevision: next.revision,
+            sequence,
+            createdAt: 10_100,
+            graphHash: graph.graphHash,
+            cardCount: graph.cards.length,
+            claimCount: graph.claims.length,
+            coverage: graph.coverage,
+          }),
+        }
+      },
+    })
+    expect(committed).toMatchObject({ outcome: 'updated', run: { revision: 4, status: 'generating' } })
+    expect((await reopened.listEvents('tenant-postgres', created.run.id))?.at(-1))
+      .toMatchObject({ type: 'evidence.ready', runRevision: 4, graphHash: graph.graphHash })
+    await closeStore(reopened)
+
+    const recovered = await connectStore()
+    expect(await recovered.getEvidenceGraph('tenant-postgres', created.run.id))
+      .toMatchObject({ graphHash: graph.graphHash, runId: created.run.id })
+    const encrypted = await rawPool!.query<{ ciphertext: Buffer }>(
+      'SELECT ciphertext FROM analysis_evidence_cache WHERE tenant_id=$1 AND cache_key=$2',
+      ['tenant-postgres', cacheKey],
+    )
+    expect(encrypted.rows[0]?.ciphertext.includes(Buffer.from('持久证据正文', 'utf8'))).toBe(false)
+    expect(await recovered.deleteContent('tenant-postgres', created.run.id)).toBe(true)
+    expect(await recovered.getEvidenceGraph('tenant-postgres', created.run.id)).toBeUndefined()
+    expect(await recovered.listEvidenceCards('tenant-postgres', created.run.id)).toEqual([])
+    expect(await recovered.getCachedEvidenceCard('tenant-postgres', cacheKey, 10_200)).toBeUndefined()
+    await closeStore(recovered)
   })
 })

@@ -57,7 +57,13 @@ export const CANCEL_EFFECTS = [
 export const ANALYSIS_LIMITS = {
   maxSourcesPerRun: 20,
   maxSourceCharacters: 2_000_000,
+  maxSourceLocators: 20_000,
   maxUploadPartBytes: 512_000,
+  maxEvidenceChunks: 2_000,
+  maxEvidenceCards: 2_000,
+  maxEvidenceClaims: 20_000,
+  maxEvidenceTerms: 20_000,
+  maxLearningObjectives: 10_000,
   maxArtifactBytes: 2_000_000,
   maxCitationCount: 500,
   maxOutlineNodes: 500,

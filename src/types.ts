@@ -105,6 +105,17 @@ export interface SourceAnchor {
   page?: number
 }
 
+/**
+ * Source metadata used by analysis. Unlike SourceAnchor, it is independent of
+ * generated mind-map nodes and therefore survives draft-node truncation.
+ */
+export interface SourceLocator {
+  start: number
+  end: number
+  titlePath: string[]
+  page?: number
+}
+
 /** Cat-Thinking 内建解析器支持的来源文档类型。 */
 export type SourceKind = 'text' | 'markdown' | 'pdf' | 'docx'
 
@@ -126,6 +137,8 @@ export interface SourceDocument {
   text: string
   charCount: number
   anchors: SourceAnchor[]
+  /** Added compatibly: legacy persisted sources can fall back to anchors. */
+  locators?: SourceLocator[]
 }
 
 export interface MindNodeData {

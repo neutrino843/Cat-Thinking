@@ -1,3 +1,4 @@
+import { ANALYSIS_LIMITS } from '@cat-thinking/analysis-contracts'
 import type { BoundaryBox, DocData, Relation, SourceDocument, Summary } from '../types'
 import { flushSync } from 'react-dom'
 import { computeLayout } from './layout'
@@ -475,6 +476,42 @@ function validateImportedSources(raw: unknown, doc: DocData): SourceDocument[] {
         ...(typeof value.page === 'number' ? { page: value.page } : {}),
       }
     })
+    let locators: SourceDocument['locators']
+    if (source.locators !== undefined) {
+      if (!Array.isArray(source.locators) || source.locators.length > ANALYSIS_LIMITS.maxSourceLocators) {
+        throw new Error(`Source ${source.id} locators are invalid or exceed the limit`)
+      }
+      locators = source.locators.map((locator, locatorIndex) => {
+        if (!locator || typeof locator !== 'object') {
+          throw new Error(`Source ${source.id} locator ${locatorIndex + 1} is invalid`)
+        }
+        const value = locator as Record<string, unknown>
+        if (
+          typeof value.start !== 'number'
+          || typeof value.end !== 'number'
+          || !Number.isInteger(value.start)
+          || !Number.isInteger(value.end)
+          || value.start < 0
+          || value.end <= value.start
+          || value.end > sourceText.length
+        ) throw new Error(`Source ${source.id} locator range is invalid`)
+        if (
+          !Array.isArray(value.titlePath)
+          || value.titlePath.length > 32
+          || value.titlePath.some((part) => typeof part !== 'string' || !part.trim() || part.trim().length > 500)
+        ) throw new Error(`Source ${source.id} locator title path is invalid`)
+        if (
+          value.page !== undefined
+          && (typeof value.page !== 'number' || !Number.isInteger(value.page) || value.page < 1 || value.page > 100_000)
+        ) throw new Error(`Source ${source.id} locator page is invalid`)
+        return {
+          start: value.start,
+          end: value.end,
+          titlePath: value.titlePath.map((part) => String(part).trim()),
+          ...(value.page === undefined ? {} : { page: value.page as number }),
+        }
+      })
+    }
     const importedAt = typeof source.importedAt === 'number' ? source.importedAt : Date.now()
     const lastModified = typeof source.lastModified === 'number' ? source.lastModified : importedAt
     return {
@@ -491,6 +528,7 @@ function validateImportedSources(raw: unknown, doc: DocData): SourceDocument[] {
       text: sourceText,
       charCount: sourceText.length,
       anchors,
+      ...(locators === undefined ? {} : { locators }),
     }
   })
 }

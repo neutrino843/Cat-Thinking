@@ -1,15 +1,20 @@
 import {
   analysisEventSchema,
   analysisRunSchema,
+  evidenceCardSchema,
+  evidenceChunkSchema,
+  evidenceGraphSchema,
   sourceReceiptSchema,
   uploadSourcePartSchema,
   type AnalysisEventV1,
   type AnalysisRunV1,
+  type EvidenceGraphV1,
   type SourceReceiptV1,
 } from '@cat-thinking/analysis-contracts'
 import {
   JobStoreConflictError,
   JobStoreNotFoundError,
+  type CommitEvidenceGraphInput,
   type ExpiredRunReference,
   type ExpiredRunCleanupResult,
   type JobLease,
@@ -19,6 +24,9 @@ import {
   type RunTransition,
   type RunTransitionResult,
   type StoreSourcePartInput,
+  type StoreEvidenceCardInput,
+  type StoredEvidenceCard,
+  type StoredSourceContent,
   type StoredSourcePart,
   type StoredSourceUpload,
 } from '../domain/jobStore.js'
@@ -47,9 +55,17 @@ const sourceKey = (tenantId: string, runId: string, sourceId: string): string =>
   `${tenantId}\u0000${runId}\u0000${sourceId}`
 const leaseKey = (tenantId: string, runId: string, nodeKey: string): string =>
   `${tenantId}\u0000${runId}\u0000${nodeKey}`
+const cacheKey = (tenantId: string, value: string): string => `${tenantId}\u0000${value}`
+const runEvidenceKey = (tenantId: string, runId: string, chunkId: string): string =>
+  `${tenantId}\u0000${runId}\u0000${chunkId}`
 
 const cloneRun = (run: AnalysisRunV1): AnalysisRunV1 => analysisRunSchema.parse(run)
 const cloneEvent = (event: AnalysisEventV1): AnalysisEventV1 => analysisEventSchema.parse(event)
+const cloneEvidenceCard = (card: StoredEvidenceCard): StoredEvidenceCard => ({
+  ...card,
+  chunk: evidenceChunkSchema.parse(card.chunk),
+  card: evidenceCardSchema.parse(card.card),
+})
 
 const sourceView = (source: MutableSourceUpload): StoredSourceUpload => ({
   sourceId: source.sourceId,
@@ -69,6 +85,9 @@ export class InMemoryJobStore implements JobStore {
   private readonly requestKeys = new Map<string, string>()
   private readonly sources = new Map<string, MutableSourceUpload>()
   private readonly leases = new Map<string, JobLease>()
+  private readonly evidenceCache = new Map<string, StoredEvidenceCard>()
+  private readonly runEvidence = new Map<string, string>()
+  private readonly evidenceGraphs = new Map<string, EvidenceGraphV1>()
 
   checkHealth(): Promise<boolean> {
     return Promise.resolve(true)
@@ -209,6 +228,108 @@ export class InMemoryJobStore implements JobStore {
     })
   }
 
+  async getSourceContent(
+    tenantId: string,
+    runId: string,
+    sourceId: string,
+  ): Promise<StoredSourceContent | undefined> {
+    const source = this.sources.get(sourceKey(tenantId, runId, sourceId))
+    if (!source?.complete || source.computedHash !== source.contentHash) return undefined
+    const parts = sourceView(source).parts
+    if (parts.length !== source.partCount) return undefined
+    return {
+      sourceId,
+      contentHash: source.contentHash,
+      text: parts.map((part) => part.text).join(''),
+    }
+  }
+
+  async getCachedEvidenceCard(
+    tenantId: string,
+    value: string,
+    now: number,
+  ): Promise<StoredEvidenceCard | undefined> {
+    const record = this.evidenceCache.get(cacheKey(tenantId, value))
+    if (!record || record.expiresAt <= now) return undefined
+    return cloneEvidenceCard(record)
+  }
+
+  async storeEvidenceCard(input: StoreEvidenceCardInput): Promise<boolean> {
+    this.assertLeaseScope(input.tenantId, input.runId, input.lease)
+    if (!this.hasActiveLease(input.lease, input.now)) return false
+    const record = this.runs.get(runKey(input.tenantId, input.runId))
+    if (!record || record.contentDeleted || ['partial', 'succeeded', 'cancelled', 'failed', 'expired'].includes(record.run.status)) {
+      return false
+    }
+    const card = cloneEvidenceCard({
+      cacheKey: input.cacheKey,
+      cardHash: input.cardHash,
+      chunk: input.chunk,
+      card: input.card,
+      expiresAt: input.expiresAt,
+    })
+    const key = cacheKey(input.tenantId, input.cacheKey)
+    const existing = this.evidenceCache.get(key)
+    if (existing && (existing.cardHash !== card.cardHash || existing.chunk.chunkHash !== card.chunk.chunkHash)) {
+      throw new JobStoreConflictError('evidence cache key collision')
+    }
+    this.evidenceCache.set(key, existing && existing.expiresAt > card.expiresAt
+      ? existing
+      : { ...card, expiresAt: Math.max(existing?.expiresAt ?? 0, card.expiresAt) })
+    this.runEvidence.set(runEvidenceKey(input.tenantId, input.runId, card.chunk.chunkId), input.cacheKey)
+    return true
+  }
+
+  async listEvidenceCards(
+    tenantId: string,
+    runId: string,
+  ): Promise<readonly StoredEvidenceCard[] | undefined> {
+    if (!this.runs.has(runKey(tenantId, runId))) return undefined
+    const prefix = `${tenantId}\u0000${runId}\u0000`
+    const records: StoredEvidenceCard[] = []
+    for (const [key, value] of this.runEvidence.entries()) {
+      if (!key.startsWith(prefix)) continue
+      const record = this.evidenceCache.get(cacheKey(tenantId, value))
+      if (record) records.push(cloneEvidenceCard(record))
+    }
+    return records.sort((left, right) => left.chunk.ordinal - right.chunk.ordinal)
+  }
+
+  async commitEvidenceGraph(input: CommitEvidenceGraphInput) {
+    this.assertLeaseScope(input.tenantId, input.runId, input.lease)
+    const record = this.runs.get(runKey(input.tenantId, input.runId))
+    if (!record) return { outcome: 'missing' } as const
+    if (record.run.revision !== input.expectedRevision || record.run.status !== 'merging') {
+      return { outcome: 'revision_conflict', run: cloneRun(record.run) } as const
+    }
+    if (record.contentDeleted || !this.hasActiveLease(input.lease, input.now)) {
+      return { outcome: 'lease_conflict' } as const
+    }
+    const graph = evidenceGraphSchema.parse(input.graph)
+    if (graph.runId !== input.runId) throw new TypeError('evidence graph run identity is invalid')
+    const nextSequence = (record.events.at(-1)?.sequence ?? -1) + 1
+    const transition = input.build(cloneRun(record.run), nextSequence)
+    const run = cloneRun(transition.run)
+    const event = cloneEvent(transition.event)
+    if (
+      run.id !== input.runId
+      || run.revision !== input.expectedRevision + 1
+      || event.runId !== input.runId
+      || event.runRevision !== run.revision
+      || event.sequence !== nextSequence
+      || event.type !== 'evidence.ready'
+    ) throw new TypeError('evidence commit identity, revision, or event sequence is invalid')
+    this.evidenceGraphs.set(runKey(input.tenantId, input.runId), graph)
+    record.run = run
+    record.events.push(event)
+    return { outcome: 'updated', run: cloneRun(run), event: cloneEvent(event) } as const
+  }
+
+  async getEvidenceGraph(tenantId: string, runId: string): Promise<EvidenceGraphV1 | undefined> {
+    const graph = this.evidenceGraphs.get(runKey(tenantId, runId))
+    return graph ? evidenceGraphSchema.parse(graph) : undefined
+  }
+
   async deleteContent(tenantId: string, runId: string): Promise<boolean | undefined> {
     const record = this.runs.get(runKey(tenantId, runId))
     if (!record) return undefined
@@ -216,6 +337,7 @@ export class InMemoryJobStore implements JobStore {
     for (const key of [...this.sources.keys()]) {
       if (key.startsWith(`${tenantId}\u0000${runId}\u0000`)) this.sources.delete(key)
     }
+    this.deleteEvidenceForRun(tenantId, runId)
     record.contentDeleted = true
     return true
   }
@@ -260,6 +382,7 @@ export class InMemoryJobStore implements JobStore {
     for (const key of [...this.sources.keys()]) {
       if (key.startsWith(`${tenantId}\u0000${runId}\u0000`)) this.sources.delete(key)
     }
+    this.deleteEvidenceForRun(tenantId, runId)
     record.contentDeleted = true
     const nextSequence = (record.events.at(-1)?.sequence ?? -1) + 1
     const transition = buildTransition(cloneRun(record.run), nextSequence)
@@ -319,6 +442,37 @@ export class InMemoryJobStore implements JobStore {
     const current = this.leases.get(key)
     if (!current || current.ownerId !== identity.ownerId || current.attempt !== identity.attempt) return false
     return this.leases.delete(key)
+  }
+
+  private hasActiveLease(identity: LeaseIdentity, now: number): boolean {
+    const current = this.leases.get(leaseKey(identity.tenantId, identity.runId, identity.nodeKey))
+    return current !== undefined
+      && current.ownerId === identity.ownerId
+      && current.attempt === identity.attempt
+      && current.expiresAt > now
+  }
+
+  private assertLeaseScope(tenantId: string, runId: string, identity: LeaseIdentity): void {
+    if (identity.tenantId !== tenantId || identity.runId !== runId) {
+      throw new JobStoreConflictError('lease identity does not match evidence scope')
+    }
+  }
+
+  private deleteEvidenceForRun(tenantId: string, runId: string): void {
+    const prefix = `${tenantId}\u0000${runId}\u0000`
+    const referencedCacheKeys: string[] = []
+    for (const [key, value] of [...this.runEvidence.entries()]) {
+      if (!key.startsWith(prefix)) continue
+      referencedCacheKeys.push(value)
+      this.runEvidence.delete(key)
+    }
+    this.evidenceGraphs.delete(runKey(tenantId, runId))
+    for (const value of referencedCacheKeys) {
+      const stillReferenced = [...this.runEvidence.entries()].some(([key, candidate]) =>
+        key.startsWith(`${tenantId}\u0000`) && candidate === value,
+      )
+      if (!stillReferenced) this.evidenceCache.delete(cacheKey(tenantId, value))
+    }
   }
 
   close(): Promise<void> {

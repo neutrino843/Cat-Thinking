@@ -1,3 +1,4 @@
+import { ANALYSIS_LIMITS } from '@cat-thinking/analysis-contracts'
 import type { DocData, MindNodeData, SourceDocument } from '../types'
 import {
   extractDocument,
@@ -10,6 +11,7 @@ export {
   normalizeSourceText,
 } from './documentExtractors'
 export const MAX_DRAFT_NODES = 400
+export const MAX_SOURCE_LOCATORS = ANALYSIS_LIMITS.maxSourceLocators
 const NODE_LABEL_MAX = 120
 
 interface SourceEntry {
@@ -156,7 +158,11 @@ function buildDraft(
   file: File,
   pageSpans: SourcePageSpan[],
   titleHint?: string,
-): Omit<DocumentImportDraft, 'source'> & { sourceId: string; anchors: SourceDocument['anchors'] } {
+): Omit<DocumentImportDraft, 'source'> & {
+  sourceId: string
+  anchors: SourceDocument['anchors']
+  locators: NonNullable<SourceDocument['locators']>
+} {
   const entries = parseEntries(text, structure)
   if (!entries.length) throw new Error('文档中没有可提取的文本内容')
 
@@ -178,6 +184,32 @@ function buildDraft(
     if (!pageSpans.length) return undefined
     const span = pageSpans.find((item) => offset >= item.start && offset < item.end)
     return span?.page
+  }
+
+  const locatorStack: { level: number; title: string }[] = []
+  const entryLocators: NonNullable<SourceDocument['locators']> = entries.map((entry) => {
+    if (entry.kind === 'heading') {
+      while ((locatorStack.at(-1)?.level ?? -1) >= entry.level) {
+        locatorStack.pop()
+      }
+      locatorStack.push({ level: entry.level, title: plainLabel(entry.text) })
+    }
+    const page = pageForOffset(entry.start)
+    return {
+      start: entry.start,
+      end: entry.end,
+      titlePath: locatorStack.map(({ title: pathPart }) => pathPart).filter(Boolean),
+      ...(page === undefined ? {} : { page }),
+    }
+  })
+  const pageLocators: NonNullable<SourceDocument['locators']> = pageSpans
+    .filter((span) => span.end > span.start)
+    .map((span) => ({ start: span.start, end: span.end, titlePath: [], page: span.page }))
+  const allLocators = [...pageLocators, ...entryLocators]
+    .sort((left, right) => left.start - right.start || left.end - right.end || (left.page ?? 0) - (right.page ?? 0))
+  const locators = allLocators.slice(0, MAX_SOURCE_LOCATORS)
+  if (allLocators.length > MAX_SOURCE_LOCATORS) {
+    warnings.push(`来源定位元数据最多保留 ${MAX_SOURCE_LOCATORS} 条；完整原文仍可用于后续分析`)
   }
 
   const addNode = (entry: SourceEntry, parentId: string, label: string, locator?: string): string | null => {
@@ -265,6 +297,7 @@ function buildDraft(
     doc,
     sourceId,
     anchors,
+    locators,
     stats: {
       charCount: text.length,
       sectionCount,
@@ -300,6 +333,7 @@ export async function prepareDocumentImport(file: File): Promise<DocumentImportD
     text: extracted.text,
     charCount: extracted.text.length,
     anchors: built.anchors,
+    locators: built.locators,
   }
   return {
     doc: built.doc,

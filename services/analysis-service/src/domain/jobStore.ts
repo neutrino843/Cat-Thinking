@@ -1,6 +1,9 @@
 import type {
   AnalysisEventV1,
   AnalysisRunV1,
+  EvidenceCardV1,
+  EvidenceChunkV1,
+  EvidenceGraphV1,
   SourceReceiptV1,
   UploadSourcePartV1,
 } from '@cat-thinking/analysis-contracts'
@@ -41,6 +44,37 @@ export interface StoredSourceUpload {
   readonly parts: readonly StoredSourcePart[]
 }
 
+export interface StoredSourceContent {
+  readonly sourceId: string
+  readonly contentHash: string
+  readonly text: string
+}
+
+export interface StoredEvidenceCard {
+  readonly cacheKey: string
+  readonly cardHash: string
+  readonly chunk: EvidenceChunkV1
+  readonly card: EvidenceCardV1
+  readonly expiresAt: number
+}
+
+export interface StoreEvidenceCardInput extends StoredEvidenceCard {
+  readonly tenantId: string
+  readonly runId: string
+  readonly lease: LeaseIdentity
+  readonly now: number
+}
+
+export interface CommitEvidenceGraphInput {
+  readonly tenantId: string
+  readonly runId: string
+  readonly expectedRevision: number
+  readonly lease: LeaseIdentity
+  readonly graph: EvidenceGraphV1
+  readonly now: number
+  readonly build: (current: AnalysisRunV1, nextSequence: number) => RunTransition
+}
+
 export interface StoreSourcePartInput {
   readonly tenantId: string
   readonly runId: string
@@ -57,6 +91,10 @@ export type RunTransitionResult =
   | Readonly<{ outcome: 'updated'; run: AnalysisRunV1; event: AnalysisEventV1 }>
   | Readonly<{ outcome: 'missing' }>
   | Readonly<{ outcome: 'revision_conflict'; run: AnalysisRunV1 }>
+
+export type EvidenceGraphCommitResult =
+  | RunTransitionResult
+  | Readonly<{ outcome: 'lease_conflict' }>
 
 export interface JobLease {
   readonly runId: string
@@ -114,6 +152,12 @@ export interface JobStore {
     computedHash: string,
   ): Promise<StoredSourceUpload | undefined>
   getSourceReceipt(tenantId: string, runId: string, sourceId: string): Promise<SourceReceiptV1 | undefined>
+  getSourceContent(tenantId: string, runId: string, sourceId: string): Promise<StoredSourceContent | undefined>
+  getCachedEvidenceCard(tenantId: string, cacheKey: string, now: number): Promise<StoredEvidenceCard | undefined>
+  storeEvidenceCard(input: StoreEvidenceCardInput): Promise<boolean>
+  listEvidenceCards(tenantId: string, runId: string): Promise<readonly StoredEvidenceCard[] | undefined>
+  commitEvidenceGraph(input: CommitEvidenceGraphInput): Promise<EvidenceGraphCommitResult>
+  getEvidenceGraph(tenantId: string, runId: string): Promise<EvidenceGraphV1 | undefined>
   deleteContent(tenantId: string, runId: string): Promise<boolean | undefined>
   listEvents(
     tenantId: string,

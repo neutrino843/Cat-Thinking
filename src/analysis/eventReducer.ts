@@ -96,6 +96,11 @@ export const applyAnalysisEvent = (
     case 'evidence.progress':
       next.coverage = event.coverage
       break
+    case 'evidence.ready':
+      next.status = 'generating'
+      next.stage = undefined
+      next.coverage = event.coverage
+      break
     case 'usage.updated':
       next.usage = event.usage
       break
