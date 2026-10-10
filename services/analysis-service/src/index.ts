@@ -4,6 +4,7 @@ import { RunService } from './domain/runService.js'
 import type { JobStore } from './domain/jobStore.js'
 import { AesGcmContentCipher, decodeContentEncryptionKey } from './infrastructure/contentCipher.js'
 import { PostgresJobStore } from './infrastructure/postgres/postgresJobStore.js'
+import { createConfiguredModelProvider } from './providers/configuredProvider.js'
 
 const config = loadAnalysisServiceConfig()
 let jobStore: JobStore | undefined
@@ -12,7 +13,12 @@ if (config.jobStore.mode === 'postgres') {
   jobStore = await PostgresJobStore.connectFromConfig(config.jobStore, cipher)
 }
 const runService = jobStore ? new RunService({ store: jobStore, retentionSeconds: config.retentionSeconds }) : undefined
-const server = await buildAnalysisServer(config, { runService, acceptsRuns: false })
+const provider = createConfiguredModelProvider(config.provider)
+const server = await buildAnalysisServer(config, {
+  runService,
+  providerReady: provider?.isReady() ?? false,
+  dispatcherReady: false,
+})
 let shuttingDown = false
 let cleanupRunning = false
 let cleanupTimer: NodeJS.Timeout | undefined

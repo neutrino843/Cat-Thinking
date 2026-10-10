@@ -1,6 +1,6 @@
 # Cat Analysis Service
 
-Independent server-side execution boundary for Cat-Thinking analysis. AI-1 established the secure HTTP boundary. AI-2 adds tenant-scoped durable runs, encrypted source parts, revision compare-and-swap, persisted SSE replay, cancellation, worker leases, and TTL cleanup without calling a model provider.
+Independent server-side execution boundary for Cat-Thinking analysis. AI-1 established the secure HTTP boundary. AI-2 adds tenant-scoped durable runs, encrypted source parts, revision compare-and-swap, persisted SSE replay, cancellation, worker leases, and TTL cleanup. AI-3 and AI-4 add the evidence pipeline and validated five-artifact DAG. AI-5 Batch 1 adds a provider-neutral gateway without yet enabling background dispatch.
 
 Production startup requires `ANALYSIS_AUTH_MODE=service-token`, a token of at least 32 UTF-8 bytes, and at least one exact `ANALYSIS_CORS_ORIGINS` value. The service token is intended to be injected by a trusted same-origin gateway; the gateway must overwrite `Authorization` and `X-Cat-Tenant-Id` instead of forwarding browser-supplied values.
 
@@ -10,4 +10,8 @@ Copy `.env.example` into deployment secret/configuration management; do not comm
 
 `ANALYSIS_JOB_STORE=disabled` preserves the AI-1 degraded mode. `ANALYSIS_JOB_STORE=postgres` requires a PostgreSQL URL and a canonical base64 32-byte AES key; production additionally requires database TLS. Migrations use a PostgreSQL advisory lock and refuse schemas newer than the service supports.
 
-Capabilities deliberately keep `acceptsRuns: false` until a real Provider and orchestrator are configured in AI-3. With PostgreSQL ready, `supportsSse` and `supportsCancellation` become true and only `provider.not-configured` remains degraded. Existing persisted runs can be inspected/replayed while new production runs remain fail-closed.
+Capabilities deliberately keep `acceptsRuns: false` until the configured Provider, PostgreSQL store, and persistent dispatcher are all ready. With PostgreSQL ready, `supportsSse` and `supportsCancellation` become true while production execution remains fail-closed. Existing persisted runs can be inspected/replayed before new production runs are accepted.
+
+`ANALYSIS_PROVIDER_MODE=openai-compatible` enables validated configuration for one approved endpoint. The base URL is service-owned, its exact host must appear in `ANALYSIS_PROVIDER_ALLOWED_HOSTS`, and production requires HTTPS. `responses` and `chat-completions` request shapes are supported behind the same domain interface. Redirects are rejected, calls have hard timeout/input/output limits, and provider messages or raw responses are never propagated as service errors.
+
+Provider configuration alone does not activate run creation. Batch 1 intentionally does not start a dispatcher, retry loop, external retrieval, or live smoke request. Use fake/sanitized responses in ordinary CI; inject a real key only through protected deployment secrets for an explicit live smoke stage.

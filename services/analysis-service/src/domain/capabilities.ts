@@ -13,24 +13,30 @@ export const createEngineCapabilities = (
   availability: Readonly<{
     jobStoreReady?: boolean
     providerReady?: boolean
-    acceptsRuns?: boolean
+    dispatcherReady?: boolean
   }> = {},
-): EngineCapabilitiesV1 => engineCapabilitiesSchema.parse({
-  service: 'cat-analysis-engine',
-  serviceVersion: config.serviceVersion,
-  acceptsRuns: availability.acceptsRuns ?? false,
-  degradedReasons: [
-    ...(availability.providerReady ? [] : ['provider.not-configured']),
-    ...(availability.jobStoreReady ? [] : ['job-store.not-configured']),
-  ],
-  contractVersions: [ANALYSIS_CONTRACT_VERSION],
-  qualityProfiles: [...QUALITY_PROFILES],
-  artifactKinds: [...ARTIFACT_KINDS],
-  maxSourcesPerRun: ANALYSIS_LIMITS.maxSourcesPerRun,
-  maxSourceCharacters: ANALYSIS_LIMITS.maxSourceCharacters,
-  maxUploadPartBytes: ANALYSIS_LIMITS.maxUploadPartBytes,
-  supportsSse: availability.jobStoreReady ?? false,
-  supportsCancellation: availability.jobStoreReady ?? false,
-  supportsExternalKnowledge: false,
-  retentionSeconds: config.retentionSeconds,
-})
+): EngineCapabilitiesV1 => {
+  const jobStoreReady = availability.jobStoreReady ?? false
+  const providerReady = availability.providerReady ?? false
+  const dispatcherReady = availability.dispatcherReady ?? false
+  return engineCapabilitiesSchema.parse({
+    service: 'cat-analysis-engine',
+    serviceVersion: config.serviceVersion,
+    acceptsRuns: jobStoreReady && providerReady && dispatcherReady,
+    degradedReasons: [
+      ...(providerReady ? [] : ['provider.not-configured']),
+      ...(jobStoreReady ? [] : ['job-store.not-configured']),
+      ...(dispatcherReady ? [] : ['dispatcher.not-ready']),
+    ],
+    contractVersions: [ANALYSIS_CONTRACT_VERSION],
+    qualityProfiles: [...QUALITY_PROFILES],
+    artifactKinds: [...ARTIFACT_KINDS],
+    maxSourcesPerRun: ANALYSIS_LIMITS.maxSourcesPerRun,
+    maxSourceCharacters: ANALYSIS_LIMITS.maxSourceCharacters,
+    maxUploadPartBytes: ANALYSIS_LIMITS.maxUploadPartBytes,
+    supportsSse: jobStoreReady,
+    supportsCancellation: jobStoreReady,
+    supportsExternalKnowledge: false,
+    retentionSeconds: config.retentionSeconds,
+  })
+}

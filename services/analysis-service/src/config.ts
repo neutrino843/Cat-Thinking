@@ -32,6 +32,23 @@ const originListSchema = z.string().default('').transform((value, context) => {
   return [...unique]
 })
 
+const hostListSchema = z.string().default('').transform((value, context) => {
+  const hosts = value.split(',').map((host) => host.trim().toLowerCase()).filter(Boolean)
+  const unique = new Set<string>()
+  for (const host of hosts) {
+    try {
+      const parsed = new URL(`https://${host}`)
+      if (parsed.host.toLowerCase() !== host || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+        throw new Error('not an exact host')
+      }
+      unique.add(host)
+    } catch {
+      context.addIssue({ code: 'custom', message: `Invalid exact provider host: ${host}` })
+    }
+  }
+  return [...unique]
+})
+
 const secretSchema = z.string().max(4_096).refine(
   (secret) => new TextEncoder().encode(secret).byteLength >= 32,
   'service token must contain at least 32 UTF-8 bytes',
@@ -52,6 +69,29 @@ const encryptionKeySchema = z.string().max(100).regex(
   /^[A-Za-z0-9+/]{43}=$/u,
   'content encryption key must be canonical base64 for exactly 32 bytes',
 )
+
+const providerIdSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/u)
+const providerModelSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}$/u)
+const providerApiKeySchema = z.string().max(4_096).refine(
+  (secret) => new TextEncoder().encode(secret).byteLength >= 16,
+  'provider API key must contain at least 16 UTF-8 bytes',
+)
+
+const parseProviderBaseUrl = (value: string): URL | undefined => {
+  try {
+    const url = new URL(value)
+    if (
+      !['http:', 'https:'].includes(url.protocol)
+      || url.username
+      || url.password
+      || url.search
+      || url.hash
+    ) return undefined
+    return url
+  } catch {
+    return undefined
+  }
+}
 
 const selectedEnvironmentSchema = z
   .object({
@@ -83,6 +123,18 @@ const selectedEnvironmentSchema = z
     ANALYSIS_LEASE_MS: integerFromEnvironment(30_000, 1_000, 600_000),
     ANALYSIS_CLEANUP_BATCH_SIZE: integerFromEnvironment(100, 1, 1_000),
     ANALYSIS_CLEANUP_INTERVAL_MS: integerFromEnvironment(60_000, 1_000, 3_600_000),
+    ANALYSIS_PROVIDER_MODE: z.enum(['disabled', 'openai-compatible']).default('disabled'),
+    ANALYSIS_PROVIDER_ID: z.string().optional(),
+    ANALYSIS_PROVIDER_BASE_URL: z.string().max(2_048).optional(),
+    ANALYSIS_PROVIDER_ALLOWED_HOSTS: hostListSchema,
+    ANALYSIS_PROVIDER_API_KEY: z.string().optional(),
+    ANALYSIS_PROVIDER_API_STYLE: z.enum(['responses', 'chat-completions']).default('responses'),
+    ANALYSIS_PROVIDER_MODEL_ID: z.string().optional(),
+    ANALYSIS_PROVIDER_PROFILE_VERSION: z.string().optional(),
+    ANALYSIS_PROVIDER_TIMEOUT_MS: integerFromEnvironment(60_000, 1_000, 300_000),
+    ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS: integerFromEnvironment(200_000, 1_000, 10_000_000),
+    ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS: integerFromEnvironment(16_384, 1, 1_000_000),
+    ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES: integerFromEnvironment(2_000_000, 1_024, 20_000_000),
   })
   .strict()
   .superRefine((environment, context) => {
@@ -141,6 +193,56 @@ const selectedEnvironmentSchema = z
         })
       }
     }
+    if (environment.ANALYSIS_PROVIDER_MODE === 'openai-compatible') {
+      const providerId = providerIdSchema.safeParse(environment.ANALYSIS_PROVIDER_ID)
+      const modelId = providerModelSchema.safeParse(environment.ANALYSIS_PROVIDER_MODEL_ID)
+      const profileVersion = providerIdSchema.safeParse(environment.ANALYSIS_PROVIDER_PROFILE_VERSION)
+      const apiKey = providerApiKeySchema.safeParse(environment.ANALYSIS_PROVIDER_API_KEY)
+      const baseUrl = environment.ANALYSIS_PROVIDER_BASE_URL
+        ? parseProviderBaseUrl(environment.ANALYSIS_PROVIDER_BASE_URL)
+        : undefined
+      if (!providerId.success) context.addIssue({
+        code: 'custom',
+        path: ['ANALYSIS_PROVIDER_ID'],
+        message: 'OpenAI-compatible provider requires a valid provider id',
+      })
+      if (!modelId.success) context.addIssue({
+        code: 'custom',
+        path: ['ANALYSIS_PROVIDER_MODEL_ID'],
+        message: 'OpenAI-compatible provider requires a valid model id',
+      })
+      if (!profileVersion.success) context.addIssue({
+        code: 'custom',
+        path: ['ANALYSIS_PROVIDER_PROFILE_VERSION'],
+        message: 'OpenAI-compatible provider requires a valid profile version',
+      })
+      if (!apiKey.success) context.addIssue({
+        code: 'custom',
+        path: ['ANALYSIS_PROVIDER_API_KEY'],
+        message: environment.ANALYSIS_PROVIDER_API_KEY === undefined
+          ? 'OpenAI-compatible provider requires an API key'
+          : apiKey.error.issues[0]?.message ?? 'invalid provider API key',
+      })
+      if (!baseUrl) context.addIssue({
+        code: 'custom',
+        path: ['ANALYSIS_PROVIDER_BASE_URL'],
+        message: 'OpenAI-compatible provider requires a valid HTTP(S) base URL without credentials or query data',
+      })
+      if (baseUrl && !environment.ANALYSIS_PROVIDER_ALLOWED_HOSTS.includes(baseUrl.host.toLowerCase())) {
+        context.addIssue({
+          code: 'custom',
+          path: ['ANALYSIS_PROVIDER_ALLOWED_HOSTS'],
+          message: 'provider base URL host must be explicitly allowlisted',
+        })
+      }
+      if (baseUrl && environment.NODE_ENV === 'production' && baseUrl.protocol !== 'https:') {
+        context.addIssue({
+          code: 'custom',
+          path: ['ANALYSIS_PROVIDER_BASE_URL'],
+          message: 'production provider requires HTTPS',
+        })
+      }
+    }
   })
 
 export interface AnalysisServiceConfig {
@@ -178,6 +280,22 @@ export interface AnalysisServiceConfig {
   readonly leaseMs: number
   readonly cleanupBatchSize: number
   readonly cleanupIntervalMs: number
+  readonly provider:
+    | Readonly<{ mode: 'disabled' }>
+    | Readonly<{
+        mode: 'openai-compatible'
+        id: string
+        baseUrl: string
+        allowedHosts: readonly string[]
+        apiKey: string
+        apiStyle: 'responses' | 'chat-completions'
+        modelId: string
+        profileVersion: string
+        timeoutMs: number
+        maxInputCharacters: number
+        maxOutputTokens: number
+        maxResponseBytes: number
+      }>
 }
 
 const selectEnvironment = (environment: NodeJS.ProcessEnv): Record<string, string | undefined> => ({
@@ -209,6 +327,18 @@ const selectEnvironment = (environment: NodeJS.ProcessEnv): Record<string, strin
   ANALYSIS_LEASE_MS: environment.ANALYSIS_LEASE_MS,
   ANALYSIS_CLEANUP_BATCH_SIZE: environment.ANALYSIS_CLEANUP_BATCH_SIZE,
   ANALYSIS_CLEANUP_INTERVAL_MS: environment.ANALYSIS_CLEANUP_INTERVAL_MS,
+  ANALYSIS_PROVIDER_MODE: environment.ANALYSIS_PROVIDER_MODE,
+  ANALYSIS_PROVIDER_ID: environment.ANALYSIS_PROVIDER_ID,
+  ANALYSIS_PROVIDER_BASE_URL: environment.ANALYSIS_PROVIDER_BASE_URL,
+  ANALYSIS_PROVIDER_ALLOWED_HOSTS: environment.ANALYSIS_PROVIDER_ALLOWED_HOSTS,
+  ANALYSIS_PROVIDER_API_KEY: environment.ANALYSIS_PROVIDER_API_KEY,
+  ANALYSIS_PROVIDER_API_STYLE: environment.ANALYSIS_PROVIDER_API_STYLE,
+  ANALYSIS_PROVIDER_MODEL_ID: environment.ANALYSIS_PROVIDER_MODEL_ID,
+  ANALYSIS_PROVIDER_PROFILE_VERSION: environment.ANALYSIS_PROVIDER_PROFILE_VERSION,
+  ANALYSIS_PROVIDER_TIMEOUT_MS: environment.ANALYSIS_PROVIDER_TIMEOUT_MS,
+  ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS: environment.ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS,
+  ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS: environment.ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS,
+  ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES: environment.ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES,
 })
 
 export const loadAnalysisServiceConfig = (
@@ -226,6 +356,22 @@ export const loadAnalysisServiceConfig = (
         poolMax: parsed.ANALYSIS_DB_POOL_MAX,
         connectTimeoutMs: parsed.ANALYSIS_DB_CONNECT_TIMEOUT_MS,
         encryptionKey: encryptionKeySchema.parse(parsed.ANALYSIS_CONTENT_ENCRYPTION_KEY),
+      })
+    : Object.freeze({ mode: 'disabled' as const })
+  const provider: AnalysisServiceConfig['provider'] = parsed.ANALYSIS_PROVIDER_MODE === 'openai-compatible'
+    ? Object.freeze({
+        mode: 'openai-compatible' as const,
+        id: providerIdSchema.parse(parsed.ANALYSIS_PROVIDER_ID),
+        baseUrl: z.string().parse(parsed.ANALYSIS_PROVIDER_BASE_URL),
+        allowedHosts: Object.freeze([...parsed.ANALYSIS_PROVIDER_ALLOWED_HOSTS]),
+        apiKey: providerApiKeySchema.parse(parsed.ANALYSIS_PROVIDER_API_KEY),
+        apiStyle: parsed.ANALYSIS_PROVIDER_API_STYLE,
+        modelId: providerModelSchema.parse(parsed.ANALYSIS_PROVIDER_MODEL_ID),
+        profileVersion: providerIdSchema.parse(parsed.ANALYSIS_PROVIDER_PROFILE_VERSION),
+        timeoutMs: parsed.ANALYSIS_PROVIDER_TIMEOUT_MS,
+        maxInputCharacters: parsed.ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS,
+        maxOutputTokens: parsed.ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS,
+        maxResponseBytes: parsed.ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES,
       })
     : Object.freeze({ mode: 'disabled' as const })
 
@@ -253,5 +399,6 @@ export const loadAnalysisServiceConfig = (
     leaseMs: parsed.ANALYSIS_LEASE_MS,
     cleanupBatchSize: parsed.ANALYSIS_CLEANUP_BATCH_SIZE,
     cleanupIntervalMs: parsed.ANALYSIS_CLEANUP_INTERVAL_MS,
+    provider,
   })
 }

@@ -8,6 +8,7 @@ describe('analysis service configuration', () => {
     expect(config.host).toBe('127.0.0.1')
     expect(config.port).toBe(8_787)
     expect(config.auth.mode).toBe('disabled')
+    expect(config.provider.mode).toBe('disabled')
     expect(config.corsOrigins).toEqual([])
     expect(Object.isFrozen(config)).toBe(true)
     expect(Object.isFrozen(config.corsOrigins)).toBe(true)
@@ -107,5 +108,82 @@ describe('analysis service configuration', () => {
     })
     expect(config.jobStore).toMatchObject({ mode: 'postgres', poolMax: 4 })
     expect(config.ssePollMs).toBe(250)
+  })
+
+  it('loads a frozen allowlisted OpenAI-compatible provider configuration', () => {
+    const config = loadAnalysisServiceConfig({
+      NODE_ENV: 'test',
+      ANALYSIS_PROVIDER_MODE: 'openai-compatible',
+      ANALYSIS_PROVIDER_ID: 'approved-provider',
+      ANALYSIS_PROVIDER_BASE_URL: 'https://models.example.com/v1',
+      ANALYSIS_PROVIDER_ALLOWED_HOSTS: 'models.example.com,models.example.com',
+      ANALYSIS_PROVIDER_API_KEY: 'provider-test-key-with-safe-length',
+      ANALYSIS_PROVIDER_API_STYLE: 'chat-completions',
+      ANALYSIS_PROVIDER_MODEL_ID: 'approved/model-v1',
+      ANALYSIS_PROVIDER_PROFILE_VERSION: 'profile-v1',
+      ANALYSIS_PROVIDER_TIMEOUT_MS: '45000',
+      ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS: '50000',
+      ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS: '4096',
+      ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES: '500000',
+    })
+
+    expect(config.provider).toMatchObject({
+      mode: 'openai-compatible',
+      id: 'approved-provider',
+      allowedHosts: ['models.example.com'],
+      apiStyle: 'chat-completions',
+      modelId: 'approved/model-v1',
+      timeoutMs: 45_000,
+    })
+    expect(Object.isFrozen(config.provider)).toBe(true)
+    if (config.provider.mode === 'openai-compatible') {
+      expect(Object.isFrozen(config.provider.allowedHosts)).toBe(true)
+    }
+  })
+
+  it('fails closed for incomplete, unapproved, or insecure provider configuration', () => {
+    const base = {
+      NODE_ENV: 'test',
+      ANALYSIS_PROVIDER_MODE: 'openai-compatible',
+      ANALYSIS_PROVIDER_ID: 'approved-provider',
+      ANALYSIS_PROVIDER_BASE_URL: 'https://models.example.com/v1',
+      ANALYSIS_PROVIDER_ALLOWED_HOSTS: 'models.example.com',
+      ANALYSIS_PROVIDER_API_KEY: 'provider-test-key-with-safe-length',
+      ANALYSIS_PROVIDER_MODEL_ID: 'approved-model',
+      ANALYSIS_PROVIDER_PROFILE_VERSION: 'profile-v1',
+    }
+
+    expect(() => loadAnalysisServiceConfig({
+      ...base,
+      ANALYSIS_PROVIDER_API_KEY: undefined,
+    })).toThrow(/API key/)
+    expect(() => loadAnalysisServiceConfig({
+      ...base,
+      ANALYSIS_PROVIDER_ALLOWED_HOSTS: 'other.example.com',
+    })).toThrow(/allowlisted/)
+    expect(() => loadAnalysisServiceConfig({
+      ...base,
+      ANALYSIS_PROVIDER_BASE_URL: 'https://user:secret@models.example.com/v1?leak=yes',
+    })).toThrow(/without credentials or query data/)
+    expect(() => loadAnalysisServiceConfig({
+      ...base,
+      ANALYSIS_PROVIDER_ALLOWED_HOSTS: 'models.example.com/path',
+    })).toThrow(/Invalid exact provider host/)
+  })
+
+  it('requires HTTPS for a production provider', () => {
+    expect(() => loadAnalysisServiceConfig({
+      NODE_ENV: 'production',
+      ANALYSIS_AUTH_MODE: 'service-token',
+      ANALYSIS_SERVICE_TOKEN: 'production-token-that-is-at-least-thirty-two-bytes',
+      ANALYSIS_CORS_ORIGINS: 'https://app.example.com',
+      ANALYSIS_PROVIDER_MODE: 'openai-compatible',
+      ANALYSIS_PROVIDER_ID: 'approved-provider',
+      ANALYSIS_PROVIDER_BASE_URL: 'http://models.example.com/v1',
+      ANALYSIS_PROVIDER_ALLOWED_HOSTS: 'models.example.com',
+      ANALYSIS_PROVIDER_API_KEY: 'provider-test-key-with-safe-length',
+      ANALYSIS_PROVIDER_MODEL_ID: 'approved-model',
+      ANALYSIS_PROVIDER_PROFILE_VERSION: 'profile-v1',
+    })).toThrow(/requires HTTPS/)
   })
 })

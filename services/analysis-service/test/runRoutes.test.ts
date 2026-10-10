@@ -27,7 +27,7 @@ const servers: FastifyInstance[] = []
 
 const hash = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex')
 
-const setup = async (acceptsRuns = true): Promise<FastifyInstance> => {
+const setup = async (executionReady = true): Promise<FastifyInstance> => {
   let id = 0
   const config = loadAnalysisServiceConfig({
     NODE_ENV: 'test',
@@ -44,7 +44,12 @@ const setup = async (acceptsRuns = true): Promise<FastifyInstance> => {
     now: () => 1_791_700_000_000,
     createId: () => `http-generated-${++id}`,
   })
-  const server = await buildAnalysisServer(config, { logger: false, runService, acceptsRuns })
+  const server = await buildAnalysisServer(config, {
+    logger: false,
+    runService,
+    providerReady: executionReady,
+    dispatcherReady: executionReady,
+  })
   servers.push(server)
   return server
 }
@@ -330,7 +335,7 @@ describe('durable analysis HTTP lifecycle', () => {
     expect(streamed.body).toContain(': heartbeat')
   }, 5_000)
 
-  it('advertises recoverable infrastructure without accepting runs before a provider is ready', async () => {
+  it('advertises recoverable infrastructure without accepting runs before provider and dispatcher are ready', async () => {
     const server = await setup(false)
     const capabilities = engineCapabilitiesSchema.parse((await server.inject({
       method: 'GET', url: '/api/analysis/v1/capabilities', headers,
@@ -339,7 +344,7 @@ describe('durable analysis HTTP lifecycle', () => {
       acceptsRuns: false,
       supportsSse: true,
       supportsCancellation: true,
-      degradedReasons: ['provider.not-configured'],
+      degradedReasons: ['provider.not-configured', 'dispatcher.not-ready'],
     })
     const rejected = await server.inject({
       method: 'POST', url: '/api/analysis/v1/runs', headers, payload: {},

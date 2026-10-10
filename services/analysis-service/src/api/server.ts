@@ -21,7 +21,8 @@ export interface BuildAnalysisServerOptions {
   readonly logger?: false
   readonly now?: () => number
   readonly runService?: RunService
-  readonly acceptsRuns?: boolean
+  readonly providerReady?: boolean
+  readonly dispatcherReady?: boolean
 }
 
 const invalidRequestError = (messageKey: string): ServiceHttpError => new ServiceHttpError(
@@ -189,11 +190,14 @@ export const buildAnalysisServer = async (
     api.addHook('onRequest', createOriginGuard(config.corsOrigins))
     api.addHook('onRequest', createAuthenticationHook(config))
 
-    const acceptsRuns = options.acceptsRuns ?? false
+    const jobStoreReady = options.runService !== undefined
+    const providerReady = options.providerReady ?? false
+    const dispatcherReady = options.dispatcherReady ?? false
+    const acceptsRuns = jobStoreReady && providerReady && dispatcherReady
     api.get('/capabilities', async () => createEngineCapabilities(config, {
-      jobStoreReady: options.runService !== undefined,
-      providerReady: acceptsRuns,
-      acceptsRuns,
+      jobStoreReady,
+      providerReady,
+      dispatcherReady,
     }))
     registerRunRoutes(api, config, { runService: options.runService, acceptsRuns })
   }, { prefix: '/api/analysis/v1' })

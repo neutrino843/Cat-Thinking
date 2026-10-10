@@ -13,6 +13,9 @@ const REDACTED_PATHS = [
   'connectionString',
   'databaseUrl',
   'encryptionKey',
+  'apiKey',
+  'providerApiKey',
+  'provider.apiKey',
 ] as const
 
 export const createLoggerOptions = (

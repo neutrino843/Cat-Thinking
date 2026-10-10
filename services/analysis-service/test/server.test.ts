@@ -46,13 +46,18 @@ describe('analysis service security boundary', () => {
     expect(createEngineCapabilities(config)).toMatchObject({
       acceptsRuns: false,
       supportsSse: false,
-      degradedReasons: ['provider.not-configured', 'job-store.not-configured'],
+      degradedReasons: ['provider.not-configured', 'job-store.not-configured', 'dispatcher.not-ready'],
     })
     expect(createEngineCapabilities(config, { providerReady: true })).toMatchObject({
       acceptsRuns: false,
       supportsSse: false,
-      degradedReasons: ['job-store.not-configured'],
+      degradedReasons: ['job-store.not-configured', 'dispatcher.not-ready'],
     })
+    expect(createEngineCapabilities(config, {
+      jobStoreReady: true,
+      providerReady: true,
+      dispatcherReady: true,
+    })).toMatchObject({ acceptsRuns: true, degradedReasons: [] })
   })
 
   it('serves unauthenticated liveness and readiness without consuming rate limit', async () => {
@@ -108,7 +113,11 @@ describe('analysis service security boundary', () => {
 
     expect(response.statusCode).toBe(200)
     expect(capabilities.acceptsRuns).toBe(false)
-    expect(capabilities.degradedReasons).toEqual(['provider.not-configured', 'job-store.not-configured'])
+    expect(capabilities.degradedReasons).toEqual([
+      'provider.not-configured',
+      'job-store.not-configured',
+      'dispatcher.not-ready',
+    ])
     expect(capabilities.supportsSse).toBe(false)
     expect(response.headers['content-security-policy']).toContain("default-src 'none'")
     expect(response.headers['x-content-type-options']).toBe('nosniff')
@@ -191,6 +200,8 @@ describe('analysis service security boundary', () => {
       'req.headers.cookie',
       'token',
       'secret',
+      'apiKey',
+      'provider.apiKey',
     ]))
 
     const logger = createLoggerOptions(loadAnalysisServiceConfig({ NODE_ENV: 'test', ANALYSIS_LOG_LEVEL: 'info' }))
