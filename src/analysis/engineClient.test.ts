@@ -413,3 +413,102 @@ describe('HTTP analysis engine client', () => {
     })
   })
 })
+
+describe('HTTP request recovery and authoritative usage', () => {
+  const requestKey = 'a'.repeat(64)
+  const signal = () => new AbortController().signal
+  const usage = (runId = 'run-1') => ({
+    version: 1, runId, usage: { inputTokens: 20, outputTokens: 10, estimatedCostMicros: 2, currency: 'USD' },
+    invocationCount: 3, unresolvedCount: 1, estimatedInputTokens: 100, reservedOutputTokens: 50, completeness: 'unresolved',
+  })
+
+  it('uses only the fixed lookup GET and forwards the caller abort signal without browser identity headers', async () => {
+    const mockFetch = fetcher(async () => jsonResponse({ version: 1, status: 'absent' }))
+    const client = new HttpAnalysisEngineClient(mockFetch)
+    const abortSignal = signal()
+    await expect(client.lookupRequest(requestKey, abortSignal)).resolves.toEqual({ version: 1, status: 'absent' })
+    expect(mockFetch).toHaveBeenCalledExactlyOnceWith(`${ANALYSIS_API_PREFIX}/runs/by-request-key?requestKey=${requestKey}`, {
+      method: 'GET', headers: { accept: 'application/json' }, credentials: 'same-origin', signal: abortSignal,
+    })
+  })
+  it('accepts found and abandoned lookup states and validates the found request identity', async () => {
+    const run = createRun()
+    const mockFetch = fetcher(async () => jsonResponse({ version: 1, status: 'found', run }))
+    const client = new HttpAnalysisEngineClient(mockFetch)
+    await expect(client.lookupRequest(run.requestKey, signal())).resolves.toEqual({ version: 1, status: 'found', run })
+    const abandoned = new HttpAnalysisEngineClient(fetcher(async () => jsonResponse({ version: 1, status: 'abandoned', runId: 'run-1' })))
+    await expect(abandoned.lookupRequest(requestKey, signal())).resolves.toEqual({ version: 1, status: 'abandoned', runId: 'run-1' })
+    await expect(client.lookupRequest('b'.repeat(64), signal())).rejects.toMatchObject({ code: 'invalid_response', retryable: false })
+  })
+  it('sends a versioned abandon body exactly once and requires a matching confirmed identity', async () => {
+    const result = { version: 1, requestKey, abandoned: true, runId: 'run-1' }
+    const mockFetch = fetcher(async () => jsonResponse(result))
+    const client = new HttpAnalysisEngineClient(mockFetch)
+    const abortSignal = signal()
+    await expect(client.abandonRequest(requestKey, abortSignal)).resolves.toEqual(result)
+    expect(mockFetch).toHaveBeenCalledExactlyOnceWith(`${ANALYSIS_API_PREFIX}/runs/abandon`, {
+      method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      credentials: 'same-origin', body: JSON.stringify({ version: 1, requestKey }), signal: abortSignal,
+    })
+    for (const invalid of [{ ...result, requestKey: 'b'.repeat(64) }, { ...result, abandoned: false }]) {
+      const mismatched = new HttpAnalysisEngineClient(fetcher(async () => jsonResponse(invalid)))
+      await expect(mismatched.abandonRequest(requestKey, signal())).rejects.toMatchObject({ code: 'invalid_response', retryable: false })
+    }
+  })
+  it('rejects malformed request keys before lookup or abandonment reaches the transport', async () => {
+    const mockFetch = fetcher(async () => { throw new Error('Unexpected transport') })
+    const client = new HttpAnalysisEngineClient(mockFetch)
+    for (const key of ['', 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), ` ${requestKey}`, `${requestKey}&tenant=other`, '../request']) {
+      await expect(client.lookupRequest(key, signal())).rejects.toBeDefined()
+      await expect(client.abandonRequest(key, signal())).rejects.toBeDefined()
+    }
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+  it('requests usage through the encoded run path and preserves unknown reservation facts', async () => {
+    const runId = 'run:scope-1'
+    const result = usage(runId)
+    const mockFetch = fetcher(async () => jsonResponse(result))
+    const client = new HttpAnalysisEngineClient(mockFetch)
+    const abortSignal = signal()
+    await expect(client.getUsage(runId, abortSignal)).resolves.toEqual(result)
+    expect(mockFetch).toHaveBeenCalledExactlyOnceWith(`${ANALYSIS_API_PREFIX}/runs/run%3Ascope-1/usage`, {
+      method: 'GET', headers: { accept: 'application/json' }, credentials: 'same-origin', signal: abortSignal,
+    })
+    const wrongRun = new HttpAnalysisEngineClient(fetcher(async () => jsonResponse(usage('other-run'))))
+    await expect(wrongRun.getUsage('run-1', signal())).rejects.toMatchObject({ code: 'invalid_response', retryable: false })
+  })
+  it('rejects invalid usage route identifiers before sending a request', async () => {
+    const mockFetch = fetcher(async () => jsonResponse(usage()))
+    const client = new HttpAnalysisEngineClient(mockFetch)
+    for (const runId of ['', '../run-1', 'run/1', 'run-1?other=1', 'run%2F1']) {
+      await expect(client.getUsage(runId, signal())).rejects.toBeDefined()
+    }
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+  it('rejects contradictory completeness, invalid counters, and unknown response fields', async () => {
+    for (const patch of [
+      { completeness: 'complete' }, { unresolvedCount: 4 }, { invocationCount: -1 },
+      { reservedOutputTokens: -1 }, { estimatedInputTokens: 1.5 }, { authorization: 'untrusted-secret' },
+    ]) {
+      const client = new HttpAnalysisEngineClient(fetcher(async () => jsonResponse({ ...usage(), ...patch })))
+      await expect(client.getUsage('run-1', signal())).rejects.toMatchObject({ code: 'invalid_response', retryable: false })
+    }
+  })
+  it('rejects invalid lookup contracts and treats unavailable recovery routes as read errors', async () => {
+    for (const result of [{ version: 1, status: 'found' }, { version: 2, status: 'absent' },
+      { version: 1, status: 'absent', payload: 'untrusted' }, { version: 1, status: 'abandoned', runId: '../bad' }]) {
+      const client = new HttpAnalysisEngineClient(fetcher(async () => jsonResponse(result)))
+      await expect(client.lookupRequest(requestKey, signal())).rejects.toMatchObject({ code: 'invalid_response', retryable: false })
+    }
+    const failed = new HttpAnalysisEngineClient(fetcher(async () => new Response('hidden provider message', { status: 503 })))
+    await expect(failed.lookupRequest(requestKey, signal())).rejects.toMatchObject({ code: 'service_unavailable', retryable: true })
+    await expect(failed.abandonRequest(requestKey, signal())).rejects.toMatchObject({ code: 'service_unavailable', retryable: true })
+    await expect(failed.getUsage('run-1', signal())).rejects.toMatchObject({ code: 'service_unavailable', retryable: true })
+  })
+  it('does not replay an ambiguous abandonment request inside the client', async () => {
+    const mockFetch = fetcher(async () => { throw new TypeError('Synthetic response lost') })
+    const client = new HttpAnalysisEngineClient(mockFetch)
+    await expect(client.abandonRequest(requestKey, signal())).rejects.toThrow('Synthetic response lost')
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+})

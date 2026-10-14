@@ -1,12 +1,14 @@
-import type { DocData } from '../types'
+import type { DocData, SourceDocument } from '../types'
 import {
   blobToDataURL,
   collectBlobIds,
   download,
-  validateDoc,
+  parseImported,
+  pruneSourceAnchors,
 } from './exporters'
 import { sanitizeFileName } from './openFormats'
-import { getBlob, putBlob, saveTemplate } from '../store/db'
+import { getBlob, listSourcesByDoc, saveTemplate } from '../store/db'
+import { decodeImportedBlobs } from './importedBlobs'
 
 /** M7-P5：.msz-tpl 文件中 blob 的 dataURL 结构（与 exportJSON 的 _blobs 一致） */
 interface BlobMeta {
@@ -20,6 +22,7 @@ export interface MszTemplateFile {
   name: string
   doc: DocData
   _blobs?: Record<string, BlobMeta>
+  _sources?: SourceDocument[]
 }
 
 /** M7-P5：blob → dataURL 内嵌的尺寸上限（与 exporters 一致，>2MB 不内嵌） */
@@ -41,6 +44,8 @@ export async function exportTemplate(name: string, doc: DocData): Promise<void> 
     doc,
     ...(Object.keys(_blobs).length ? { _blobs } : {}),
   }
+  const sources = pruneSourceAnchors(doc, await listSourcesByDoc(doc.id))
+  if (sources.length) payload._sources = sources
   download(
     `${sanitizeFileName(name)}.msz-tpl`,
     new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
@@ -70,20 +75,8 @@ export async function importTemplateFile(file: File): Promise<void> {
   if (typeof o.name !== 'string' || !o.name.trim()) throw new Error('模板缺少名称')
   if (!o.doc) throw new Error('模板文件缺少文档内容')
 
-  const doc = validateDoc(o.doc)
+  const imported = parseImported(JSON.stringify({ ...(o.doc as object), _sources: o._sources ?? [], _blobs: o._blobs ?? {} }))
   const name = o.name.trim()
-  const blobs = (o._blobs as Record<string, BlobMeta> | undefined) ?? {}
-
-  // 把 _blobs 中的 dataURL 还原为 Blob，按原 blobId 写入 doc.id 下（saveTemplate 会克隆重映射）
-  for (const [blobId, meta] of Object.entries(blobs)) {
-    try {
-      const res = await fetch(meta.dataURL)
-      const blob = await res.blob()
-      await putBlob(blobId, doc.id, blob)
-    } catch {
-      /* 单个 blob 还原失败不阻断导入（图片/附件可能缺失，不影响结构） */
-    }
-  }
-
-  await saveTemplate(name, doc)
+  // Write remapped attachments directly into the template transaction, never into the imported identity.
+  await saveTemplate(name, imported.doc, imported.sources, decodeImportedBlobs(imported.blobs))
 }

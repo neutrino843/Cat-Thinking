@@ -37,6 +37,29 @@ describe('DOCX 内建提取器', () => {
     expect(text).toContain('术语 | 解释')
   })
 
+  it('缺少outlineLvl不会把Normal正文样式误判为一级标题', () => {
+    const xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+      + '<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>普通正文。</w:t></w:r></w:p>'
+      + '<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>小节标题</w:t></w:r></w:p>'
+      + '</w:body></w:document>'
+    const styles = '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + '<w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/></w:style>'
+      + '</w:styles>'
+    expect(docxXmlToStructuredText(xml, styles)).toBe('普通正文。\n\n## 小节标题')
+  })
+
+  it('有明确outlineLvl或继承的Heading样式时保持真实层级', () => {
+    const xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+      + '<w:p><w:pPr><w:pStyle w:val="Custom"/></w:pPr><w:r><w:t>子知识标题</w:t></w:r></w:p>'
+      + '</w:body></w:document>'
+    const styles = '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + '<w:style w:type="paragraph" w:styleId="Custom"><w:basedOn w:val="Base"/></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="Base"><w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style>'
+      + '</w:styles>'
+    expect(docxXmlToStructuredText(xml, styles)).toBe('### 子知识标题')
+  })
+
   it('拒绝 XML 实体声明', () => {
     expect(() => docxXmlToStructuredText('<!DOCTYPE x [<!ENTITY y "bad">]><document/>'))
       .toThrow(/实体声明/)
@@ -62,7 +85,7 @@ describe('DOCX 内建提取器', () => {
     const result = await extractDocx(file)
     expect(result.kind).toBe('docx')
     expect(result.structure).toBe('markdown')
-    expect(result.extractor).toBe('cat-docx-ooxml-v1')
+    expect(result.extractor).toBe('cat-docx-ooxml-v2')
     expect(result.text).toContain('# 课程标题')
   })
 })

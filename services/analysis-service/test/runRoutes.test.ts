@@ -15,6 +15,7 @@ import { buildAnalysisServer } from '../src/api/server.js'
 import { loadAnalysisServiceConfig } from '../src/config.js'
 import { RunService } from '../src/domain/runService.js'
 import { InMemoryJobStore } from '../src/infrastructure/memoryJobStore.js'
+import { fixtureRequest } from './fixtures/fakeAnalysisProvider.js'
 
 const token = 'service-token-that-is-longer-than-thirty-two-bytes'
 const origin = 'https://app.example.com'
@@ -27,7 +28,7 @@ const servers: FastifyInstance[] = []
 
 const hash = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex')
 
-const setup = async (executionReady = true): Promise<FastifyInstance> => {
+const setup = async (executionReady = true, injectedService?: RunService): Promise<FastifyInstance> => {
   let id = 0
   const config = loadAnalysisServiceConfig({
     NODE_ENV: 'test',
@@ -38,7 +39,7 @@ const setup = async (executionReady = true): Promise<FastifyInstance> => {
     ANALYSIS_SSE_POLL_MS: '100',
     ANALYSIS_SSE_HEARTBEAT_MS: '1000',
   })
-  const runService = new RunService({
+  const runService = injectedService ?? new RunService({
     store: new InMemoryJobStore(),
     retentionSeconds: 3_600,
     now: () => 1_791_700_000_000,
@@ -49,6 +50,9 @@ const setup = async (executionReady = true): Promise<FastifyInstance> => {
     runService,
     providerReady: executionReady,
     dispatcherReady: executionReady,
+    usageReady: true,
+    recoveryReady: true,
+    liveSmokeReady: true,
   })
   servers.push(server)
   return server
@@ -59,6 +63,30 @@ afterEach(async () => {
 })
 
 describe('durable analysis HTTP lifecycle', () => {
+  it('serves tenant-scoped reconciliation, usage and abandonment while paid admission remains closed', async () => {
+    const store = new InMemoryJobStore()
+    const service = new RunService({ store, retentionSeconds: 3600 })
+    const request = fixtureRequest('held-readonly-recovery', ['summary'])
+    const created = await service.createRun('tenant-1', request)
+    const server = await setup(false, service)
+    const url = `/api/analysis/v1/runs/by-request-key?requestKey=${request.requestKey}`
+    expect((await server.inject({ method: 'GET', url, headers })).json()).toMatchObject({ version: 1, status: 'found', run: { id: created.run.id } })
+    expect((await server.inject({ method: 'GET', url, headers: { ...headers, 'x-cat-tenant-id': 'other' } })).json()).toMatchObject({ status: 'absent' })
+    expect((await server.inject({ method: 'GET', url: `/api/analysis/v1/runs/${created.run.id}/usage`, headers })).json()).toMatchObject({ version: 1, invocationCount: 0, unresolvedCount: 0, completeness: 'complete' })
+    expect((await server.inject({ method: 'POST', url: '/api/analysis/v1/runs/abandon', headers, payload: { version: 1, requestKey: request.requestKey } })).json()).toMatchObject({ abandoned: true, runId: created.run.id })
+    expect((await server.inject({ method: 'GET', url, headers })).json()).toMatchObject({ status: 'abandoned' })
+    expect((await server.inject({ method: 'POST', url: `/api/analysis/v1/runs/${created.run.id}/artifacts/summary/retry`, headers, payload: { version: 1, kind: 'summary', expectedRevision: 2 } })).statusCode).toBe(503)
+    expect((await service.getUsage('tenant-1', created.run.id)).invocationCount).toBe(0)
+  })
+
+  it('rejects unsupported external knowledge before accepting an HTTP run', async () => {
+    const server = await setup()
+    const request = fixtureRequest('http-external-unsupported', ['knowledge'])
+    const response = await server.inject({ method: 'POST', url: '/api/analysis/v1/runs', headers, payload: { version: 1, request: { ...request, options: { ...request.options, externalKnowledge: true } } } })
+    expect(response.statusCode).toBe(400)
+    expect(response.json()).toMatchObject({ error: { messageKey: 'analysis.request.external_knowledge_unsupported' } })
+    expect((await server.inject({ method: 'GET', url: `/api/analysis/v1/runs/by-request-key?requestKey=${request.requestKey}`, headers })).json()).toMatchObject({ status: 'absent' })
+  })
   it('creates, uploads, starts, cancels, and replays a terminal SSE stream', async () => {
     const server = await setup()
     const text = '可恢复分析正文'
@@ -244,7 +272,8 @@ describe('durable analysis HTTP lifecycle', () => {
       headers,
       payload: { version: 1, kind: 'summary', expectedRevision: cancelled.revision },
     })
-    expect(retried.json()).toMatchObject({ accepted: true, kind: 'summary', revision: 3 })
+    expect(retried.statusCode).toBe(409)
+    expect(retried.json()).toMatchObject({ error: { messageKey: 'analysis.artifact.run_cancelled', retryable: false } })
     const missingArtifact = await server.inject({
       method: 'GET',
       url: `/api/analysis/v1/runs/${created.run.id}/artifacts/summary`,

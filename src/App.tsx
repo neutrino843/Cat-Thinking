@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import Toolbar from './components/Toolbar'
 import Sidebar from './components/Sidebar'
 import Canvas from './components/Canvas'
@@ -18,6 +18,30 @@ import { quickSaveCurrent } from './lib/fileHandle'
 import { restoreTabIds } from './lib/tabs'
 import Tabs from './components/Tabs'
 
+function AnalysisLoadState({ onClose, failed = false, settings = false }: { onClose: () => void; failed?: boolean; settings?: boolean }) {
+  const dialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const element = dialog.current
+    element?.showModal()
+    return () => element?.close()
+  }, [])
+  return <dialog className="analysis-panel" ref={dialog} data-analysis-panel aria-label={settings ? 'AI 设置加载中' : failed ? 'AI 分析加载失败' : 'AI 分析加载中'} onCancel={onClose}>
+    <div className="analysis-body"><p role={failed ? 'alert' : 'status'}>{failed ? 'AI 面板加载失败，请关闭后刷新页面重试。' : settings ? '正在打开 AI 设置…' : '正在打开 AI 分析…'}</p><button className="tbtn" onClick={onClose}>关闭加载提示</button></div>
+  </dialog>
+}
+
+function AnalysisLoadFailure({ onClose }: { onClose: () => void }) {
+  return <AnalysisLoadState onClose={onClose} failed />
+}
+
+function AISettingsLoadFailure({ onClose }: { onClose: () => void }) {
+  return <AnalysisLoadState onClose={onClose} failed settings />
+}
+
+const AnalysisResultsPanel = lazy(() => import('./components/AnalysisResultsPanel').catch(() => ({ default: AnalysisLoadFailure })))
+const AISettingsPanel = lazy(() => import('./components/AISettingsPanel').catch(() => ({ default: AISettingsLoadFailure })))
+const LearningWorkspace = lazy(() => import('./components/learning/LearningWorkspace'))
+
 /** 初始化单飞锁（模块级）：StrictMode 双 effect / 未来任何双挂载时 init 只执行一次 */
 let initPromise: Promise<void> | null = null
 
@@ -30,6 +54,50 @@ export default function App() {
   const view = useSettings((s) => s.view)
   const presenting = useSettings((s) => s.presenting)
   const fsEntered = useRef(false)
+  const [analysisOpen, setAnalysisOpen] = useState(false)
+  const [aiSettingsOpen, setAISettingsOpen] = useState(false)
+  const [learningOpen, setLearningOpen] = useState(false)
+  const [learningTarget, setLearningTarget] = useState<{ courseId?: string; archiveId?: string; pointId?: string; localDocId?: string; localNodeId?: string }>({})
+  const learningTrigger = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    const open = (event: Event) => {
+      learningTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      const detail = (event as CustomEvent<typeof learningTarget>).detail
+      setLearningTarget(detail && typeof detail === 'object' ? detail : {})
+      setAnalysisOpen(false); setAISettingsOpen(false); setLearningOpen(true)
+    }
+    window.addEventListener('msz:learning-open', open)
+    return () => window.removeEventListener('msz:learning-open', open)
+  }, [])
+  const closeLearning = () => {
+    setLearningOpen(false)
+    requestAnimationFrame(() => {
+      if (document.querySelector('dialog[open]')) return
+      if (learningTrigger.current?.isConnected) learningTrigger.current.focus()
+      else document.querySelector<HTMLElement>('[data-learning-trigger]')?.focus()
+    })
+  }
+  useEffect(() => {
+    const openAnalysis = () => { setLearningOpen(false); setAISettingsOpen(false); setAnalysisOpen(true) }
+    window.addEventListener('msz:learning-close-for-analysis', openAnalysis)
+    return () => window.removeEventListener('msz:learning-close-for-analysis', openAnalysis)
+  }, [])
+  const aiSettingsTrigger = useRef<HTMLElement | null>(null)
+  const openAISettings = () => {
+    aiSettingsTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setAnalysisOpen(false)
+    setAISettingsOpen(true)
+  }
+  const closeAISettings = () => {
+    setAISettingsOpen(false)
+    const trigger = aiSettingsTrigger.current
+    requestAnimationFrame(() => {
+      if (document.querySelector('dialog[open]')) return
+      if (trigger?.isConnected) trigger.focus()
+      else document.querySelector<HTMLElement>('[data-ai-settings-trigger]')?.focus()
+    })
+  }
+  const docId = useDoc((s) => s.doc.id)
 
   /* 初始化（模块级单飞，保证幂等）：打开最近文档，没有则建「欢迎」导图；启动清扫回收站。
    * 单飞是为了消除 React StrictMode（dev）双 effect 下「listDocs 为空 → saveDoc」的
@@ -159,6 +227,7 @@ export default function App() {
       }
 
       const t = e.target as HTMLElement | null
+      if (t?.closest('[data-analysis-panel], [data-learning-workspace]')) return
       const mod = e.ctrlKey || e.metaKey
       const s = useDoc.getState()
       const key = e.key.toLowerCase()
@@ -283,7 +352,7 @@ export default function App() {
 
   return (
     <div className={'app' + (presenting ? ' presenting' : '')}>
-      {!presenting && <Toolbar query={query} setQuery={setQuery} />}
+      {!presenting && <Toolbar query={query} setQuery={setQuery} onAnalysis={() => { setAISettingsOpen(false); setAnalysisOpen(true) }} onAISettings={openAISettings} />}
       {!presenting && <Tabs />}
       {!presenting && <BackupBanner />}
       <div className="main">
@@ -293,6 +362,21 @@ export default function App() {
       </div>
       {!presenting && <Palette />}
       {presenting && <PresentOverlay />}
+      {!presenting && analysisOpen && (
+        <Suspense fallback={<AnalysisLoadState onClose={() => setAnalysisOpen(false)} />}>
+          <AnalysisResultsPanel key={docId} docId={docId} onClose={() => setAnalysisOpen(false)} onOpenSettings={openAISettings} />
+        </Suspense>
+      )}
+      {!presenting && aiSettingsOpen && (
+        <Suspense fallback={<AnalysisLoadState settings onClose={closeAISettings} />}>
+          <AISettingsPanel onClose={closeAISettings} onConnected={() => window.dispatchEvent(new Event('cat-thinking:ai-settings-changed'))} />
+        </Suspense>
+      )}
+      {!presenting && learningOpen && (
+        <Suspense fallback={<AnalysisLoadState onClose={closeLearning} />}>
+          <LearningWorkspace initialTarget={learningTarget} onClose={closeLearning} />
+        </Suspense>
+      )}
     </div>
   )
 }

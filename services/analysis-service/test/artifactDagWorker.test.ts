@@ -30,7 +30,8 @@ import { ProviderGatewayError } from '../src/providers/providerError.js'
 
 const hash = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex')
 const tenantId = 'tenant-artifact'
-const sourceHash = hash('artifact source')
+const fixtureSourceText = 'fact artifact source'
+const sourceHash = hash(fixtureSourceText)
 const citation = {
   version: 1 as const,
   provenance: 'source' as const,
@@ -110,7 +111,7 @@ const graphFor = (runId: string): EvidenceGraphV1 => evidenceGraphSchema.parse({
   createdAt: 1_000,
 })
 
-const artifactFor = (input: ArtifactGenerationInput): ArtifactEnvelopeV1 => {
+const artifactFor = (input: Omit<ArtifactGenerationInput, 'tenantId' | 'run' | 'attempt'>): ArtifactEnvelopeV1 => {
   const base = {
     version: 1 as const,
     schemaVersion: 1 as const,
@@ -251,6 +252,9 @@ const prepareGeneratingRun = async (
     createId: () => `artifact-setup-${++id}`,
   })
   const created = await service.createRun(tenantId, requestFor(artifacts, quizQuestionCount))
+  await service.uploadSource(tenantId, created.run.id, { version: 1, sourceId: 'source-artifact',
+    contentHash: sourceHash, partHash: sourceHash, partIndex: 0, partCount: 1, start: 0,
+    end: fixtureSourceText.length, totalChars: fixtureSourceText.length, text: fixtureSourceText })
   const graph = graphFor(created.run.id)
   const merging = await store.transitionRun(tenantId, created.run.id, 1, (run, sequence) => {
     const next = analysisRunSchema.parse({
@@ -423,7 +427,7 @@ describe('artifact validation boundary', () => {
     })).toThrow(ArtifactValidationError)
   })
 
-  it('rejects malformed identities and dependency/count violations while allowing marked knowledge inference', async () => {
+  it('rejects malformed identities, dependency/count violations and ungrounded knowledge inference', async () => {
     const { service, runId, graph } = await prepareGeneratingRun()
     const run = await service.getRun(tenantId, runId)
     expect(() => validateGeneratedArtifact({ artifact: { invalid: true }, expectedKind: 'summary', run, graph }))
@@ -454,6 +458,18 @@ describe('artifact validation boundary', () => {
     })
     expect(() => validateGeneratedArtifact({ artifact: mindmap, expectedKind: 'mindmap', run, graph }))
       .toThrow(ArtifactValidationError)
+    if (mindmap.kind !== 'mindmap') throw new Error('expected mindmap fixture')
+    const selfRelation = { ...mindmap, payload: { ...mindmap.payload, relations: [{
+      id: 'self-relation', from: mindmap.payload.nodes[0]!.id, to: mindmap.payload.nodes[0]!.id,
+      evidenceIds: mindmap.payload.nodes[0]!.evidenceIds, citations: mindmap.payload.nodes[0]!.citations,
+    }] } }
+    try {
+      validateGeneratedArtifact({ artifact: selfRelation, expectedKind: 'mindmap', run, graph, outline: { title: 'Outline', nodes: [] } })
+      throw new Error('expected self relation to fail')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ArtifactValidationError)
+      expect((error as ArtifactValidationError).issues).toContainEqual({ code: 'contract_invalid', path: 'payload.relations.0', message: 'a relation must connect distinct nodes' })
+    }
 
     const knowledge = artifactFor({
       runId,
@@ -475,12 +491,21 @@ describe('artifact validation boundary', () => {
         }],
       },
     }
-    expect(validateGeneratedArtifact({
+    expect(() => validateGeneratedArtifact({
       artifact: inferredKnowledge,
       expectedKind: 'knowledge',
       run,
       graph,
-    })).toMatchObject({ kind: 'knowledge' })
+    })).toThrow(ArtifactValidationError)
+    const groundedInference = {
+      ...inferredKnowledge,
+      payload: { items: [{ ...inferredKnowledge.payload.items[0],
+        evidenceIds: knowledge.payload.items[0]!.evidenceIds,
+        citations: [...inferredKnowledge.payload.items[0]!.citations, ...knowledge.payload.items[0]!.citations],
+      }] },
+    }
+    expect(validateGeneratedArtifact({ artifact: groundedInference, expectedKind: 'knowledge', run, graph }))
+      .toMatchObject({ kind: 'knowledge' })
 
     const quizSetup = await prepareGeneratingRun(['quiz'], 2)
     const quizRun = await quizSetup.service.getRun(tenantId, quizSetup.runId)
@@ -762,6 +787,26 @@ describe('artifact DAG worker', () => {
     expect(generator.calls.some((call) => call.kind === 'mindmap')).toBe(false)
   })
 
+  it('restores downstream eligibility after Outline recovery and waits for a separate MindMap retry', async () => {
+    const { store, service, runId } = await prepareGeneratingRun(['outline', 'mindmap'])
+    const generator = new FixtureArtifactGenerator()
+    generator.failures.add('outline')
+    const worker = workerFor(store, service, generator)
+    const initial = await worker.runOnce(tenantId, runId, 'dependency-worker', new AbortController().signal)
+    expect(initial.run.artifactStates.mindmap).toMatchObject({ status: 'failed', attempt: 1, error: { code: 'dependency_failed', retryable: false } })
+    generator.failures.delete('outline')
+    await service.retryArtifact(tenantId, runId, 'outline', initial.run.revision)
+    const recovered = await worker.runOnce(tenantId, runId, 'dependency-worker', new AbortController().signal)
+    expect(recovered.run.artifactStates.mindmap).toMatchObject({ status: 'failed', attempt: 1, error: { code: 'dependency_failed', retryable: true } })
+    expect(generator.calls.map((call) => call.kind)).toEqual(['outline', 'outline'])
+    const results = await Promise.allSettled([service.retryArtifact(tenantId, runId, 'mindmap', recovered.run.revision), service.retryArtifact(tenantId, runId, 'mindmap', recovered.run.revision)])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    const completed = await worker.runOnce(tenantId, runId, 'dependency-worker', new AbortController().signal)
+    expect(completed.run.status).toBe('succeeded')
+    expect(completed.run.artifactStates.mindmap).toMatchObject({ status: 'succeeded', attempt: 2 })
+    expect(generator.calls.map((call) => call.kind)).toEqual(['outline', 'outline', 'mindmap'])
+  })
+
   it('ignores a provider result that arrives after the run is cancelled', async () => {
     const { store, service, runId } = await prepareGeneratingRun(['summary'])
     let announceStarted: (() => void) | undefined
@@ -839,9 +884,9 @@ describe('artifact DAG worker', () => {
       outcome: 'completed',
       run: {
         status: 'failed',
-        error: { code: 'provider_timeout', stage: 'summary', retryable: true },
+        error: { code: 'provider_unavailable', stage: 'summary', retryable: false, details: { reason: 'invocation_outcome_unknown' } },
         artifactStates: {
-          summary: { status: 'failed', error: { code: 'provider_timeout', stage: 'summary' } },
+          summary: { status: 'failed', error: { code: 'provider_unavailable', stage: 'summary', retryable: false } },
         },
       },
     })

@@ -7,9 +7,11 @@ interface Migration {
 
 const MIGRATION_LOCK_ID = 843_202_610
 
-export const ANALYSIS_SCHEMA_VERSION = 4
+export const ANALYSIS_SCHEMA_VERSION = 5
 
 export const ANALYSIS_MIGRATIONS: readonly Migration[] = [
+  // Lock order: tenant/request-key advisory -> run row; invocation advisory -> run row.
+  // Never acquire an invocation advisory/row lock after locking a run row.
   {
     version: 1,
     sql: `
@@ -222,6 +224,25 @@ export const ANALYSIS_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX analysis_provider_invocations_running_idx
         ON analysis_provider_invocations (updated_at)
         WHERE status = 'running';
+    `,
+  },
+  {
+    version: 5,
+    sql: `
+      CREATE TABLE analysis_abandoned_requests (
+        tenant_id TEXT NOT NULL,
+        request_key CHAR(64) NOT NULL,
+        run_id TEXT,
+        abandoned_at BIGINT NOT NULL,
+        PRIMARY KEY (tenant_id, request_key)
+      );
+      ALTER TABLE analysis_provider_invocations
+        DROP CONSTRAINT analysis_provider_invocations_failure_kind_check;
+      ALTER TABLE analysis_provider_invocations
+        ADD CONSTRAINT analysis_provider_invocations_failure_kind_check CHECK (
+          failure_kind IS NULL OR failure_kind IN ('aborted','timeout','rate_limited',
+            'unavailable','rejected','invalid_response','response_too_large','outcome_unknown')
+        );
     `,
   },
 ]

@@ -19,6 +19,7 @@ import {
 import { Pool, type PoolClient, type QueryResultRow } from 'pg'
 import type { AnalysisServiceConfig } from '../../config.js'
 import { validateArtifactDescriptor } from '../../domain/artifactValidator.js'
+import { abandonmentTransition } from '../../domain/abandonment.js'
 import {
   JobStoreConflictError,
   JobStoreNotFoundError,
@@ -32,6 +33,8 @@ import {
   type LeaseRequest,
   type RunTransition,
   type RunTransitionResult,
+  type RetryTransitionContext,
+  type RequestKeyLookup,
   type StoreSourcePartInput,
   type StoreEvidenceCardInput,
   type StoredEvidenceCard,
@@ -62,7 +65,7 @@ import {
   evidenceGraphEncryptionContext,
   sourcePartEncryptionContext,
 } from '../contentCipher.js'
-import { migrateAnalysisDatabase } from './migrations.js'
+import { ANALYSIS_SCHEMA_VERSION, migrateAnalysisDatabase } from './migrations.js'
 
 interface RunRow extends QueryResultRow {
   run_json: unknown
@@ -235,14 +238,62 @@ const samePart = (left: StoredSourcePart, right: StoredSourcePart): boolean =>
   && left.text === right.text
 
 export interface PostgresJobStoreOptions {
+  /** Target validation reads an already migrated deployment; it must never run DDL. */
+  readonly schemaPolicy?: 'migrate' | 'require-current'
   readonly connectionString: string
   readonly ssl: 'disable' | 'require'
   readonly poolMax: number
   readonly connectTimeoutMs: number
   readonly cipher: ContentCipher
+  readonly applicationName?: string
 }
 
 export class PostgresJobStore implements JobStore {
+  async listDispatchableRuns(now: number, limit: number) {
+    if (!Number.isSafeInteger(limit) || limit <= 0) throw new RangeError('limit must be positive')
+    if (this.recoveredPoolEpoch !== this.poolErrorEpoch) return []
+    const result = await this.pool.query<{ tenant_id: string; run_id: string }>(`
+      SELECT run.tenant_id, run.run_id FROM analysis_runs run
+      LEFT JOIN analysis_leases dispatch_lease ON dispatch_lease.run_id=run.run_id AND dispatch_lease.node_key='dispatcher:run'
+      WHERE run.content_deleted_at IS NULL AND run.expires_at>$1
+        AND NOT (run.run_json->'request' ? 'providerProfileId')
+        AND run.status IN ('queued','planning','mapping','merging','generating')
+        AND COALESCE(dispatch_lease.expires_at,0)<=$1
+      ORDER BY GREATEST(run.updated_at,COALESCE(dispatch_lease.expires_at,0)), run.run_id LIMIT $2
+    `, [now, limit])
+    return result.rows.map((row) => ({ tenantId: row.tenant_id, runId: row.run_id }))
+  }
+
+  async getRunLedgerUsage(tenantId: string, runId: string) {
+    // One MVCC statement observes run existence and all ledger rows in the same snapshot.
+    const result = await this.pool.query<{
+      input_tokens: string; output_tokens: string; estimated_cost: string; count: string; unresolved: string;
+      estimated_input: string; reserved_output: string
+    }>(`
+      SELECT COALESCE(SUM(inv.actual_input_tokens),0)::text input_tokens,
+        COALESCE(SUM(inv.actual_output_tokens),0)::text output_tokens,
+        COALESCE(SUM(inv.estimated_cost_micros),0)::text estimated_cost,
+        COALESCE(SUM(inv.estimated_input_tokens),0)::text estimated_input,
+        COALESCE(SUM(inv.reserved_output_tokens),0)::text reserved_output,
+        COUNT(inv.invocation_id)::text count,
+        COUNT(*) FILTER (WHERE inv.status IN ('running','outcome_unknown'))::text unresolved
+      FROM analysis_runs run LEFT JOIN analysis_provider_invocations inv
+        ON inv.tenant_id=run.tenant_id AND inv.run_id=run.run_id
+      WHERE run.tenant_id=$1 AND run.run_id=$2 GROUP BY run.run_id
+    `, [tenantId, runId])
+    const row = result.rows[0]
+    if (!row) return undefined
+    const number = (value: string) => {
+      const parsed = Number(value)
+      if (!Number.isSafeInteger(parsed) || parsed < 0) throw new RangeError('ledger usage exceeds safe integer range')
+      return parsed
+    }
+    return { invocationCount: number(row.count), unresolvedCount: number(row.unresolved),
+      estimatedInputTokens: number(row.estimated_input), reservedOutputTokens: number(row.reserved_output), usage: {
+      inputTokens: number(row.input_tokens), outputTokens: number(row.output_tokens),
+      estimatedCostMicros: number(row.estimated_cost), currency: 'USD' as const,
+    } }
+  }
   private constructor(
     private readonly pool: Pool,
     private readonly cipher: ContentCipher,
@@ -255,22 +306,36 @@ export class PostgresJobStore implements JobStore {
       idleTimeoutMillis: 30_000,
       max: options.poolMax,
       ssl: options.ssl === 'require' ? { rejectUnauthorized: true } : false,
+      application_name: options.applicationName ?? 'cat-analysis-service',
     })
-    const client = await pool.connect()
-    let migrationError: unknown
+    // An idle client may emit error through Pool; unhandled EventEmitter errors terminate Node.
+    // The callback deliberately ignores raw error text (it can contain credentials/hosts).
+    const connected: { store?: PostgresJobStore } = {}
+    pool.on('error', () => { if (connected.store) connected.store.poolErrorEpoch += 1 })
+    let client: PoolClient | undefined
     try {
-      await migrateAnalysisDatabase(client)
+      client = await pool.connect()
+      if (options.schemaPolicy === 'require-current') {
+        try {
+          const result = await client.query<{ version: number | null }>('SELECT MAX(version)::integer AS version FROM cat_analysis_schema_migrations')
+          if (result.rows[0]?.version !== ANALYSIS_SCHEMA_VERSION) throw new Error('schema mismatch')
+        } catch { throw new Error('analysis_database_schema_not_current') }
+      } else await migrateAnalysisDatabase(client)
     } catch (error) {
-      migrationError = error
-    } finally {
-      client.release()
-    }
-    if (migrationError !== undefined) {
+      client?.release()
+      client = undefined
       await pool.end()
-      throw migrationError
+      throw error
+    } finally {
+      client?.release()
     }
-    return new PostgresJobStore(pool, options.cipher)
+    const store = new PostgresJobStore(pool, options.cipher)
+    connected.store = store
+    return store
   }
+
+  private poolErrorEpoch = 0
+  private recoveredPoolEpoch = 0
 
   static async connectFromConfig(
     config: Extract<AnalysisServiceConfig['jobStore'], { mode: 'postgres' }>,
@@ -287,9 +352,13 @@ export class PostgresJobStore implements JobStore {
 
   async checkHealth(): Promise<boolean> {
     try {
+      const epoch = this.poolErrorEpoch
       const result = await this.pool.query<{ healthy: number }>('SELECT 1 AS healthy')
-      return result.rows[0]?.healthy === 1
+      const healthy = result.rows[0]?.healthy === 1 && epoch === this.poolErrorEpoch
+      if (healthy) this.recoveredPoolEpoch = epoch
+      return healthy
     } catch {
+      this.poolErrorEpoch += 1
       return false
     }
   }
@@ -298,10 +367,22 @@ export class PostgresJobStore implements JobStore {
     tenantId: string,
     runInput: AnalysisRunV1,
     eventInput: AnalysisEventV1,
+    personalBinding?: Readonly<{ profileId: string; revision: number }>,
   ): Promise<Readonly<{ run: AnalysisRunV1; reused: boolean; event?: AnalysisEventV1 }>> {
     const run = analysisRunSchema.parse(runInput)
     const event = analysisEventSchema.parse(eventInput)
     return this.transaction(async (client) => {
+      await this.lockRequestKey(client, tenantId, run.requestKey)
+      const abandoned = await client.query('SELECT 1 FROM analysis_abandoned_requests WHERE tenant_id=$1 AND request_key=$2', [tenantId, run.requestKey])
+      if (abandoned.rowCount !== 0) throw new JobStoreConflictError('request key abandoned')
+      if (personalBinding) {
+        const state = await client.query<{ profile_id: string; revision: string | number; enabled: boolean; check_state: string }>(
+          'SELECT profile_id,revision,enabled,check_state FROM cat_analysis_personal_state WHERE singleton=TRUE FOR SHARE')
+        const current = state.rows[0]
+        if (!current?.enabled || !['ready', 'unsupported'].includes(current.check_state) || current.profile_id !== personalBinding.profileId
+          || run.request.providerProfileId !== personalBinding.profileId
+          || Number(current.revision) !== personalBinding.revision) throw new JobStoreConflictError('personal profile changed')
+      }
       const inserted = await client.query<RunRow>(`
         INSERT INTO analysis_runs(
           run_id, tenant_id, request_key, revision, status, run_json,
@@ -321,6 +402,8 @@ export class PostgresJobStore implements JobStore {
         run.updatedAt,
       ])
       if (inserted.rowCount === 1) {
+        if (personalBinding) await client.query('INSERT INTO cat_analysis_personal_run_profiles(run_id,tenant_id,profile_id) VALUES($1,$2,$3)',
+          [run.id, tenantId, personalBinding.profileId])
         await this.insertEvent(client, event)
         return { run, reused: false, event }
       }
@@ -343,15 +426,69 @@ export class PostgresJobStore implements JobStore {
     return row ? decodeRun(row) : undefined
   }
 
+  async lookupRunByRequestKey(tenantId: string, requestKey: string): Promise<RequestKeyLookup> {
+    const result = await this.pool.query<{ run_json: unknown | null; abandoned_at: string | number | null; abandoned_run_id: string | null }>(`
+      SELECT run.run_json, abandoned.abandoned_at, abandoned.run_id abandoned_run_id
+      FROM (VALUES ($1::text,$2::text)) wanted(tenant_id,request_key)
+      LEFT JOIN analysis_runs run ON run.tenant_id=wanted.tenant_id AND run.request_key=wanted.request_key
+      LEFT JOIN analysis_abandoned_requests abandoned ON abandoned.tenant_id=wanted.tenant_id AND abandoned.request_key=wanted.request_key
+    `, [tenantId, requestKey])
+    const row = result.rows[0]
+    if (!row) return { status: 'absent' }
+    if (row.abandoned_at !== null) return { status: 'abandoned', runId: row.abandoned_run_id ?? undefined }
+    return row.run_json !== null ? { status: 'found', run: analysisRunSchema.parse(row.run_json) } : { status: 'absent' }
+  }
+
+  async abandonRequest(tenantId: string, requestKey: string, now: number): Promise<Readonly<{ runId?: string }>> {
+    return this.transaction(async (client) => {
+      await this.lockRequestKey(client, tenantId, requestKey)
+      const existing = await client.query<{ run_id: string | null }>('SELECT run_id FROM analysis_abandoned_requests WHERE tenant_id=$1 AND request_key=$2', [tenantId, requestKey])
+      if (existing.rows[0]) return { runId: existing.rows[0].run_id ?? undefined }
+      const selected = await client.query<LockedRunRow>('SELECT run_json, content_deleted_at FROM analysis_runs WHERE tenant_id=$1 AND request_key=$2 FOR UPDATE', [tenantId, requestKey])
+      const row = selected.rows[0]
+      const current = row ? decodeRun(row) : undefined
+      await client.query('INSERT INTO analysis_abandoned_requests(tenant_id,request_key,run_id,abandoned_at) VALUES ($1,$2,$3,$4)', [tenantId, requestKey, current?.id ?? null, now])
+      if (current) {
+        await this.deleteEvidenceForRun(client, tenantId, current.id)
+        await client.query('DELETE FROM analysis_sources WHERE run_id=$1', [current.id])
+        const sequence = await client.query<{ sequence: string }>('SELECT (COALESCE(MAX(sequence),-1)+1)::text sequence FROM analysis_events WHERE run_id=$1', [current.id])
+        const transition = abandonmentTransition(current, Number(sequence.rows[0]?.sequence ?? 0), now)
+        await client.query('UPDATE analysis_runs SET content_deleted_at=$1, run_json=$2, revision=$3, status=$4, updated_at=$5 WHERE run_id=$6 AND tenant_id=$7',
+          [now, transition?.run ?? current, transition?.run.revision ?? current.revision, transition?.run.status ?? current.status, transition?.run.updatedAt ?? current.updatedAt, current.id, tenantId])
+        if (transition) await this.insertEvent(client, transition.event)
+      }
+      return { runId: current?.id }
+    })
+  }
+
+  private async lockRequestKey(client: PoolClient, tenantId: string, requestKey: string): Promise<void> {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`request:${tenantId.length}:${tenantId}:${requestKey}`])
+  }
+
+  private async retryContext(client: PoolClient, tenantId: string, runId: string, run: AnalysisRunV1, contentDeleted: boolean): Promise<RetryTransitionContext> {
+    const sources = await client.query<{ source_id: string; computed_hash: string | null; complete: boolean }>('SELECT source_id,computed_hash,complete FROM analysis_sources WHERE run_id=$1', [runId])
+    const graphResult = await client.query<EvidenceGraphRow>('SELECT graph_hash,key_id,iv,auth_tag,ciphertext FROM analysis_evidence_graphs WHERE run_id=$1 AND tenant_id=$2', [runId, tenantId])
+    const row = graphResult.rows[0]
+    const graph = row ? evidenceGraphSchema.parse(JSON.parse(this.cipher.decrypt({ keyId: row.key_id, iv: row.iv, authTag: row.auth_tag, ciphertext: row.ciphertext }, evidenceGraphEncryptionContext(tenantId, runId, row.graph_hash)))) : undefined
+    const outline = await client.query<ArtifactRow>(`SELECT artifact_id,artifact_hash,schema_version,kind,byte_count,key_id,iv,auth_tag,ciphertext,created_at,updated_at
+      FROM analysis_artifacts WHERE run_id=$1 AND tenant_id=$2 AND kind='outline'`, [runId, tenantId])
+    const invocations = await client.query<ProviderInvocationRow>(`SELECT ${PROVIDER_INVOCATION_COLUMNS} FROM analysis_provider_invocations WHERE tenant_id=$1 AND run_id=$2`, [tenantId, runId])
+    return { contentDeleted, graph, outline: outline.rows[0] ? this.decodeArtifact(tenantId, runId, outline.rows[0]) : undefined,
+      invocations: invocations.rows.map(decodeProviderInvocation),
+      sourceSnapshotReady: run.request.manifest.sources.every((snapshot) => sources.rows.some((source) => source.source_id === snapshot.sourceId && source.complete && source.computed_hash === snapshot.contentHash)),
+    }
+  }
+
   async transitionRun(
     tenantId: string,
     runId: string,
     expectedRevision: number,
     build: (current: AnalysisRunV1, nextSequence: number) => RunTransition,
+    guard?: (current: AnalysisRunV1, context: RetryTransitionContext) => void,
   ): Promise<RunTransitionResult> {
     return this.transaction(async (client) => {
-      const selected = await client.query<RunRow>(
-        'SELECT run_json FROM analysis_runs WHERE tenant_id=$1 AND run_id=$2 FOR UPDATE',
+      const selected = await client.query<LockedRunRow>(
+        'SELECT run_json, content_deleted_at FROM analysis_runs WHERE tenant_id=$1 AND run_id=$2 FOR UPDATE',
         [tenantId, runId],
       )
       const row = selected.rows[0]
@@ -360,6 +497,7 @@ export class PostgresJobStore implements JobStore {
       if (current.revision !== expectedRevision) {
         return { outcome: 'revision_conflict', run: current }
       }
+      if (guard) guard(current, await this.retryContext(client, tenantId, runId, current, row.content_deleted_at !== null))
       const sequenceResult = await client.query<{ next_sequence: string | number }>(`
         SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence
         FROM analysis_events WHERE run_id=$1
@@ -951,14 +1089,19 @@ export class PostgresJobStore implements JobStore {
         throw new JobStoreConflictError('provider invocation node already has a different identity')
       }
 
-      const totals = await client.query<{ tokens: string | number; cost: string | number }>(`
+      const totals = await client.query<{ tokens: string | number; cost: string | number; invocations: string | number }>(`
         SELECT
           COALESCE(SUM(estimated_input_tokens + reserved_output_tokens), 0) AS tokens,
-          COALESCE(SUM(estimated_cost_micros), 0) AS cost
+          COALESCE(SUM(estimated_cost_micros), 0) AS cost,
+          COUNT(*) AS invocations
         FROM analysis_provider_invocations
         WHERE tenant_id=$1 AND run_id=$2
       `, [input.tenantId, input.runId])
       const reservedTokens = safeDatabaseInteger(totals.rows[0]?.tokens ?? 0, 'reserved token total')
+      const invocationCount = safeDatabaseInteger(totals.rows[0]?.invocations ?? 0, 'invocation count')
+      if (input.maxRunInvocations !== undefined && invocationCount >= input.maxRunInvocations) {
+        return { outcome: 'budget_exceeded', dimension: 'invocations', actual: invocationCount + 1, maximum: input.maxRunInvocations }
+      }
       const reservedCost = safeDatabaseInteger(totals.rows[0]?.cost ?? 0, 'reserved cost total')
       const totalTokens = reservedTokens + input.estimatedInputTokens + input.reservedOutputTokens
       if (!Number.isSafeInteger(totalTokens) || totalTokens > input.maxRunEstimatedTokens) {
@@ -1023,7 +1166,7 @@ export class PostgresJobStore implements JobStore {
             safeCode: null,
           }
         : {
-            status: 'failed',
+            status: input.result,
             actualInputTokens: input.actualInputTokens ?? null,
             actualOutputTokens: input.actualOutputTokens ?? null,
             providerRequestId: input.providerRequestId ?? null,
@@ -1032,9 +1175,12 @@ export class PostgresJobStore implements JobStore {
           }
       const updated = await client.query<ProviderInvocationRow>(`
         UPDATE analysis_provider_invocations
-        SET status=$3, transport_attempts=$4, actual_input_tokens=$5, actual_output_tokens=$6,
-          provider_request_id=$7, failure_kind=$8, safe_code=$9, updated_at=$10, completed_at=$10
-        WHERE tenant_id=$1 AND invocation_id=$2 AND status='running'
+        SET status=$3, transport_attempts=GREATEST(transport_attempts,$4),
+          actual_input_tokens=COALESCE(GREATEST(actual_input_tokens,$5),actual_input_tokens),
+          actual_output_tokens=COALESCE(GREATEST(actual_output_tokens,$6),actual_output_tokens),
+          provider_request_id=COALESCE($7,provider_request_id), failure_kind=$8, safe_code=$9,
+          updated_at=GREATEST(updated_at,$10), completed_at=GREATEST(completed_at,$10)
+        WHERE tenant_id=$1 AND invocation_id=$2 AND status IN ('running','outcome_unknown')
         RETURNING ${PROVIDER_INVOCATION_COLUMNS}
       `, [
         input.tenantId,
@@ -1178,12 +1324,14 @@ export class PostgresJobStore implements JobStore {
 
   async acquireLease(request: LeaseRequest): Promise<JobLease | undefined> {
     if (request.durationMs <= 0) throw new RangeError('lease duration must be positive')
+    if (this.recoveredPoolEpoch !== this.poolErrorEpoch) return undefined
     return this.transaction(async (client) => {
       const run = await client.query(
         `SELECT 1 FROM analysis_runs
          WHERE tenant_id=$1 AND run_id=$2 AND content_deleted_at IS NULL
-           AND status NOT IN ('partial','succeeded','cancelled','failed','expired')`,
-        [request.tenantId, request.runId],
+           AND (expires_at IS NULL OR expires_at>$3)
+           AND status NOT IN ('partial','succeeded','cancelled','failed','expired') FOR UPDATE`,
+        [request.tenantId, request.runId, request.now],
       )
       if (run.rowCount !== 1) return undefined
       const selected = await client.query<LeaseRow>(`
@@ -1227,6 +1375,7 @@ export class PostgresJobStore implements JobStore {
         AND run.tenant_id=$3 AND lease.run_id=$4 AND lease.node_key=$5
         AND lease.owner_id=$6 AND lease.attempt=$7 AND lease.expires_at>$2
         AND run.content_deleted_at IS NULL
+        AND (run.expires_at IS NULL OR run.expires_at>$2)
         AND run.status NOT IN ('partial','succeeded','cancelled','failed','expired')
       RETURNING lease.owner_id, lease.attempt, lease.expires_at
     `, [expiresAt, now, identity.tenantId, identity.runId, identity.nodeKey, identity.ownerId, identity.attempt])
@@ -1242,10 +1391,10 @@ export class PostgresJobStore implements JobStore {
 
   async releaseLease(identity: LeaseIdentity): Promise<boolean> {
     const result = await this.pool.query(`
-      DELETE FROM analysis_leases lease USING analysis_runs run
+      UPDATE analysis_leases lease SET expires_at=0 FROM analysis_runs run
       WHERE lease.run_id=run.run_id
         AND run.tenant_id=$1 AND lease.run_id=$2 AND lease.node_key=$3
-        AND lease.owner_id=$4 AND lease.attempt=$5
+        AND lease.owner_id=$4 AND lease.attempt=$5 AND lease.expires_at<>0
     `, [identity.tenantId, identity.runId, identity.nodeKey, identity.ownerId, identity.attempt])
     return result.rowCount === 1
   }
@@ -1379,7 +1528,7 @@ export class PostgresJobStore implements JobStore {
       JOIN analysis_runs run ON run.run_id=lease.run_id
       WHERE run.tenant_id=$1 AND lease.run_id=$2 AND lease.node_key=$3
         AND lease.owner_id=$4 AND lease.attempt=$5 AND lease.expires_at>$6
-        ${requireContent ? "AND run.content_deleted_at IS NULL AND run.status NOT IN ('partial','succeeded','cancelled','failed','expired')" : ''}
+        ${requireContent ? "AND run.content_deleted_at IS NULL AND (run.expires_at IS NULL OR run.expires_at>$6) AND run.status NOT IN ('partial','succeeded','cancelled','failed','expired')" : ''}
       FOR UPDATE OF lease
     `, [identity.tenantId, identity.runId, identity.nodeKey, identity.ownerId, identity.attempt, now])
     return result.rowCount === 1

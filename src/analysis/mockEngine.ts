@@ -12,6 +12,7 @@ import {
   runCreatedSchema,
   sourceReceiptSchema,
   uploadSourcePartSchema,
+  lookupRunByRequestKeyQuerySchema, runRequestLookupSchema, abandonRunRequestResultSchema, runUsageSchema,
   type AnalysisEventV1,
   type AnalysisRequestV1,
   type AnalysisRunV1,
@@ -65,6 +66,7 @@ const createArtifactStates = (
 export class MockAnalysisEngineClient implements AnalysisEngineClient {
   private readonly runs = new Map<string, AnalysisRunV1>()
   private readonly requestKeys = new Map<string, string>()
+  private readonly abandonedRequests = new Set<string>()
   private readonly receivedParts = new Map<string, MockUploadState>()
   private readonly artifacts = new Map<string, ArtifactEnvelopeV1>()
   private readonly eventsToReplay: readonly AnalysisEventV1[]
@@ -104,6 +106,7 @@ export class MockAnalysisEngineClient implements AnalysisEngineClient {
   async createRun(requestInput: AnalysisRequestV1, signal: AbortSignal): Promise<RunCreatedV1> {
     throwIfAborted(signal)
     const request = analysisRequestSchema.parse(requestInput)
+    if (this.abandonedRequests.has(request.requestKey)) throw new Error('Mock request was abandoned')
     const existingId = this.requestKeys.get(request.requestKey)
     if (existingId) {
       const existing = this.requireRun(existingId)
@@ -317,6 +320,32 @@ export class MockAnalysisEngineClient implements AnalysisEngineClient {
     const artifact = this.artifacts.get(`${runId}:${kind}`)
     if (!artifact) throw new Error(`Unknown mock artifact: ${runId}:${kind}`)
     return artifactEnvelopeSchema.parse(artifact)
+  }
+
+  async lookupRequest(requestKey: string, signal: AbortSignal) {
+    throwIfAborted(signal)
+    lookupRunByRequestKeyQuerySchema.parse({ requestKey })
+    const runId = this.requestKeys.get(requestKey)
+    return runRequestLookupSchema.parse(this.abandonedRequests.has(requestKey)
+      ? { version: 1, status: 'abandoned', runId }
+      : runId ? { version: 1, status: 'found', run: this.requireRun(runId) } : { version: 1, status: 'absent' })
+  }
+
+  async abandonRequest(requestKey: string, signal: AbortSignal) {
+    throwIfAborted(signal)
+    lookupRunByRequestKeyQuerySchema.parse({ requestKey })
+    const runId = this.requestKeys.get(requestKey)
+    if (runId) await this.deleteContent(runId, signal)
+    this.abandonedRequests.add(requestKey)
+    return abandonRunRequestResultSchema.parse({ version: 1, requestKey, abandoned: true, runId })
+  }
+
+  async getUsage(runId: string, signal: AbortSignal) {
+    throwIfAborted(signal)
+    const run = this.requireRun(runId)
+    // The in-browser contract mock has no Provider or invocation ledger.
+    return runUsageSchema.parse({ version: 1, runId, usage: run.usage,
+      invocationCount: 0, unresolvedCount: 0, estimatedInputTokens: 0, reservedOutputTokens: 0, completeness: 'complete' })
   }
 
   async deleteContent(runId: string, signal: AbortSignal): Promise<DeleteRunContentResultV1> {

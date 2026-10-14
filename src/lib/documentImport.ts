@@ -20,6 +20,8 @@ interface SourceEntry {
   text: string
   start: number
   end: number
+  headingKey?: string
+  parentHeadingKey?: string
 }
 
 export interface DocumentImportStats {
@@ -66,15 +68,59 @@ function indexedLines(text: string): LineInfo[] {
 
 function looksLikePlainHeading(text: string): boolean {
   const value = text.trim()
-  if (!value || value.length > 60 || value.includes('\n')) return false
+  if (!value || value.length > 60 || value.includes('\n') || /[。！？.!?；;：:]$/.test(value)) return false
+  // Explicit numeric headings are handled with their document context before this fallback.
+  if (/^\d/.test(value)) return false
   if (/^第[0-9一二三四五六七八九十百千]+[章节篇部卷]/.test(value)) return true
   if (/^(?:\d+(?:[.．]\d+)*|[一二三四五六七八九十]+)[、.．)）\s]+\S+/.test(value)) return true
   if (/^[A-Z][A-Z\d _-]{2,}$/.test(value)) return true
   return value.length <= 32 && !/[。！？.!?；;：:]$/.test(value)
 }
 
-function parseEntries(text: string, structure: 'text' | 'markdown'): SourceEntry[] {
+interface PlainHeading { level: number; headingKey?: string; parentHeadingKey?: string }
+
+function chapterNumber(value: string): string | undefined {
+  if (/^\d+$/.test(value)) return String(Number(value))
+  const digits: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
+  if (digits[value]) return String(digits[value])
+  if (/^[一二三四五六七八九]?十[一二三四五六七八九]?$/.test(value)) {
+    const [tens, units] = value.split('十')
+    return String((digits[tens] ?? 1) * 10 + (digits[units] ?? 0))
+  }
+  return undefined
+}
+
+/** Explicit numbering can survive missing DOCX styles. Ordinary sentences remain paragraphs. */
+function explicitPlainHeading(text: string): PlainHeading | null {
+  const value = text.trim()
+  if (!value || value.length > 60 || /[。！？.!?；;：:]$/.test(value)) return null
+  const chapter = value.match(/^第([0-9一二三四五六七八九十百千]+)([章节篇部卷])(?:\s|[^0-9])/)
+  if (chapter) return {
+    level: chapter[2] === '节' ? 2 : 1,
+    ...(chapter[2] === '章' && chapterNumber(chapter[1]) ? { headingKey: chapterNumber(chapter[1]) } : {}),
+  }
+  const numbered = value.match(/^([1-9][0-9]{0,2}(?:[.．][1-9][0-9]{0,2}){0,5})[.．、)）]?[ \t\u3000]+\S/)
+  if (!numbered) return null
+  const parts = numbered[1].split(/[.．]/)
+  return { level: parts.length, headingKey: parts.join('.'),
+    ...(parts.length > 1 ? { parentHeadingKey: parts.slice(0, -1).join('.') } : {}) }
+}
+
+function parseEntries(text: string, structure: 'text' | 'markdown', inferPlainHeadings: boolean): SourceEntry[] {
   const lines = indexedLines(text)
+  const numberedCandidates = inferPlainHeadings ? lines.map(({ text: value }) =>
+    explicitPlainHeading(value.replace(/^\s*#{1,6}\s+/, ''))).filter((heading): heading is PlainHeading => heading !== null) : []
+  const headingKeys = new Set(numberedCandidates.map(({ headingKey }) => headingKey).filter(Boolean))
+  const childrenByHeading = new Map<string, Set<string>>()
+  for (const heading of numberedCandidates) if (heading.parentHeadingKey && heading.headingKey) {
+    const children = childrenByHeading.get(heading.parentHeadingKey) ?? new Set<string>()
+    children.add(heading.headingKey)
+    childrenByHeading.set(heading.parentHeadingKey, children)
+  }
+  const hasNumberingContext = (heading: PlainHeading): boolean => !heading.parentHeadingKey
+    || headingKeys.has(heading.parentHeadingKey)
+    || (childrenByHeading.get(heading.parentHeadingKey)?.size ?? 0) > 1
+    || (heading.headingKey !== undefined && (childrenByHeading.get(heading.headingKey)?.size ?? 0) > 0)
   const entries: SourceEntry[] = []
   let paragraph: LineInfo[] = []
   let inFence = false
@@ -107,15 +153,23 @@ function parseEntries(text: string, structure: 'text' | 'markdown'): SourceEntry
       const heading = line.text.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/)
       if (heading) {
         flush()
+        const numbered = inferPlainHeadings ? explicitPlainHeading(heading[2]) : null
         entries.push({
           kind: 'heading',
           level: heading[1].length,
           text: heading[2].trim(),
           start: line.start,
           end: line.end,
+          ...(numbered?.headingKey ? { headingKey: numbered.headingKey } : {}),
         })
         continue
       }
+    }
+    const explicitHeading = inferPlainHeadings && !inFence ? explicitPlainHeading(line.text) : null
+    if (explicitHeading && hasNumberingContext(explicitHeading)) {
+      flush()
+      entries.push({ kind: 'heading', text: trimmed, start: line.start, end: line.end, ...explicitHeading })
+      continue
     }
     if (!trimmed && !inFence) flush()
     else paragraph.push(line)
@@ -127,7 +181,7 @@ function parseEntries(text: string, structure: 'text' | 'markdown'): SourceEntry
 function plainLabel(value: string): string {
   return value
     .replace(/^```[^\n]*|```$/gm, '')
-    .replace(/^\s*(?:[-*+] |\d+[.)、]\s*)/gm, '')
+    .replace(/^\s*(?:[-*+] |\d+[.)、]\s+)/gm, '')
     .replace(/^\s*>\s?/gm, '')
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
@@ -158,12 +212,13 @@ function buildDraft(
   file: File,
   pageSpans: SourcePageSpan[],
   titleHint?: string,
+  inferPlainHeadings = structure === 'text',
 ): Omit<DocumentImportDraft, 'source'> & {
   sourceId: string
   anchors: SourceDocument['anchors']
   locators: NonNullable<SourceDocument['locators']>
 } {
-  const entries = parseEntries(text, structure)
+  const entries = parseEntries(text, structure, inferPlainHeadings)
   if (!entries.length) throw new Error('文档中没有可提取的文本内容')
 
   const now = Date.now()
@@ -174,7 +229,7 @@ function buildDraft(
   const root: MindNodeData = { id: rootId, parent: null, children: [], text: title }
   const nodes: Record<string, MindNodeData> = { [rootId]: root }
   const anchors: SourceDocument['anchors'] = []
-  const stack: { level: number; id: string; path: string }[] = []
+  const stack: { level: number; id: string; path: string; headingKey?: string }[] = []
   const warnings: string[] = []
   let sectionCount = 0
   let paragraphCount = 0
@@ -186,13 +241,16 @@ function buildDraft(
     return span?.page
   }
 
-  const locatorStack: { level: number; title: string }[] = []
+  const locatorStack: { level: number; title: string; headingKey?: string }[] = []
   const entryLocators: NonNullable<SourceDocument['locators']> = entries.map((entry) => {
     if (entry.kind === 'heading') {
       while ((locatorStack.at(-1)?.level ?? -1) >= entry.level) {
         locatorStack.pop()
       }
-      locatorStack.push({ level: entry.level, title: plainLabel(entry.text) })
+      if (entry.parentHeadingKey) {
+        while (locatorStack.length && locatorStack.at(-1)?.headingKey !== entry.parentHeadingKey) locatorStack.pop()
+      }
+      locatorStack.push({ level: entry.level, title: plainLabel(entry.text), headingKey: entry.headingKey })
     }
     const page = pageForOffset(entry.start)
     return {
@@ -244,7 +302,7 @@ function buildDraft(
       const headingText = plainLabel(entry.text) || '未命名章节'
       // Markdown 的首个 H1 通常就是文档标题，由根节点承载，避免重复一层。
       if (!stack.length && entry.level === 1 && headingText === title) {
-        stack.push({ level: 1, id: rootId, path: title })
+        stack.push({ level: 1, id: rootId, path: title, headingKey: entry.headingKey })
         const page = pageForOffset(entry.start)
         anchors.push({
           nodeId: rootId,
@@ -256,12 +314,15 @@ function buildDraft(
         continue
       }
       while (stack.length && stack[stack.length - 1].level >= entry.level) stack.pop()
+      if (entry.parentHeadingKey) {
+        while (stack.length && stack.at(-1)?.headingKey !== entry.parentHeadingKey) stack.pop()
+      }
       const parent = stack[stack.length - 1]
       const parentId = parent?.id ?? rootId
       const path = parent ? `${parent.path} / ${headingText}` : headingText
       const id = addNode(entry, parentId, headingText, path)
       if (!id) break
-      stack.push({ level: entry.level, id, path })
+      stack.push({ level: entry.level, id, path, headingKey: entry.headingKey })
       sectionCount++
       continue
     }
@@ -318,6 +379,7 @@ export async function prepareDocumentImport(file: File): Promise<DocumentImportD
     file,
     extracted.pageSpans,
     extracted.titleHint,
+    extracted.structure === 'text' || extracted.kind === 'docx',
   )
   const source: SourceDocument = {
     version: 1,

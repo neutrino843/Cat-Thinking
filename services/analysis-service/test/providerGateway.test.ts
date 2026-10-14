@@ -166,12 +166,12 @@ describe('OpenAI-compatible provider adapter', () => {
       providerId: 'approved-provider',
       statusCode: 408,
       providerCode: 'request_timeout',
-    })).toMatchObject({ kind: 'timeout', retryable: true })
+    })).toMatchObject({ kind: 'outcome_unknown', retryable: false })
     expect(classifyProviderHttpError({
       providerId: 'approved-provider',
       statusCode: 503,
       providerCode: 'server_is_overloaded',
-    })).toMatchObject({ kind: 'unavailable', retryable: true })
+    })).toMatchObject({ kind: 'outcome_unknown', retryable: false })
     expect(classifyProviderHttpError({
       providerId: 'approved-provider',
       statusCode: 401,
@@ -186,7 +186,7 @@ describe('OpenAI-compatible provider adapter', () => {
     }))
     const provider = new OpenAICompatibleProvider({ ...baseOptions, fetchImplementation })
     const pending = provider.generate(request, new AbortController().signal)
-    const assertion = expect(pending).rejects.toMatchObject({ kind: 'timeout', retryable: true })
+    const assertion = expect(pending).rejects.toMatchObject({ kind: 'outcome_unknown', retryable: false })
 
     await vi.advanceTimersByTimeAsync(1_000)
 
@@ -202,7 +202,7 @@ describe('OpenAI-compatible provider adapter', () => {
     const pending = provider.generate(request, controller.signal)
     controller.abort()
 
-    await expect(pending).rejects.toMatchObject({ kind: 'aborted', retryable: false })
+    await expect(pending).rejects.toMatchObject({ kind: 'outcome_unknown', retryable: false, safeCode: 'caller_aborted_after_send' })
   })
 
   it('rejects oversized, refused, and usage-free responses', async () => {
@@ -317,8 +317,8 @@ describe('OpenAI-compatible provider adapter', () => {
       fetchImplementation: async () => { throw new TypeError('private network detail') },
     })
     await expect(disconnected.generate(request, new AbortController().signal)).rejects.toMatchObject({
-      kind: 'unavailable',
-      safeCode: 'connection_failed',
+      kind: 'outcome_unknown',
+      safeCode: 'response_lost',
     })
   })
 

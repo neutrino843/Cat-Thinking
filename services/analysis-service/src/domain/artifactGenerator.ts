@@ -6,10 +6,14 @@ import type {
   OutlineArtifactV1,
   ProviderRouteV1,
   UsageV1,
+  AnalysisRunV1,
 } from '@cat-thinking/analysis-contracts'
 import type { ArtifactBudget } from './artifactBudget.js'
 
 export interface ArtifactGenerationInput {
+  readonly tenantId: string
+  readonly run: AnalysisRunV1
+  readonly attempt: number
   readonly runId: string
   readonly docId: string
   readonly kind: ArtifactKind

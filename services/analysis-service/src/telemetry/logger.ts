@@ -16,6 +16,10 @@ const REDACTED_PATHS = [
   'apiKey',
   'providerApiKey',
   'provider.apiKey',
+  'req.body.apiKey',
+  'body.apiKey',
+  'settings.apiKey',
+  'snapshot.settings.apiKey',
 ] as const
 
 export const createLoggerOptions = (

@@ -18,12 +18,12 @@ import { sanitizeFileName } from './openFormats'
 import {
   bindFileHandle,
   getFileHandle,
-  putBlob,
-  saveDoc,
+  saveImportedDocumentBundle,
   touchFileHandle,
 } from '../store/db'
 import { useDoc } from '../store/docStore'
 import { emitDocsChanged } from './tabs'
+import { decodeImportedBlobs } from './importedBlobs'
 
 /** 保存成功事件（detail.name 为文件名）；Toolbar 监听后显示轻提示 */
 export const FILE_SAVED_EVENT = 'msz:file-saved'
@@ -160,19 +160,8 @@ export async function openMSZFile(): Promise<DocData | null | undefined> {
     throw new Error('无法读取该 .msz 文件')
   }
   // parseImported 按扩展名分流：.msz 走 JSON + validateDoc 严格结构校验
-  const { doc, blobs } = parseImported(text, file.name || '未命名导图.msz')
-
-  await saveDoc(doc)
-  // 还原内嵌 blob（与 Sidebar.importFile 同流程）
-  for (const [blobId, meta] of Object.entries(blobs)) {
-    try {
-      const res = await fetch(meta.dataURL)
-      const blob = await res.blob()
-      await putBlob(blobId, doc.id, blob)
-    } catch {
-      /* 单个 blob 还原失败不阻断打开 */
-    }
-  }
+  const imported = parseImported(text, file.name || '未命名导图.msz')
+  const doc = await saveImportedDocumentBundle(imported.doc, imported.sources, decodeImportedBlobs(imported.blobs))
   await rememberBinding(doc.id, handle)
   return doc
 }

@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "declaration": false, "rootDir": "../..", "outDir": ".browser-test-runtime" },
+  "include": ["test/browserHarness.ts", "test/personalBrowserHarness.ts"],
+  "exclude": ["dist", ".browser-test-runtime"]
+}

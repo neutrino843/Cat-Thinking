@@ -6,9 +6,11 @@ export const PROVIDER_FAILURE_KINDS = [
   'rejected',
   'invalid_response',
   'response_too_large',
+  'outcome_unknown',
 ] as const
 
 export type ProviderFailureKind = (typeof PROVIDER_FAILURE_KINDS)[number]
+export type ProviderAcceptance = 'not_accepted' | 'accepted' | 'unknown'
 
 export interface ProviderFailureOptions {
   readonly providerId: string
@@ -17,6 +19,10 @@ export interface ProviderFailureOptions {
   readonly safeCode: string
   readonly statusCode?: number
   readonly retryAfterMs?: number
+  /** Retry is safe only when the adapter can prove that no generation was accepted. */
+  readonly acceptance?: ProviderAcceptance
+  readonly usage?: Readonly<{ inputTokens: number; outputTokens: number }>
+  readonly providerRequestId?: string
 }
 
 export class ProviderGatewayError extends Error {
@@ -26,6 +32,9 @@ export class ProviderGatewayError extends Error {
   readonly safeCode: string
   readonly statusCode?: number
   readonly retryAfterMs?: number
+  readonly acceptance: ProviderAcceptance
+  readonly usage?: Readonly<{ inputTokens: number; outputTokens: number }>
+  readonly providerRequestId?: string
 
   constructor(options: ProviderFailureOptions) {
     super(`provider request failed: ${options.kind}`)
@@ -36,6 +45,11 @@ export class ProviderGatewayError extends Error {
     this.safeCode = options.safeCode
     this.statusCode = options.statusCode
     this.retryAfterMs = options.retryAfterMs
+    this.acceptance = options.acceptance ?? (
+      ['invalid_response', 'response_too_large'].includes(options.kind) ? 'accepted' : 'unknown'
+    )
+    this.usage = options.usage
+    this.providerRequestId = options.providerRequestId
   }
 }
 
@@ -81,16 +95,16 @@ export const classifyProviderHttpError = (input: Readonly<{
     retryAfterMs: retryAfterMilliseconds(input.retryAfter ?? null, input.now),
   }
   if (input.statusCode === 429 && NON_RETRYABLE_QUOTA_CODES.has(safeCode)) {
-    return new ProviderGatewayError({ ...common, kind: 'rejected', retryable: false })
+    return new ProviderGatewayError({ ...common, kind: 'rejected', retryable: false, acceptance: 'not_accepted' })
   }
   if (input.statusCode === 429) {
-    return new ProviderGatewayError({ ...common, kind: 'rate_limited', retryable: true })
+    return new ProviderGatewayError({ ...common, kind: 'rate_limited', retryable: true, acceptance: 'not_accepted' })
   }
   if (input.statusCode === 408 || input.statusCode === 504) {
-    return new ProviderGatewayError({ ...common, kind: 'timeout', retryable: true })
+    return new ProviderGatewayError({ ...common, kind: 'outcome_unknown', retryable: false })
   }
   if (input.statusCode >= 500) {
-    return new ProviderGatewayError({ ...common, kind: 'unavailable', retryable: true })
+    return new ProviderGatewayError({ ...common, kind: 'outcome_unknown', retryable: false })
   }
-  return new ProviderGatewayError({ ...common, kind: 'rejected', retryable: false })
+  return new ProviderGatewayError({ ...common, kind: 'rejected', retryable: false, acceptance: 'not_accepted' })
 }

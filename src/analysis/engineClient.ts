@@ -1,5 +1,7 @@
 import {
   analysisEventSchema,
+  abandonRunRequestSchema,
+  abandonRunRequestResultSchema,
   analysisRunSchema,
   artifactEnvelopeSchema,
   artifactKindSchema,
@@ -9,14 +11,18 @@ import {
   deleteRunContentResultSchema,
   engineCapabilitiesSchema,
   identifierSchema,
+  lookupRunByRequestKeyQuerySchema,
   retryArtifactAcceptedSchema,
   retryArtifactRequestSchema,
   runCreatedSchema,
+  runRequestLookupSchema,
+  runUsageSchema,
   sourceReceiptSchema,
   startRunRequestSchema,
   startRunResultSchema,
   uploadSourcePartSchema,
   type AnalysisEventV1,
+  type AbandonRunRequestResultV1,
   type AnalysisRequestV1,
   type AnalysisRunV1,
   type ArtifactEnvelopeV1,
@@ -26,6 +32,8 @@ import {
   type EngineCapabilitiesV1,
   type RetryArtifactAcceptedV1,
   type RunCreatedV1,
+  type RunRequestLookupV1,
+  type RunUsageV1,
   type SourceReceiptV1,
   type UploadSourcePartV1,
 } from '@cat-thinking/analysis-contracts'
@@ -68,6 +76,9 @@ export interface AnalysisEngineClient {
   uploadSource(runId: string, source: UploadSourcePartV1, signal: AbortSignal): Promise<SourceReceiptV1>
   startRun(runId: string, expectedRevision: number, signal: AbortSignal): Promise<AnalysisRunV1>
   getRun(runId: string, signal: AbortSignal): Promise<AnalysisRunV1>
+  lookupRequest(requestKey: string, signal: AbortSignal): Promise<RunRequestLookupV1>
+  abandonRequest(requestKey: string, signal: AbortSignal): Promise<AbandonRunRequestResultV1>
+  getUsage(runId: string, signal: AbortSignal): Promise<RunUsageV1>
   events(runId: string, options: { lastEventId?: string; signal: AbortSignal }): AsyncIterable<AnalysisEventV1>
   cancel(runId: string, expectedRevision: number, signal: AbortSignal): Promise<CancelRunResultV1>
   retryArtifact(
@@ -184,7 +195,9 @@ const parseEventFrame = (frame: string): AnalysisEventV1 | undefined => {
 const encodeBody = (value: unknown): string => JSON.stringify(value)
 
 export class HttpAnalysisEngineClient implements AnalysisEngineClient {
-  constructor(private readonly fetcher: FetchLike = fetch) {}
+  // Native browser fetch requires its Window receiver. An injected test fetcher
+  // must not hide this integration constraint by being invoked as a class method.
+  constructor(private readonly fetcher: FetchLike = (input, init) => globalThis.fetch(input, init)) {}
 
   async capabilities(signal: AbortSignal): Promise<EngineCapabilitiesV1> {
     const response = await this.fetcher(apiPath('/capabilities'), {
@@ -248,6 +261,33 @@ export class HttpAnalysisEngineClient implements AnalysisEngineClient {
       signal,
     })
     return decodeJsonResponse(response, analysisRunSchema)
+  }
+
+  async lookupRequest(requestKey: string, signal: AbortSignal): Promise<RunRequestLookupV1> {
+    const query = lookupRunByRequestKeyQuerySchema.parse({ requestKey })
+    const response = await this.fetcher(apiPath(`/runs/by-request-key?requestKey=${encodeURIComponent(query.requestKey)}`), {
+      method: 'GET', headers: { accept: 'application/json' }, credentials: 'same-origin', signal,
+    })
+    const result = await decodeJsonResponse(response, runRequestLookupSchema)
+    if (result.status === 'found' && result.run.requestKey !== requestKey) throw new AnalysisClientError('invalid_response', 'Lookup request identity mismatch', false)
+    return result
+  }
+
+  async abandonRequest(requestKey: string, signal: AbortSignal): Promise<AbandonRunRequestResultV1> {
+    const response = await this.fetcher(apiPath('/runs/abandon'), { method: 'POST', headers: jsonHeaders,
+      credentials: 'same-origin', body: encodeBody(abandonRunRequestSchema.parse({ version: 1, requestKey })), signal })
+    const result = await decodeJsonResponse(response, abandonRunRequestResultSchema)
+    if (result.requestKey !== requestKey) throw new AnalysisClientError('invalid_response', 'Abandoned request identity mismatch', false)
+    return result
+  }
+
+  async getUsage(runId: string, signal: AbortSignal): Promise<RunUsageV1> {
+    const response = await this.fetcher(apiPath(runPath(runId, '/usage')), {
+      method: 'GET', headers: { accept: 'application/json' }, credentials: 'same-origin', signal,
+    })
+    const result = await decodeJsonResponse(response, runUsageSchema)
+    if (result.runId !== runId) throw new AnalysisClientError('invalid_response', 'Usage run identity mismatch', false)
+    return result
   }
 
   async *events(

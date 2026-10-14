@@ -149,6 +149,32 @@ const worker = (
 })
 
 describe('evidence pipeline worker', () => {
+  it('keeps identical text at distinct offsets separate and bounds merged citations in long repeated input', async () => {
+    const store = new InMemoryJobStore()
+    const synthetic = 'Repeated synthetic evidence. '.repeat(140)
+    const input = analysisRequestSchema.parse({ ...request(hash('repeated-position-regression')),
+      manifest: { version: 1, sources: [{ version: 1, sourceId: 'source-evidence', kind: 'text', extractor: 'fixture-v1',
+        contentHash: hash(synthetic), charCount: synthetic.length, byteCount: Buffer.byteLength(synthetic) }] } })
+    const service = new RunService({ store, retentionSeconds: 3600, now: () => 1000 })
+    const created = await service.createRun('tenant-a', input)
+    await service.uploadSource('tenant-a', created.run.id, { version: 1, sourceId: 'source-evidence', contentHash: hash(synthetic), partHash: hash(synthetic), partIndex: 0, partCount: 1, start: 0, end: synthetic.length, totalChars: synthetic.length, text: synthetic })
+    await service.startRun('tenant-a', created.run.id, 1)
+    const generator = new FixtureGenerator((mapped) => {
+      const card = cardFor(mapped)
+      return { ...card, claims: card.claims.map((claim) => ({ ...claim, statement: 'One repeated grounded fact' })) }
+    })
+    const result = await worker(store, generator, service.broker, { chunkPolicy: { ...chunkPolicy, targetCharacters: 116, maxCharacters: 116, overlapCharacters: 0 } }).runOnce('tenant-a', created.run.id, 'worker-repeated', new AbortController().signal)
+    expect(result.outcome).toBe('completed')
+    if (result.outcome !== 'completed') throw new Error('Long repeated evidence regression failed')
+    expect(result.graph.cards.length).toBeGreaterThan(20)
+    expect(result.graph.claims).toHaveLength(1)
+    expect(result.graph.claims[0]?.citations).toHaveLength(20)
+    expect(result.graph.coverage.analysis).toBe(1)
+    for (const card of result.graph.cards) {
+      const chunk = result.graph.chunks.find((candidate) => candidate.chunkId === card.chunkId)
+      expect(card.claims[0]?.citations[0]?.start).toBe(chunk?.start)
+    }
+  })
   it('validates lease configuration and supports explicit production defaults', async () => {
     const store = new InMemoryJobStore()
     const prepared = await prepareRun(store, 'tenant-a', hash('worker-defaults'))
@@ -186,6 +212,7 @@ describe('evidence pipeline worker', () => {
       generator,
       broker: abortedRun.service.broker,
       leaseMs: 1_000,
+      now: () => 1_000,
     }).runOnce('tenant-a', abortedRun.runId, 'worker-aborted', controller.signal))
       .toMatchObject({ outcome: 'stopped', run: { status: 'queued' } })
   })
@@ -326,8 +353,11 @@ describe('evidence pipeline worker', () => {
     )
     expect(invalidResult).toMatchObject({
       outcome: 'failed',
-      run: { status: 'failed', error: { code: 'citation_invalid', stage: 'mapping' } },
+      run: { status: 'failed', error: { code: 'citation_invalid', stage: 'mapping', details: {
+        issueCount: 1, rangeIssueCount: 0, referenceIssueCount: 0, quoteIssueCount: 1, identityIssueCount: 0, pageIssueCount: 0,
+      } } },
     })
+    expect(JSON.stringify(invalidResult.run.error)).not.toContain('not from source')
   })
 
   it('preserves a stable provider timeout instead of collapsing it into an internal error', async () => {
@@ -351,9 +381,10 @@ describe('evidence pipeline worker', () => {
       run: {
         status: 'failed',
         error: {
-          code: 'provider_timeout',
-          category: 'provider',
-          retryable: true,
+          code: 'provider_unavailable',
+          category: 'availability',
+          retryable: false,
+          details: { reason: 'invocation_outcome_unknown' },
           stage: 'mapping',
         },
       },

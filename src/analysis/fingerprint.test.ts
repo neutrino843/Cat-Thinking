@@ -103,6 +103,17 @@ describe('source fingerprint', () => {
 })
 
 describe('analysis request key', () => {
+  it('binds a personal model snapshot without changing legacy request keys', async () => {
+    const snapshot = await createSourceSnapshot(source(), undefined, digest)
+    const input = { docId: 'doc-1', sources: [snapshot], artifacts: ['summary' as const], options,
+      engineCapabilityVersion: 'engine-v1', intentId: 'same-explicit-intent' }
+    const old = await createAnalysisRequestKey(input, digest)
+    expect(await createAnalysisRequestKey({ ...input, providerProfileId: undefined }, digest)).toBe(old)
+    const first = await createAnalysisRequestKey({ ...input, providerProfileId: 'profile-first' }, digest)
+    expect(first).not.toBe(old)
+    expect(await createAnalysisRequestKey({ ...input, providerProfileId: 'profile-first' }, digest)).toBe(first)
+    expect(await createAnalysisRequestKey({ ...input, providerProfileId: 'profile-second' }, digest)).not.toBe(first)
+  })
   it('is stable for source and artifact ordering', async () => {
     const firstSource = await createSourceSnapshot(source(), undefined, digest)
     const secondSource = await createSourceSnapshot(

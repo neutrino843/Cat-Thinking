@@ -9,8 +9,9 @@ import type {
   EvidenceGraphV1,
   SourceReceiptV1,
   UploadSourcePartV1,
+  UsageV1,
 } from '@cat-thinking/analysis-contracts'
-import type { ProviderInvocationLedger } from '../providers/invocationLedger.js'
+import type { ProviderInvocationLedger, StoredProviderInvocation } from '../providers/invocationLedger.js'
 
 export class JobStoreNotFoundError extends Error {
   constructor(readonly entity: 'run' | 'source' | 'event') {
@@ -123,6 +124,20 @@ export interface RunTransition {
   readonly event: AnalysisEventV1
 }
 
+/** Read under the run lock; reservation also locks that row before budget checks. */
+export interface RetryTransitionContext {
+  readonly contentDeleted: boolean
+  readonly sourceSnapshotReady: boolean
+  readonly graph?: EvidenceGraphV1
+  readonly outline?: StoredArtifact
+  readonly invocations: readonly StoredProviderInvocation[]
+}
+
+export type RequestKeyLookup =
+  | Readonly<{ status: 'found'; run: AnalysisRunV1 }>
+  | Readonly<{ status: 'absent' }>
+  | Readonly<{ status: 'abandoned'; runId?: string }>
+
 export type RunTransitionResult =
   | Readonly<{ outcome: 'updated'; run: AnalysisRunV1; event: AnalysisEventV1 }>
   | Readonly<{ outcome: 'missing' }>
@@ -173,6 +188,10 @@ export type ExpiredRunCleanupResult =
   | Readonly<{ outcome: 'cleaned'; run: AnalysisRunV1; event?: AnalysisEventV1 }>
 
 export interface JobStore extends ProviderInvocationLedger {
+  lookupRunByRequestKey(tenantId: string, requestKey: string): Promise<RequestKeyLookup>
+  abandonRequest(tenantId: string, requestKey: string, now: number): Promise<Readonly<{ runId?: string }>>
+  getRunLedgerUsage(tenantId: string, runId: string): Promise<RunLedgerUsage | undefined>
+  listDispatchableRuns(now: number, limit: number): Promise<readonly ExpiredRunReference[]>
   checkHealth(): Promise<boolean>
   createRun(
     tenantId: string,
@@ -185,6 +204,7 @@ export interface JobStore extends ProviderInvocationLedger {
     runId: string,
     expectedRevision: number,
     build: (current: AnalysisRunV1, nextSequence: number) => RunTransition,
+    guard?: (current: AnalysisRunV1, context: RetryTransitionContext) => void,
   ): Promise<RunTransitionResult>
   storeSourcePart(input: StoreSourcePartInput): Promise<StoredSourceUpload>
   markSourceComplete(
@@ -223,4 +243,12 @@ export interface JobStore extends ProviderInvocationLedger {
   renewLease(identity: LeaseIdentity, now: number, durationMs: number): Promise<JobLease | undefined>
   releaseLease(identity: LeaseIdentity): Promise<boolean>
   close(): Promise<void>
+}
+
+export interface RunLedgerUsage {
+  readonly usage: UsageV1
+  readonly invocationCount: number
+  readonly unresolvedCount: number
+  readonly estimatedInputTokens: number
+  readonly reservedOutputTokens: number
 }

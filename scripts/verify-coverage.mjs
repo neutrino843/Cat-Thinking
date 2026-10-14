@@ -11,6 +11,8 @@ const thresholds = {
   analysis: { functions: 90, lines: 90, branches: 85 },
   contracts: { functions: 90, lines: 90, branches: 85 },
   service: { functions: 90, lines: 90, branches: 85 },
+  learning: { functions: 80, lines: 90, branches: 70 },
+  learningRules: { functions: 95, lines: 95, branches: 85 },
 }
 
 const percentage = (covered, total) => total === 0 ? 100 : (covered / total) * 100
@@ -37,6 +39,9 @@ const normalizedEntries = Object.entries(summary)
 
 const groups = {
   total: summary.total,
+  learning: combine(normalizedEntries.filter(([name]) => name.includes('/src/learning/')).map(([, value]) => value)),
+  learningRules: combine(normalizedEntries.filter(([name]) => name.includes('/src/learning/') &&
+    !['repository.ts', 'coursePackage.ts', 'archiveValidation.ts', 'model.ts'].some((file) => name.endsWith(`/${file}`))).map(([, value]) => value)),
   analysis: combine(
     normalizedEntries.filter(([name]) => name.includes('/src/analysis/')).map(([, value]) => value),
   ),

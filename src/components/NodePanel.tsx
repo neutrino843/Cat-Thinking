@@ -4,10 +4,12 @@ import { useSettings } from '../store/settings'
 import { ICONS } from '../data/icons'
 import type { Attachment, NodeImage, NodeLink, NodeTag } from '../types'
 import { sanitizeHtml } from '../lib/sanitizeHtml'
-import { getBlob, saveBlob } from '../store/db'
+import { deleteBlob, getBlob, saveBlob } from '../store/db'
 import { getBlobURL, revokeBlobURL } from '../lib/blobUrl'
 import { getTheme } from '../lib/theme'
 import NoteEditor from './NoteEditor'
+import LocalSourceReferences from './LocalSourceReferences'
+import { canPreviewAttachment, createAttachmentPreviewBlob } from '../lib/attachmentPreview'
 
 /** 分支色键：'' 跟随布局自动配色；'b0'..'b5' 钉住主题分支色 */
 type BranchKey = '' | 'b0' | 'b1' | 'b2' | 'b3' | 'b4' | 'b5'
@@ -250,9 +252,16 @@ export default function NodePanel() {
   async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file || !selId) return
+    const input = e.target
+    const ownerDocId = doc.id
+    const ownerNodeId = selId
+    let createdBlobId: string | undefined
+    let objectUrl: string | undefined
     try {
-      const blobId = await saveBlob(selId, file)
+      const blobId = await saveBlob(ownerDocId, file, ownerNodeId)
+      createdBlobId = blobId
       const url = URL.createObjectURL(file)
+      objectUrl = url
       const img = new Image()
       await new Promise<void>((res, rej) => {
         img.onload = () => res()
@@ -261,12 +270,18 @@ export default function NodePanel() {
       })
       const w = img.naturalWidth || img.width
       const h = img.naturalHeight || img.height
-      URL.revokeObjectURL(url)
-      setNode(selId, { images: [...images, { id: genId(), blobId, w, h }] })
+      const current = useDoc.getState()
+      if (current.doc.id !== ownerDocId || !Object.hasOwn(current.doc.nodes, ownerNodeId)) return
+      const node = current.doc.nodes[ownerNodeId]
+      current.setNode(ownerNodeId, { images: [...(node.images ?? []), { id: genId(), blobId, w, h }] })
+      createdBlobId = undefined
     } catch (err) {
       window.alert('图片上传失败：' + (err as Error).message)
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+      if (createdBlobId) await deleteBlob(createdBlobId).catch(() => {})
+      input.value = ''
     }
-    e.target.value = ''
   }
 
   function removeImage(id: string) {
@@ -279,18 +294,29 @@ export default function NodePanel() {
   async function onPickAttachment(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file || !selId) return
+    const input = e.target
+    const ownerDocId = doc.id
+    const ownerNodeId = selId
+    let createdBlobId: string | undefined
     try {
-      const blobId = await saveBlob(selId, file)
-      setNode(selId, {
+      const blobId = await saveBlob(ownerDocId, file, ownerNodeId)
+      createdBlobId = blobId
+      const current = useDoc.getState()
+      if (current.doc.id !== ownerDocId || !Object.hasOwn(current.doc.nodes, ownerNodeId)) return
+      const node = current.doc.nodes[ownerNodeId]
+      current.setNode(ownerNodeId, {
         attachments: [
-          ...attachments,
+          ...(node.attachments ?? []),
           { id: genId(), blobId, name: file.name, size: file.size, mime: file.type || 'application/octet-stream' },
         ],
       })
+      createdBlobId = undefined
     } catch (err) {
       window.alert('附件上传失败：' + (err as Error).message)
+    } finally {
+      if (createdBlobId) await deleteBlob(createdBlobId).catch(() => {})
+      input.value = ''
     }
-    e.target.value = ''
   }
 
   function removeAttachment(id: string) {
@@ -300,9 +326,25 @@ export default function NodePanel() {
   }
 
   async function previewAttachment(att: Attachment) {
+    const ownerDocId = doc.id
+    const ownerNodeId = selectedId
+    const stillBound = () => {
+      const current = useDoc.getState().doc
+      return current.id === ownerDocId && Object.hasOwn(current.nodes, ownerNodeId)
+        && current.nodes[ownerNodeId].attachments?.some((attachment) => attachment.id === att.id && attachment.blobId === att.blobId)
+    }
     try {
-      const url = await getBlobURL(att.blobId)
-      window.open(url)
+      const blob = await getBlob(att.blobId)
+      if (!blob || !stillBound()) return
+      const preview = await createAttachmentPreviewBlob(blob)
+      if (!stillBound()) return
+      if (!preview) {
+        downloadAttachmentBlob(blob, att.name)
+        return
+      }
+      const url = URL.createObjectURL(preview)
+      window.open(url, '_blank', 'noopener,noreferrer')
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
     } catch {
       window.alert('附件预览失败')
     }
@@ -311,10 +353,15 @@ export default function NodePanel() {
   async function downloadAttachment(att: Attachment) {
     const blob = await getBlob(att.blobId)
     if (!blob) return
+    downloadAttachmentBlob(blob, att.name)
+  }
+
+  function downloadAttachmentBlob(blob: Blob, name: string) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = att.name
+    a.download = name
+    a.rel = 'noopener noreferrer'
     a.click()
     setTimeout(() => URL.revokeObjectURL(url), 3000)
   }
@@ -524,6 +571,10 @@ export default function NodePanel() {
       </div>
 
       {/* 备注区（M7-P2 富文本） */}
+      <LocalSourceReferences doc={doc} nodeId={selectedId} />
+      <div className="msz-np-section">
+        <button className="tbtn" onClick={() => window.dispatchEvent(new CustomEvent('msz:learning-open', { detail: { localDocId: doc.id, localNodeId: selectedId } }))}>学习这个节点</button>
+      </div>
       <div className="msz-np-section">
         <div className="msz-np-label">备注</div>
         <NoteEditor html={richHtml} onChange={setRichNote} />
@@ -568,7 +619,7 @@ export default function NodePanel() {
             <div className="msz-np-att-item" key={att.id}>
               <span className="msz-np-att-name">{att.name}</span>
               <span>{fmtSize(att.size)}</span>
-              <button onClick={() => void previewAttachment(att)}>预览</button>
+              {canPreviewAttachment(att.mime) && <button onClick={() => void previewAttachment(att)}>预览</button>}
               <button onClick={() => void downloadAttachment(att)}>下载</button>
               <button onClick={() => removeAttachment(att.id)}>×</button>
             </div>

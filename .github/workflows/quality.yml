@@ -7,6 +7,11 @@ on:
       - main
       - 'feature/**'
   workflow_dispatch:
+    inputs:
+      sign_release_prerequisites:
+        description: 'Run protected Ubuntu validation and sign exact-build prerequisites (no live Provider)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -50,6 +55,19 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npx playwright install --with-deps chromium
       - run: npm run e2e
+      - run: npm run build
+      - run: npm run e2e:performance -- --repeat-each=3
+      - name: Preserve production build and performance measurements
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-production-performance
+          path: |
+            dist/build-metrics.json
+            test-results/performance/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload Playwright diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
@@ -59,6 +77,83 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  protected-release-prerequisites:
+    name: Protected exact-build release prerequisites
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.sign_release_prerequisites
+    needs: [quality, e2e, document-fixtures, analysis-service-container, analysis-service-postgres]
+    runs-on: ubuntu-latest
+    environment: analysis-release
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+        env:
+          POSTGRES_DB: cat_analysis_test
+          POSTGRES_PASSWORD: integration-only-password
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cat_analysis_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - name: Materialize environment-owned signing files outside checkout
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.ANALYSIS_RELEASE_SIGNING_KEY }}
+          RELEASE_PUBLIC_KEY: ${{ secrets.ANALYSIS_RELEASE_PUBLIC_KEY }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { mkdtemp, writeFile, appendFile } from 'node:fs/promises'
+          import { join } from 'node:path'
+          if (!process.env.RELEASE_SIGNING_KEY || !process.env.RELEASE_PUBLIC_KEY) {
+            throw new Error('Protected signing keys are required; no prerequisite proof can be issued.')
+          }
+          const directory = await mkdtemp(join(process.env.RUNNER_TEMP, 'cat-release-'))
+          const files = {
+            ANALYSIS_RELEASE_SIGNING_KEY_PATH: join(directory, 'signing.pem'),
+            ANALYSIS_RELEASE_PUBLIC_KEY_PATH: join(directory, 'public.pem'),
+            ANALYSIS_CI_PREREQUISITES_PATH: join(directory, 'ci-prerequisites.json'),
+          }
+          await writeFile(files.ANALYSIS_RELEASE_SIGNING_KEY_PATH, process.env.RELEASE_SIGNING_KEY, { flag: 'wx', mode: 0o600 })
+          await writeFile(files.ANALYSIS_RELEASE_PUBLIC_KEY_PATH, process.env.RELEASE_PUBLIC_KEY, { flag: 'wx', mode: 0o600 })
+          await appendFile(process.env.GITHUB_ENV, Object.entries(files).map(([key, value]) => `${key}=${value}\n`).join(''))
+          NODE
+      - name: Execute and sign current prerequisites without Provider credentials
+        env:
+          ANALYSIS_CI_SIGNING: I_ACKNOWLEDGE_TRUSTED_CI_SIGNING
+          ANALYSIS_TEST_DATABASE_URL: postgresql://postgres:integration-only-password@127.0.0.1:5432/cat_analysis_test
+        run: npm run verify:ci:sign
+      - name: Preserve signed prerequisites and exact verified build
+        uses: actions/upload-artifact@v7
+        with:
+          name: analysis-signed-release-prerequisites
+          path: |
+            ${{ env.ANALYSIS_CI_PREREQUISITES_PATH }}
+            ${{ env.ANALYSIS_RELEASE_PUBLIC_KEY_PATH }}
+            services/analysis-service/dist/
+            packages/analysis-contracts/dist/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove only generated protected key files
+        if: always()
+        run: |
+          node --input-type=module <<'NODE'
+          import { rm } from 'node:fs/promises'
+          for (const name of ['ANALYSIS_RELEASE_SIGNING_KEY_PATH', 'ANALYSIS_RELEASE_PUBLIC_KEY_PATH', 'ANALYSIS_CI_PREREQUISITES_PATH']) {
+            if (process.env[name]) await rm(process.env[name], { force: true })
+          }
+          NODE
   document-fixtures:
     name: LibreOffice document fixture smoke
     runs-on: ubuntu-latest
@@ -84,31 +179,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Build pinned non-root image
-        run: docker build --file services/analysis-service/Dockerfile --tag cat-analysis-service:ci .
-      - name: Start and probe container
-        env:
-          ANALYSIS_SERVICE_TOKEN: ci-service-token-with-at-least-thirty-two-bytes
-        run: |
-          container_id=$(docker run --detach --publish 127.0.0.1:8787:8787 \
-            --env ANALYSIS_AUTH_MODE=service-token \
-            --env ANALYSIS_SERVICE_TOKEN="$ANALYSIS_SERVICE_TOKEN" \
-            --env ANALYSIS_CORS_ORIGINS=https://app.example.test \
-            cat-analysis-service:ci)
-          trap 'docker logs "$container_id"; docker stop "$container_id"' EXIT
-          for attempt in $(seq 1 20); do
-            if curl --fail --silent http://127.0.0.1:8787/health > /dev/null; then
-              break
-            fi
-            if [ "$attempt" -eq 20 ]; then exit 1; fi
-            sleep 1
-          done
-          curl --fail --silent \
-            --header "Authorization: Bearer $ANALYSIS_SERVICE_TOKEN" \
-            --header 'X-Cat-Tenant-Id: ci-tenant' \
-            --header 'Origin: https://app.example.test' \
-            http://127.0.0.1:8787/api/analysis/v1/capabilities \
-            | grep --fixed-strings '"acceptsRuns":false'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build:contracts
+      - name: Probe isolated held image and clean owned resources
+        run: npm run verify:container
 
   analysis-service-postgres:
     name: Analysis service PostgreSQL integration
@@ -138,11 +216,49 @@ jobs:
           cache: npm
           package-manager-cache: true
       - run: npm ci --ignore-scripts
-      - name: Run durable store restart and concurrency tests
+      - name: Run store, encrypted personal settings, fake adapters and dispatcher recovery tests
         env:
           ANALYSIS_TEST_DATABASE_URL: postgresql://postgres:integration-only-password@127.0.0.1:5432/cat_analysis_test
-        run: npm run test:service:postgres
+        run: npm run test:service:postgres -- --reporter=json --outputFile=postgres-test-results.json
       - name: Enforce PostgreSQL adapter coverage
         env:
           ANALYSIS_TEST_DATABASE_URL: postgresql://postgres:integration-only-password@127.0.0.1:5432/cat_analysis_test
         run: npm run coverage:postgres
+      - name: Record verified build identity
+        run: npm run build:service
+      - name: Install browser for PostgreSQL product recovery tests
+        run: npx playwright install --with-deps chromium
+      - name: Verify all five synthetic artifacts and browser recovery
+        env:
+          ANALYSIS_TEST_DATABASE_URL: postgresql://postgres:integration-only-password@127.0.0.1:5432/cat_analysis_test
+          ANALYSIS_BROWSER_JSON_REPORT_PATH: test-results/analysis-browser-results.json
+        run: npm run e2e:analysis
+      - name: Verify personal connection UI through the real gateway and PostgreSQL using fake AI
+        env:
+          ANALYSIS_TEST_DATABASE_URL: postgresql://postgres:integration-only-password@127.0.0.1:5432/cat_analysis_test
+          ANALYSIS_BROWSER_JSON_REPORT_PATH: test-results/personal-browser-results.json
+        run: npm run e2e:personal
+      - name: Preserve synthetic recovery and build evidence
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: analysis-postgres-recovery-evidence
+          path: |
+            postgres-test-results.json
+            coverage-postgres/coverage-summary.json
+            services/analysis-service/dist/release-build.json
+            test-results/analysis-summary-outline.png
+            test-results/analysis-five-artifacts.png
+            test-results/personal-five-artifacts.png
+            test-results/analysis-browser-results.json
+            test-results/personal-browser-results.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve synthetic browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: analysis-browser-failure-diagnostics
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7

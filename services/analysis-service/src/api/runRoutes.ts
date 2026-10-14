@@ -1,6 +1,8 @@
 import { once } from 'node:events'
 import {
   artifactKindSchema,
+  abandonRunRequestSchema,
+  lookupRunByRequestKeyQuerySchema,
   cancelRunRequestSchema,
   createAnalysisRunSchema,
   identifierSchema,
@@ -114,7 +116,7 @@ const streamEvents = async (
 
 export interface RegisterRunRoutesOptions {
   readonly runService?: RunService
-  readonly acceptsRuns: boolean
+  readonly acceptsRuns: boolean | (() => Promise<boolean>)
 }
 
 export const registerRunRoutes = (
@@ -126,9 +128,20 @@ export const registerRunRoutes = (
     if (!options.runService) throw serviceUnavailableError()
     return options.runService
   }
+  const admission = async (): Promise<boolean> => typeof options.acceptsRuns === 'function' ? options.acceptsRuns() : options.acceptsRuns
+  options.runService?.setAdmissionGuard(admission)
+
+  api.get('/runs/by-request-key', async (request) => {
+    const query = decode(lookupRunByRequestKeyQuerySchema, request.query, 'analysis.request.key_invalid')
+    return requireService().lookupRequest(readIdentity(request), query.requestKey)
+  })
+  api.post('/runs/abandon', async (request) => {
+    const body = decode(abandonRunRequestSchema, request.body, 'analysis.request.abandon_invalid')
+    return requireService().abandonRequest(readIdentity(request), body.requestKey)
+  })
 
   api.post('/runs', async (request) => {
-    if (!options.acceptsRuns) throw serviceUnavailableError()
+    if (!(typeof options.acceptsRuns === 'function' ? await options.acceptsRuns() : options.acceptsRuns)) throw serviceUnavailableError()
     const service = requireService()
     const body = decode(createAnalysisRunSchema, request.body, 'analysis.request.invalid')
     return service.createRun(readIdentity(request), body.request)
@@ -151,6 +164,9 @@ export const registerRunRoutes = (
 
   api.get<{ Params: RunParams }>('/runs/:runId', async (request) => {
     return requireService().getRun(readIdentity(request), readRunId(request.params.runId))
+  })
+  api.get<{ Params: RunParams }>('/runs/:runId/usage', async (request) => {
+    return requireService().getUsage(readIdentity(request), readRunId(request.params.runId))
   })
 
   api.get<{ Params: RunParams }>('/runs/:runId/events', async (request, reply) => {

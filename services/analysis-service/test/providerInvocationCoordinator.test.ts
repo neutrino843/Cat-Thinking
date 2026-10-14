@@ -17,7 +17,8 @@ import {
   ProviderInvocationCoordinatorError,
   type ProviderInvocationPolicy,
 } from '../src/providers/providerInvocationCoordinator.js'
-import { ProviderRouter } from '../src/providers/providerRouter.js'
+import { ProviderRouter, ProviderRoutingError } from '../src/providers/providerRouter.js'
+import { OpenAICompatibleProvider, type FetchImplementation } from '../src/providers/openAICompatibleProvider.js'
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex')
 
@@ -114,6 +115,7 @@ describe('provider invocation coordinator', () => {
   const coordinator = (
     overrides: Partial<ProviderInvocationPolicy> = {},
     delay: (milliseconds: number, signal: AbortSignal) => Promise<void> = async () => undefined,
+    canInvoke?: () => Promise<boolean>,
   ): ProviderInvocationCoordinator => new ProviderInvocationCoordinator({
     router: new ProviderRouter([provider], [{
       id: 'evidence-standard',
@@ -133,6 +135,7 @@ describe('provider invocation coordinator', () => {
     now: () => now,
     random: () => 0.5,
     delay,
+    canInvoke,
   })
 
   const input = (invocationId: string, nodeKey = invocationId) => ({
@@ -141,6 +144,83 @@ describe('provider invocation coordinator', () => {
     nodeKey,
     runAttempt: 1,
     request: makeModelRequest(invocationId),
+  })
+
+  const compatibleCoordinator = (fetchImplementation: FetchImplementation) => {
+    const compatible = new OpenAICompatibleProvider({ id: 'synthetic-compatible', modelId: 'synthetic-model',
+      profileVersion: 'synthetic-v1', apiStyle: 'responses', baseUrl: 'https://models.example.com/v1',
+      allowedHosts: ['models.example.com'], apiKey: 'synthetic-never-live', requestTimeoutMs: 1_000,
+      maxInputCharacters: 100_000, maxOutputTokens: 10_000, maxResponseBytes: 10_000, fetchImplementation })
+    return new ProviderInvocationCoordinator({ router: new ProviderRouter([compatible], [{ id: 'synthetic-route',
+      providerId: compatible.id, modelId: compatible.modelId, profileVersion: compatible.profileVersion,
+      promptId: 'evidence-map', promptVersion: 'prompt-v1', roles: ['evidence-map'], qualityProfiles: ['standard'], priority: 0 }]),
+      ledger: store, estimateCostMicros: () => 7, now: () => now, policy: policy(), delay: async () => undefined })
+  }
+
+  it.each(['fetch', 'response-body', 'http-503'] as const)('keeps a possibly accepted %s failure unresolved and sends only one POST', async (failure) => {
+    const transport = vi.fn<FetchImplementation>(async (_url, init) => {
+      expect(init?.method).toBe('POST')
+      if (failure === 'fetch') throw new TypeError('lost response after synthetic acceptance')
+      if (failure === 'http-503') return new Response('{}', { status: 503 })
+      return new Response(new ReadableStream({ start(controller) { controller.error(new Error('lost synthetic body')) } }), { status: 200 })
+    })
+    const guarded = compatibleCoordinator(transport)
+    const invocationId = `ambiguous-${failure}`
+    await expect(guarded.generate(input(invocationId), new AbortController().signal)).rejects.toMatchObject({ kind: 'outcome_unknown', retryable: false })
+    expect(transport).toHaveBeenCalledTimes(1)
+    const invocation = await store.getProviderInvocation('tenant-provider', invocationId)
+    expect(invocation).toMatchObject({ status: 'outcome_unknown', transportAttempts: 1, estimatedCostMicros: 7 })
+    expect(invocation?.actualInputTokens).toBeUndefined()
+    expect(await store.getRunLedgerUsage('tenant-provider', runId)).toMatchObject({ invocationCount: 1, unresolvedCount: 1, usage: { estimatedCostMicros: 7 } })
+    await expect(guarded.generate(input(invocationId), new AbortController().signal)).rejects.toMatchObject({ kind: 'outcome_unknown' })
+    expect(transport).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries a proven HTTP rate rejection and preserves refusal/truncation usage without retrying', async () => {
+    const transport = vi.fn<FetchImplementation>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'slow_down' } }), { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'completed', output_text: '{}', usage: { input_tokens: 20, output_tokens: 10 } }), { status: 200 }))
+    expect((await compatibleCoordinator(transport).generate(input('known-rejection'), new AbortController().signal)).invocation.transportAttempts).toBe(2)
+    const refusal = vi.fn<FetchImplementation>().mockResolvedValue(new Response(JSON.stringify({ id: 'synthetic-refusal', status: 'incomplete',
+      output_text: '{}', usage: { input_tokens: 30, output_tokens: 12 } }), { status: 200 }))
+    await expect(compatibleCoordinator(refusal).generate(input('accepted-refusal'), new AbortController().signal))
+      .rejects.toMatchObject({ kind: 'rejected', acceptance: 'accepted' })
+    expect(refusal).toHaveBeenCalledTimes(1)
+    expect(await store.getProviderInvocation('tenant-provider', 'accepted-refusal')).toMatchObject({ status: 'failed', actualInputTokens: 30, actualOutputTokens: 12, providerRequestId: 'synthetic-refusal' })
+    expect(await store.getRunLedgerUsage('tenant-provider', runId)).toMatchObject({ invocationCount: 2, unresolvedCount: 0, usage: { inputTokens: 50, outputTokens: 22 } })
+  })
+
+  it('preserves independently valid usage when response identity/output is malformed', async () => {
+    const transport = vi.fn<FetchImplementation>().mockResolvedValue(new Response(JSON.stringify({ id: 'x'.repeat(300),
+      output: 'malformed-output-shape', usage: { input_tokens: 9, output_tokens: 4 } }), { status: 200 }))
+    await expect(compatibleCoordinator(transport).generate(input('malformed-known-usage'), new AbortController().signal))
+      .rejects.toMatchObject({ kind: 'invalid_response', usage: { inputTokens: 9, outputTokens: 4 } })
+    expect(transport).toHaveBeenCalledTimes(1)
+    expect(await store.getProviderInvocation('tenant-provider', 'malformed-known-usage')).toMatchObject({ status: 'failed', actualInputTokens: 9, actualOutputTokens: 4 })
+    expect((await store.getRunLedgerUsage('tenant-provider', runId))?.unresolvedCount).toBe(0)
+  })
+
+  it('retains usage returned after caller cancellation while the worker fences the result commit', async () => {
+    const controller = new AbortController()
+    const transport = vi.fn<FetchImplementation>(async () => {
+      controller.abort()
+      return new Response(JSON.stringify({ status: 'completed', output_text: '{}', usage: { input_tokens: 8, output_tokens: 3 } }), { status: 200 })
+    })
+    await compatibleCoordinator(transport).generate(input('cancel-after-paid-output'), controller.signal)
+    expect(await store.getProviderInvocation('tenant-provider', 'cancel-after-paid-output')).toMatchObject({ status: 'succeeded', actualInputTokens: 8, actualOutputTokens: 3 })
+    expect(transport).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocks before reservation and each transport retry on revoked release evidence', async () => {
+    await expect(coordinator({}, undefined, async () => false).generate(input('release-blocked'), new AbortController().signal)).rejects.toMatchObject({ kind: 'release_not_ready', retryable: false, safeCode: 'release_gate_closed' })
+    await expect(coordinator({}, undefined, async () => { throw new Error('private path') }).generate(input('release-unreadable'), new AbortController().signal)).rejects.toMatchObject({ safeCode: 'release_gate_closed' })
+    expect(provider.generate).not.toHaveBeenCalled()
+    expect((await store.getRunLedgerUsage('tenant-provider', runId))?.invocationCount ?? 0).toBe(0)
+    let ready = true
+    provider.generate.mockRejectedValueOnce(new ProviderGatewayError({ providerId: provider.id, kind: 'rate_limited', retryable: true, acceptance: 'not_accepted', safeCode: 'rate_limited' }))
+    await expect(coordinator({}, async () => { ready = false }, async () => ready).generate(input('release-retry'), new AbortController().signal)).rejects.toMatchObject({ kind: 'release_not_ready' })
+    expect(provider.generate).toHaveBeenCalledTimes(1)
+    expect((await store.getRunLedgerUsage('tenant-provider', runId))?.unresolvedCount).toBe(0)
   })
 
   it('reserves budget before the call and persists only bounded invocation metadata on success', async () => {
@@ -174,6 +254,7 @@ describe('provider invocation coordinator', () => {
       .mockRejectedValueOnce(new ProviderGatewayError({
         providerId: provider.id,
         kind: 'rate_limited',
+        acceptance: 'not_accepted',
         retryable: true,
         safeCode: 'rate_limit',
         retryAfterMs: 5_000,
@@ -204,7 +285,7 @@ describe('provider invocation coordinator', () => {
       .rejects.toMatchObject({ kind: 'timeout' })
     expect(provider.generate).toHaveBeenCalledTimes(1)
     expect(await store.getProviderInvocation('tenant-provider', 'invoke-timeout')).toMatchObject({
-      status: 'failed',
+      status: 'outcome_unknown',
       transportAttempts: 1,
       failureKind: 'timeout',
       safeCode: 'request_timeout',
@@ -284,6 +365,7 @@ describe('provider invocation coordinator', () => {
     provider.generate.mockRejectedValue(new ProviderGatewayError({
       providerId: provider.id,
       kind: 'rate_limited',
+      acceptance: 'not_accepted',
       retryable: true,
       safeCode: 'rate_limit',
     }))
@@ -293,6 +375,7 @@ describe('provider invocation coordinator', () => {
       if (signal.aborted) throw new ProviderGatewayError({
         providerId: provider.id,
         kind: 'aborted',
+        acceptance: 'not_accepted',
         retryable: false,
         safeCode: 'caller_aborted',
       })
@@ -326,15 +409,35 @@ describe('provider invocation coordinator', () => {
   })
 
   it('maps provider and coordinator failures to stable public contract errors', () => {
+    expect(providerContractError(new ProviderRoutingError(
+      'route_unavailable',
+      'evidence-map',
+      'standard',
+    ), 'mapping')).toMatchObject({
+      code: 'provider_unavailable',
+      category: 'availability',
+      retryable: true,
+      stage: 'mapping',
+      details: {
+        reason: 'route_unavailable',
+        role: 'evidence-map',
+        qualityProfile: 'standard',
+      },
+    })
+    expect(providerContractError(new ProviderRoutingError('invalid_configuration'))).toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
+      details: { reason: 'invalid_configuration' },
+    })
     expect(providerContractError(new ProviderGatewayError({
       providerId: provider.id,
       kind: 'timeout',
       retryable: true,
       safeCode: 'request_timeout',
     }), 'mapping')).toMatchObject({
-      code: 'provider_timeout',
-      category: 'provider',
-      retryable: true,
+      code: 'provider_unavailable',
+      category: 'availability',
+      retryable: false,
       stage: 'mapping',
     })
     expect(providerContractError(new ProviderInvocationCoordinatorError(
@@ -352,7 +455,8 @@ describe('provider invocation coordinator', () => {
   it.each([
     ['aborted', 'cancelled', 'cancellation', false],
     ['rate_limited', 'rate_limited', 'rate-limit', true],
-    ['unavailable', 'provider_unavailable', 'availability', true],
+    ['unavailable', 'provider_unavailable', 'availability', false],
+    ['outcome_unknown', 'provider_unavailable', 'availability', false],
     ['rejected', 'provider_rejected', 'provider', false],
     ['invalid_response', 'provider_rejected', 'provider', false],
     ['response_too_large', 'provider_rejected', 'provider', false],
@@ -362,6 +466,7 @@ describe('provider invocation coordinator', () => {
       kind,
       retryable,
       safeCode: 'safe_code',
+      acceptance: kind === 'aborted' || kind === 'rate_limited' || kind === 'rejected' ? 'not_accepted' : undefined,
     }))
     expect(mapped).toMatchObject({ code, category, retryable })
     expect(JSON.stringify(mapped)).not.toContain('provider request failed')
@@ -373,6 +478,7 @@ describe('provider invocation coordinator', () => {
     ['outcome_unknown', false],
     ['already_succeeded', false],
     ['already_failed', false],
+    ['route_mismatch', false],
     ['ledger_conflict', false],
   ] as const)('maps %s coordinator failures with explicit retryability', (kind, retryable) => {
     expect(providerContractError(new ProviderInvocationCoordinatorError(

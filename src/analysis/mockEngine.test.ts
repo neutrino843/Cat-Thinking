@@ -48,6 +48,25 @@ const events: AnalysisEventV1[] = [
 ]
 
 describe('deterministic mock analysis engine', () => {
+  it('looks up pending intents, retains abandoned barriers, and reports usage without fictitious invocations', async () => {
+    const client = new MockAnalysisEngineClient({ createRunId: () => 'run-1' })
+    const request = analysisRequestSchema.parse(requestFixture)
+    expect(await client.lookupRequest(request.requestKey, signal())).toEqual({ version: 1, status: 'absent' })
+    await client.createRun(request, signal())
+    expect(await client.lookupRequest(request.requestKey, signal())).toMatchObject({ status: 'found', run: { id: 'run-1' } })
+    expect(await client.getUsage('run-1', signal())).toMatchObject({ completeness: 'complete', invocationCount: 0 })
+    await client.abandonRequest(request.requestKey, signal())
+    expect(await client.lookupRequest(request.requestKey, signal())).toMatchObject({ status: 'abandoned', runId: 'run-1' })
+    await expect(client.createRun(request, signal())).rejects.toThrow('abandoned')
+    await client.abandonRequest('f'.repeat(64), signal())
+    expect(await client.lookupRequest('f'.repeat(64), signal())).toEqual({ version: 1, status: 'abandoned' })
+    const abort = new AbortController(); abort.abort(new Error('aborted'))
+    await expect(client.lookupRequest(request.requestKey, abort.signal)).rejects.toThrow('aborted')
+    await expect(client.abandonRequest(request.requestKey, abort.signal)).rejects.toThrow('aborted')
+    await expect(client.getUsage('run-1', abort.signal)).rejects.toThrow('aborted')
+    await expect(client.lookupRequest('bad', signal())).rejects.toThrow()
+    await expect(client.abandonRequest('bad', signal())).rejects.toThrow()
+  })
   it('reuses request keys and requires complete source upload before start', async () => {
     const content = 'x'.repeat(1200)
     const request = await requestForContent(content)

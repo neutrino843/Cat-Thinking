@@ -55,7 +55,7 @@ export const evidenceClaimSchema = z
     kind: evidenceClaimKindSchema,
     statement: boundedTextSchema,
     conceptIds: z.array(identifierSchema).max(50),
-    citations: z.array(sourceCitationSchema).min(1).max(20),
+    citations: z.array(sourceCitationSchema).min(1).max(ANALYSIS_LIMITS.maxEvidenceCitationsPerItem),
   })
   .strict()
 
@@ -64,7 +64,7 @@ export const evidenceTermSchema = z
     id: identifierSchema,
     term: boundedTextSchema.max(500),
     definition: boundedTextSchema.optional(),
-    citations: z.array(sourceCitationSchema).min(1).max(20),
+    citations: z.array(sourceCitationSchema).min(1).max(ANALYSIS_LIMITS.maxEvidenceCitationsPerItem),
   })
   .strict()
 

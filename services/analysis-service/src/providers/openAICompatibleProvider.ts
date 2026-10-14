@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import type { ProviderNetworkMode, ProviderStructuredOutput } from '@cat-thinking/analysis-contracts'
+import { createPinnedProviderFetch, normalizeProviderBaseUrl, ProviderConnectionError } from './providerConnection.js'
 import type {
   ModelProvider,
   ModelProviderCapabilities,
@@ -27,6 +29,11 @@ export interface OpenAICompatibleProviderOptions {
   readonly baseUrl: string
   readonly allowedHosts: readonly string[]
   readonly apiKey: string
+  readonly structuredOutput?: ProviderStructuredOutput
+  readonly networkMode?: ProviderNetworkMode
+  readonly tokenParameter?: 'max_tokens' | 'max_completion_tokens'
+  readonly temperaturePolicy?: 'request' | 'omit'
+  readonly chatThinkingMode?: 'disabled' | 'disable-qwen'
   readonly requestTimeoutMs: number
   readonly maxInputCharacters: number
   readonly maxOutputTokens: number
@@ -35,8 +42,12 @@ export interface OpenAICompatibleProviderOptions {
 }
 
 const usageSchema = z.object({
-  input_tokens: z.number().int().nonnegative(),
-  output_tokens: z.number().int().nonnegative(),
+  input_tokens: z.number().int().nonnegative().safe(),
+  output_tokens: z.number().int().nonnegative().safe(),
+}).passthrough()
+const chatUsageSchema = z.object({
+  prompt_tokens: z.number().int().nonnegative().safe(),
+  completion_tokens: z.number().int().nonnegative().safe(),
 }).passthrough()
 
 const responsesEnvelopeSchema = z.object({
@@ -63,10 +74,7 @@ const chatEnvelopeSchema = z.object({
       refusal: z.string().nullable().optional(),
     }).passthrough(),
   }).passthrough()).min(1),
-  usage: z.object({
-    prompt_tokens: z.number().int().nonnegative(),
-    completion_tokens: z.number().int().nonnegative(),
-  }).passthrough(),
+  usage: chatUsageSchema,
 }).passthrough()
 
 const errorEnvelopeSchema = z.object({
@@ -78,31 +86,13 @@ const providerFailure = (
   kind: ConstructorParameters<typeof ProviderGatewayError>[0]['kind'],
   retryable: boolean,
   safeCode: string,
-): ProviderGatewayError => new ProviderGatewayError({ providerId, kind, retryable, safeCode })
+  metadata: Pick<ConstructorParameters<typeof ProviderGatewayError>[0], 'acceptance' | 'usage' | 'providerRequestId'> = {},
+): ProviderGatewayError => new ProviderGatewayError({ providerId, kind, retryable, safeCode, ...metadata })
 
 const validateBoundedInteger = (value: number, name: string, minimum: number, maximum: number): void => {
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new RangeError(`${name} must be an integer between ${minimum} and ${maximum}`)
   }
-}
-
-const normalizeBaseUrl = (baseUrl: string, allowedHosts: readonly string[]): URL => {
-  let parsed: URL
-  try {
-    parsed = new URL(baseUrl)
-  } catch {
-    throw new TypeError('provider base URL is invalid')
-  }
-  if (!['https:', 'http:'].includes(parsed.protocol)) throw new TypeError('provider base URL must use HTTP(S)')
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new TypeError('provider base URL must not contain credentials, query, or fragment')
-  }
-  const hosts = new Set(allowedHosts.map((host) => host.toLowerCase()))
-  if (hosts.size === 0 || !hosts.has(parsed.host.toLowerCase())) {
-    throw new TypeError('provider base URL host is not allowlisted')
-  }
-  parsed.pathname = `${parsed.pathname.replace(/\/+$/u, '')}/`
-  return parsed
 }
 
 const requestIdentifier = (value: string | null | undefined): string | undefined => value
@@ -178,20 +168,26 @@ export class OpenAICompatibleProvider implements ModelProvider {
   private readonly apiKey: string
   private readonly requestTimeoutMs: number
   private readonly maxResponseBytes: number
+  private readonly structuredOutput: ProviderStructuredOutput
+  private readonly tokenParameter: 'max_tokens' | 'max_completion_tokens'
+  private readonly temperaturePolicy: 'request' | 'omit'
+  private readonly chatThinkingMode?: 'disabled' | 'disable-qwen'
   private readonly fetchImplementation: FetchImplementation
 
   constructor(options: OpenAICompatibleProviderOptions) {
     if (!SAFE_ID_PATTERN.test(options.id)) throw new TypeError('provider id is invalid')
     if (!MODEL_ID_PATTERN.test(options.modelId)) throw new TypeError('provider model id is invalid')
     if (!SAFE_ID_PATTERN.test(options.profileVersion)) throw new TypeError('provider profile version is invalid')
-    if (options.apiKey.trim().length === 0 || options.apiKey.length > 4_096) {
+    if ((options.apiKey.trim().length === 0 && options.networkMode !== 'local-loopback')
+      || options.apiKey.length > 4_096 || (options.apiKey && !/^[\x21-\x7e]+$/u.test(options.apiKey))) {
       throw new TypeError('provider API key is invalid')
     }
     validateBoundedInteger(options.requestTimeoutMs, 'requestTimeoutMs', 1_000, 300_000)
     validateBoundedInteger(options.maxInputCharacters, 'maxInputCharacters', 1_000, 10_000_000)
     validateBoundedInteger(options.maxOutputTokens, 'maxOutputTokens', 1, 1_000_000)
     validateBoundedInteger(options.maxResponseBytes, 'maxResponseBytes', 1_024, 20_000_000)
-    const baseUrl = normalizeBaseUrl(options.baseUrl, options.allowedHosts)
+    if (options.allowedHosts.length === 0) throw new TypeError('provider base URL host is not allowlisted')
+    const baseUrl = normalizeProviderBaseUrl(options.baseUrl, { allowedHosts: options.allowedHosts, networkMode: options.networkMode })
     this.id = options.id
     this.modelId = options.modelId
     this.profileVersion = options.profileVersion
@@ -200,7 +196,13 @@ export class OpenAICompatibleProvider implements ModelProvider {
     this.apiKey = options.apiKey
     this.requestTimeoutMs = options.requestTimeoutMs
     this.maxResponseBytes = options.maxResponseBytes
-    this.fetchImplementation = options.fetchImplementation ?? fetch
+    this.structuredOutput = options.structuredOutput ?? 'json_schema'
+    this.tokenParameter = options.tokenParameter ?? 'max_completion_tokens'
+    this.temperaturePolicy = options.temperaturePolicy ?? 'request'
+    this.chatThinkingMode = options.chatThinkingMode
+    this.fetchImplementation = options.fetchImplementation ?? createPinnedProviderFetch({
+      baseUrl, networkMode: options.networkMode, maxResponseBytes: options.maxResponseBytes,
+    })
     this.capabilities = Object.freeze({
       apiStyle: options.apiStyle,
       structuredOutputs: true as const,
@@ -217,7 +219,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
   async generate(request: ModelRequest, signal: AbortSignal): Promise<ModelResponse> {
     this.validateRequest(request)
-    if (signal.aborted) throw providerFailure(this.id, 'aborted', false, 'caller_aborted')
+    if (signal.aborted) throw providerFailure(this.id, 'aborted', false, 'caller_aborted', { acceptance: 'not_accepted' })
     const body = JSON.stringify(this.requestBody(request))
     const controller = new AbortController()
     let timedOut = false
@@ -233,7 +235,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
         method: 'POST',
         headers: {
           accept: 'application/json',
-          authorization: `Bearer ${this.apiKey}`,
+          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
           'content-type': 'application/json',
         },
         body,
@@ -256,9 +258,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
         : this.decodeChatPayload(payload, response)
     } catch (error) {
       if (error instanceof ProviderGatewayError) throw error
-      if (timedOut) throw providerFailure(this.id, 'timeout', true, 'request_timeout')
-      if (signal.aborted) throw providerFailure(this.id, 'aborted', false, 'caller_aborted')
-      throw providerFailure(this.id, 'unavailable', true, 'connection_failed')
+      if (error instanceof ProviderConnectionError && error.acceptance === 'accepted') {
+        throw providerFailure(this.id, 'response_too_large', false, error.safeCode, { acceptance: 'accepted' })
+      }
+      if (error instanceof ProviderConnectionError && /^(?:endpoint_|request_endpoint_|request_body_|request_aborted)/u.test(error.safeCode)) {
+        throw providerFailure(this.id, 'rejected', false, error.safeCode, { acceptance: 'not_accepted' })
+      }
+      // fetch cannot prove whether a POST reached the remote service. Replaying it
+      // would conceal a potentially billable first attempt behind a later success.
+      throw providerFailure(this.id, 'outcome_unknown', false,
+        timedOut ? 'request_timeout' : signal.aborted ? 'caller_aborted_after_send' : 'response_lost')
     } finally {
       clearTimeout(timeout)
       signal.removeEventListener('abort', abortFromCaller)
@@ -287,6 +296,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
     if (new TextEncoder().encode(serializedSchema).byteLength > MAX_OUTPUT_SCHEMA_BYTES) {
       throw new RangeError('structured output schema is too large')
     }
+    if (this.structuredOutput === 'json_object' && request.systemPrompt.length + request.userPrompt.length + serializedSchema.length + 150 > this.capabilities.maxInputCharacters) {
+      throw new RangeError('provider JSON schema instructions exceed configured character limit')
+    }
   }
 
   private requestBody(request: ModelRequest): Readonly<Record<string, unknown>> {
@@ -295,50 +307,61 @@ export class OpenAICompatibleProvider implements ModelProvider {
       schema: request.output.schema,
       strict: true,
     }
+    const systemPrompt = this.structuredOutput === 'json_object'
+      ? `${request.systemPrompt}\nReturn only one JSON object conforming to this JSON Schema. Do not include Markdown fences or commentary.\nJSON Schema: ${JSON.stringify(request.output.schema)}`
+      : request.systemPrompt
+    const temperature = this.temperaturePolicy === 'request' && request.temperature !== undefined
+      ? { temperature: request.temperature } : {}
     if (this.apiStyle === 'responses') {
       return {
         model: this.modelId,
-        instructions: request.systemPrompt,
+        instructions: systemPrompt,
         input: request.userPrompt,
         max_output_tokens: request.maxOutputTokens,
         store: false,
-        text: { format: { type: 'json_schema', ...schema } },
-        ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+        text: { format: this.structuredOutput === 'json_object' ? { type: 'json_object' } : { type: 'json_schema', ...schema } },
+        ...temperature,
       }
     }
     return {
       model: this.modelId,
       messages: [
-        { role: 'system', content: request.systemPrompt },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: request.userPrompt },
       ],
-      max_completion_tokens: request.maxOutputTokens,
-      response_format: { type: 'json_schema', json_schema: schema },
-      ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+      [this.tokenParameter]: request.maxOutputTokens,
+      response_format: this.structuredOutput === 'json_object'
+        ? { type: 'json_object' } : { type: 'json_schema', json_schema: schema },
+      ...(this.chatThinkingMode === 'disabled' ? { thinking: { type: 'disabled' } }
+        : this.chatThinkingMode === 'disable-qwen' ? { enable_thinking: false } : {}),
+      ...temperature,
     }
   }
 
   private decodeResponsesPayload(payload: unknown, response: Response): ModelResponse {
     const parsed = responsesEnvelopeSchema.safeParse(payload)
     if (!parsed.success || !parsed.data.usage) {
-      throw providerFailure(this.id, 'invalid_response', false, 'response_schema_invalid')
+      throw providerFailure(this.id, 'invalid_response', false, 'response_schema_invalid', this.knownResponseMetadata(payload, response))
     }
+    const metadata = { acceptance: 'accepted' as const, usage: {
+      inputTokens: parsed.data.usage.input_tokens, outputTokens: parsed.data.usage.output_tokens,
+    }, providerRequestId: requestIdentifier(parsed.data.id ?? response.headers.get('x-request-id')) }
     if (parsed.data.status && parsed.data.status !== 'completed') {
-      throw providerFailure(this.id, 'rejected', false, 'response_not_completed')
+      throw providerFailure(this.id, 'rejected', false, 'response_not_completed', metadata)
     }
     const outputParts: string[] = []
     if (!parsed.data.output_text) {
       for (const item of parsed.data.output ?? []) {
         for (const content of item.content ?? []) {
           if (content.refusal || content.type === 'refusal') {
-            throw providerFailure(this.id, 'rejected', false, 'model_refusal')
+            throw providerFailure(this.id, 'rejected', false, 'model_refusal', metadata)
           }
           if (content.type === 'output_text' && content.text) outputParts.push(content.text)
         }
       }
     }
     const outputText = parsed.data.output_text ?? outputParts.join('')
-    if (outputText.length === 0) throw providerFailure(this.id, 'invalid_response', false, 'output_missing')
+    if (outputText.length === 0) throw providerFailure(this.id, 'invalid_response', false, 'output_missing', metadata)
     return {
       outputText,
       usage: {
@@ -351,15 +374,18 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
   private decodeChatPayload(payload: unknown, response: Response): ModelResponse {
     const parsed = chatEnvelopeSchema.safeParse(payload)
-    if (!parsed.success) throw providerFailure(this.id, 'invalid_response', false, 'response_schema_invalid')
+    if (!parsed.success) throw providerFailure(this.id, 'invalid_response', false, 'response_schema_invalid', this.knownResponseMetadata(payload, response))
+    const metadata = { acceptance: 'accepted' as const, usage: {
+      inputTokens: parsed.data.usage.prompt_tokens, outputTokens: parsed.data.usage.completion_tokens,
+    }, providerRequestId: requestIdentifier(parsed.data.id ?? response.headers.get('x-request-id')) }
     const choice = parsed.data.choices[0]
-    if (!choice) throw providerFailure(this.id, 'invalid_response', false, 'choice_missing')
-    if (choice.message.refusal) throw providerFailure(this.id, 'rejected', false, 'model_refusal')
+    if (!choice) throw providerFailure(this.id, 'invalid_response', false, 'choice_missing', metadata)
+    if (choice.message.refusal) throw providerFailure(this.id, 'rejected', false, 'model_refusal', metadata)
     if (choice.finish_reason && !['stop', 'completed'].includes(choice.finish_reason)) {
-      throw providerFailure(this.id, 'rejected', false, 'finish_not_complete')
+      throw providerFailure(this.id, 'rejected', false, 'finish_not_complete', metadata)
     }
     const outputText = choice.message.content
-    if (!outputText) throw providerFailure(this.id, 'invalid_response', false, 'output_missing')
+    if (!outputText) throw providerFailure(this.id, 'invalid_response', false, 'output_missing', metadata)
     return {
       outputText,
       usage: {
@@ -368,5 +394,19 @@ export class OpenAICompatibleProvider implements ModelProvider {
       },
       providerRequestId: requestIdentifier(parsed.data.id ?? response.headers.get('x-request-id')),
     }
+  }
+
+  private knownResponseMetadata(payload: unknown, response: Response): Pick<ConstructorParameters<typeof ProviderGatewayError>[0], 'acceptance' | 'usage' | 'providerRequestId'> {
+    // Usage is a billing fact even when identity/output decoding fails. Validate
+    // it independently so an invalid optional id cannot erase valid token counts.
+    const raw = z.object({ id: z.unknown().optional(), usage: z.unknown().optional() }).passthrough().safeParse(payload)
+    const rawUsage = raw.success ? raw.data.usage : undefined
+    const responseUsage = this.apiStyle === 'responses' ? usageSchema.safeParse(rawUsage) : undefined
+    const chatUsage = this.apiStyle === 'chat-completions' ? chatUsageSchema.safeParse(rawUsage) : undefined
+    const usage = responseUsage?.success
+      ? { inputTokens: responseUsage.data.input_tokens, outputTokens: responseUsage.data.output_tokens }
+      : chatUsage?.success ? { inputTokens: chatUsage.data.prompt_tokens, outputTokens: chatUsage.data.completion_tokens } : undefined
+    const id = raw.success && typeof raw.data.id === 'string' ? raw.data.id : response.headers.get('x-request-id')
+    return { acceptance: 'accepted', usage, providerRequestId: requestIdentifier(id) }
   }
 }

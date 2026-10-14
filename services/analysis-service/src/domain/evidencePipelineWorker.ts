@@ -26,7 +26,7 @@ import {
   type ChunkPlannerPolicy,
 } from './chunkPlanner.js'
 import type { EvidenceGenerator } from './evidenceGenerator.js'
-import { calculateEvidenceCoverage, mergeEvidenceCards } from './evidenceMerger.js'
+import { calculateEvidenceCoverage, EVIDENCE_MERGE_POLICY_VERSION, EvidenceGraphCapacityExceededError, mergeEvidenceCards } from './evidenceMerger.js'
 import { EvidenceValidationError, validateEvidenceCard } from './evidenceValidator.js'
 import type {
   JobLease,
@@ -66,6 +66,7 @@ export interface EvidencePipelineWorkerOptions {
   readonly budgetPolicy?: EvidenceBudgetPolicy
   readonly now?: () => number
   readonly createId?: () => string
+  readonly canProcessRun?: (run: AnalysisRunV1) => boolean
 }
 
 export type EvidencePipelineResult =
@@ -86,6 +87,7 @@ export class EvidencePipelineWorker {
   private readonly budgetPolicy?: EvidenceBudgetPolicy
   private readonly now: () => number
   private readonly createId: () => string
+  private readonly canProcessRun: (run: AnalysisRunV1) => boolean
 
   constructor(options: EvidencePipelineWorkerOptions) {
     if (!Number.isInteger(options.leaseMs) || options.leaseMs <= 0) {
@@ -99,6 +101,7 @@ export class EvidencePipelineWorker {
     this.budgetPolicy = options.budgetPolicy
     this.now = options.now ?? Date.now
     this.createId = options.createId ?? randomUUID
+    this.canProcessRun = options.canProcessRun ?? (() => true)
   }
 
   async runOnce(
@@ -108,6 +111,8 @@ export class EvidencePipelineWorker {
     signal: AbortSignal,
   ): Promise<EvidencePipelineResult> {
     const initial = await this.requireRun(tenantId, runId)
+    if (!this.canProcessRun(initial)) return { outcome: 'stopped', run: initial }
+    if (signal.aborted) return { outcome: 'stopped', run: initial }
     const existingGraph = await this.store.getEvidenceGraph(tenantId, runId)
     if (initial.status === 'generating' && existingGraph) {
       return { outcome: 'already_complete', run: initial, graph: existingGraph }
@@ -305,6 +310,7 @@ export class EvidencePipelineWorker {
       cardHash = cached.cardHash
     } else {
       const output = await this.generator.map({
+        tenantId,
         runId: run.id,
         docId: run.docId,
         locale: run.request.options.locale,
@@ -359,7 +365,11 @@ export class EvidencePipelineWorker {
     return sha256(canonicalizeJson({
       schema: EVIDENCE_SCHEMA_VERSION,
       chunkHash: chunk.chunkHash,
+      // Citations use absolute offsets. Identical text at different positions
+      // must not reuse a card carrying the first chunk's identity and ranges.
+      chunkId: chunk.chunkId,
       chunkPolicy: this.chunkPolicy.version,
+      mergePolicy: EVIDENCE_MERGE_POLICY_VERSION,
       route: this.generator.route,
     }))
   }
@@ -505,10 +515,20 @@ export class EvidencePipelineWorker {
     if (error instanceof EvidenceValidationError) {
       return withStage(createContractError('citation_invalid', 'validation', false, 'analysis.evidence.invalid', {
         issueCount: error.issues.length,
+        rangeIssueCount: error.issues.filter((issue) => issue.code === 'citation_range_invalid').length,
+        referenceIssueCount: error.issues.filter((issue) => issue.code === 'reference_missing').length,
+        quoteIssueCount: error.issues.filter((issue) => issue.code === 'citation_quote_invalid').length,
+        identityIssueCount: error.issues.filter((issue) => issue.code === 'identity_mismatch').length,
+        pageIssueCount: error.issues.filter((issue) => issue.code === 'citation_page_invalid').length,
       }))
     }
     if (error instanceof EvidenceBudgetExceededError) {
       return withStage(createContractError('budget_exceeded', 'budget', false, 'analysis.evidence.budget_exceeded'))
+    }
+    if (error instanceof EvidenceGraphCapacityExceededError) {
+      return withStage(createContractError('budget_exceeded', 'budget', false, 'analysis.evidence.budget_exceeded', {
+        dimension: `evidence_graph_${error.dimension}`, actual: error.actual, maximum: error.maximum,
+      }))
     }
     const providerError = providerContractError(error, stage)
     if (providerError) return providerError

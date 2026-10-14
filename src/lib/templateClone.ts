@@ -1,4 +1,4 @@
-import type { DocData, MindNodeData } from '../types'
+import type { DocData, MindNodeData, SourceDocument } from '../types'
 
 const uid = () =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -13,7 +13,9 @@ const uid = () =>
  * - 折叠状态重置为展开；createdAt/updatedAt 刷新。
  * 输入文档不被修改。返回克隆文档与 blobId 重映射表。
  */
-export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<string, string> } {
+export function cloneFromTemplate(src: DocData, sourceDocuments: readonly SourceDocument[] = [], options: { preserveCollapsed?: boolean } = {}): { doc: DocData; blobMap: Map<string, string>; sources: SourceDocument[] } {
+  const targetDocId = uid()
+  const sourceMap = new Map(sourceDocuments.map((source) => [source.id, uid()]))
   const idMap = new Map<string, string>()
   for (const oldId of Object.keys(src.nodes)) idMap.set(oldId, uid())
   const blobMap = new Map<string, string>()
@@ -55,7 +57,7 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
       id,
       parent: n.parent ? (idMap.get(n.parent) ?? null) : null,
       children: n.children.map((c) => idMap.get(c)).filter((x): x is string => !!x),
-      collapsed: false,
+      collapsed: options.preserveCollapsed ? n.collapsed : false,
       ...(links && links.length ? { links } : {}),
       ...(images && images.length ? { images } : {}),
       ...(attachments && attachments.length ? { attachments } : {}),
@@ -81,7 +83,12 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
         .map((r) => {
           const from = idMap.get(r.from)
           const to = idMap.get(r.to)
-          return from && to ? { ...r, from, to } : null
+          const sourceRefs = r.sourceRefs?.map((reference) => {
+            const sourceId = sourceMap.get(reference.sourceId)
+            if (!sourceId) throw new Error('克隆关系引用时缺少原文来源，请先载入完整文档。')
+            return { ...reference, sourceId }
+          })
+          return from && to ? { ...r, id: uid(), from, to, ...(sourceRefs === undefined ? {} : { sourceRefs }) } : null
         })
         .filter((r): r is NonNullable<typeof r> => r !== null)
     : undefined
@@ -89,6 +96,7 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
     ? src.summaries
         .map((s) => ({
           ...s,
+          id: uid(),
           members: s.members
             .map((m) => idMap.get(m))
             .filter((m): m is string => m !== undefined),
@@ -99,6 +107,7 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
     ? src.boundaryBoxes
         .map((b) => ({
           ...b,
+          id: uid(),
           members: b.members
             .map((m) => idMap.get(m))
             .filter((m): m is string => m !== undefined),
@@ -110,7 +119,7 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
   return {
     doc: {
       ...src,
-      id: uid(),
+      id: targetDocId,
       rootId: idMap.get(src.rootId) ?? src.rootId,
       nodes,
       relations: remappedRelations,
@@ -120,6 +129,17 @@ export function cloneFromTemplate(src: DocData): { doc: DocData; blobMap: Map<st
       updatedAt: now,
     },
     blobMap,
+    sources: sourceDocuments.map((source) => {
+      const sourceId = sourceMap.get(source.id)
+      if (!sourceId) throw new Error('克隆原文时缺少来源 ID 映射')
+      return {
+        ...structuredClone(source), id: sourceId, docId: targetDocId,
+        anchors: source.anchors.flatMap((anchor) => {
+          const nodeId = idMap.get(anchor.nodeId)
+          return nodeId ? [{ ...anchor, nodeId }] : []
+        }),
+      }
+    }),
   }
 }
 

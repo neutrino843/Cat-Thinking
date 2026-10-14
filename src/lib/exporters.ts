@@ -11,6 +11,7 @@ import { sanitizeHtml } from './sanitizeHtml'
 import { jpegToPdf } from './pdf'
 import { getBlob, listSourcesByDoc } from '../store/db'
 import { getCachedBlobURL } from './blobUrl'
+import { parseRelationSourceReferences, requireRelationSources } from './relationSources'
 
 const LAST_BACKUP_KEY = 'msz.lastBackupAt'
 
@@ -347,7 +348,11 @@ export function validateDoc(d: unknown): DocData {
       if (!nodeMap[rk.to]) throw new Error(`relation.to 指向不存在的节点 ${rk.to}`)
       if (rk.label !== undefined && typeof rk.label !== 'string') throw new Error('relation.label 必须是字符串')
       if (rk.color !== undefined && typeof rk.color !== 'string') throw new Error('relation.color 必须是字符串')
-      rels.push(rk as unknown as Relation)
+      const sourceRefs = parseRelationSourceReferences(rk.sourceRefs)
+      rels.push({ id: rk.id, from: rk.from, to: rk.to,
+        ...(rk.label === undefined ? {} : { label: rk.label as string }),
+        ...(rk.color === undefined ? {} : { color: rk.color as string }),
+        ...(sourceRefs === undefined ? {} : { sourceRefs }) })
     }
     relations = rels
   }
@@ -428,6 +433,7 @@ export function parseImported(
   const blobs = (o._blobs as Record<string, { dataURL: string; type: string; name?: string }>) ?? {}
   const doc = validateDoc(d)
   const sources = validateImportedSources(o._sources, doc)
+  requireRelationSources(doc, sources)
   // _blobs 不进入文档本体
   delete (doc as unknown as Record<string, unknown>)._blobs
   delete (doc as unknown as Record<string, unknown>)._sources
@@ -454,6 +460,9 @@ function validateImportedSources(raw: unknown, doc: DocData): SourceDocument[] {
       throw new Error(`来源 ${source.id} 的文本无效或超过限制`)
     }
     const sourceText = source.text
+    if (source.contentHash !== undefined && (typeof source.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(source.contentHash))) {
+      throw new Error(`来源 ${source.id} 的内容 hash 无效`)
+    }
     if (!Array.isArray(source.anchors)) throw new Error(`来源 ${source.id} 的 anchors 必须是数组`)
     const anchors = source.anchors.map((anchor, anchorIndex) => {
       if (!anchor || typeof anchor !== 'object') throw new Error(`来源 ${source.id} 的锚点 ${anchorIndex + 1} 非法`)
@@ -528,6 +537,7 @@ function validateImportedSources(raw: unknown, doc: DocData): SourceDocument[] {
       importedAt,
       extractor: typeof source.extractor === 'string' ? source.extractor : 'json-import-v1',
       text: sourceText,
+      ...(source.contentHash === undefined ? {} : { contentHash: source.contentHash as string }),
       charCount: sourceText.length,
       anchors,
       ...(locators === undefined ? {} : { locators }),

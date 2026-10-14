@@ -11,6 +11,7 @@ export interface EvidenceGeneratorRoute {
   readonly promptVersion: string
 }
 export interface EvidenceMapInput {
+  readonly tenantId: string
   readonly runId: string
   readonly docId: string
   readonly locale: string

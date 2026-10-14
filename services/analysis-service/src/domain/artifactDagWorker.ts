@@ -17,6 +17,7 @@ import {
 } from '@cat-thinking/analysis-contracts'
 import { createContractError } from '../errors.js'
 import { providerContractError } from '../providers/providerContractError.js'
+import { isMindMapHierarchyPromptVersion, isNodeGroundingPromptVersion } from './artifactPolicyVersions.js'
 import { ArtifactBudgetExceededError, planArtifactBudget } from './artifactBudget.js'
 import {
   ArtifactValidationError,
@@ -55,6 +56,7 @@ export interface ArtifactDagWorkerOptions {
   readonly concurrency?: number
   readonly now?: () => number
   readonly createId?: () => string
+  readonly canProcessRun?: (run: AnalysisRunV1) => boolean
 }
 
 export type ArtifactDagResult =
@@ -79,6 +81,7 @@ export class ArtifactDagWorker {
   private readonly concurrency: number
   private readonly now: () => number
   private readonly createId: () => string
+  private readonly canProcessRun: (run: AnalysisRunV1) => boolean
 
   constructor(options: ArtifactDagWorkerOptions) {
     if (!Number.isInteger(options.leaseMs) || options.leaseMs <= 0) {
@@ -95,6 +98,7 @@ export class ArtifactDagWorker {
     this.concurrency = concurrency
     this.now = options.now ?? Date.now
     this.createId = options.createId ?? randomUUID
+    this.canProcessRun = options.canProcessRun ?? (() => true)
   }
 
   async runOnce(
@@ -104,6 +108,7 @@ export class ArtifactDagWorker {
     signal: AbortSignal,
   ): Promise<ArtifactDagResult> {
     const initial = await this.requireRun(tenantId, runId)
+    if (!this.canProcessRun(initial)) return { outcome: 'stopped', run: initial }
     if (completedStatuses.has(initial.status)) return { outcome: 'already_complete', run: initial }
     if (stoppedStatuses.has(initial.status)) return { outcome: 'stopped', run: initial }
     if (initial.status !== 'generating') return { outcome: 'stopped', run: initial }
@@ -190,6 +195,9 @@ export class ArtifactDagWorker {
       try {
         const budget = planArtifactBudget(item.kind, run.request.options)
         const output = await this.generator.generate({
+          tenantId,
+          run,
+          attempt: item.attempt,
           runId,
           docId: run.docId,
           kind: item.kind,
@@ -310,6 +318,8 @@ export class ArtifactDagWorker {
           graph,
           outline,
           maxArtifactBytes: budget.maxArtifactBytes,
+          enforceOutlineHierarchy: isMindMapHierarchyPromptVersion(output.route.promptVersion),
+          enforceNodeGrounding: isNodeGroundingPromptVersion(output.route.promptVersion),
         })
       } catch (validationError) {
         error = this.artifactError(validationError, generated.kind)
@@ -332,6 +342,12 @@ export class ArtifactDagWorker {
         [generated.kind]: artifact && descriptor
           ? { status: 'succeeded', attempt: state.attempt, artifactId: descriptor.id, updatedAt: now }
           : { status: 'failed', attempt: state.attempt, error: failureError, updatedAt: now },
+      }
+      const dependent = artifactStates.mindmap
+      if (generated.kind === 'outline' && artifact && dependent?.status === 'failed'
+        && dependent.error?.code === 'dependency_failed') {
+        // Restore eligibility only: a separate explicit retry increments the attempt.
+        artifactStates.mindmap = { ...dependent, error: { ...dependent.error, retryable: true }, updatedAt: now }
       }
       const requestedStates = run.request.artifacts.map((kind) => {
         const requestedState = artifactStates[kind]

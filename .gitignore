@@ -2,6 +2,8 @@ node_modules/
 dist/
 coverage/
 coverage-postgres/
+coverage-provider-audit/
+coverage-local-artifacts/
 *.log
 .env
 .env.*
@@ -12,6 +14,7 @@ coverage-postgres/
 test-results/
 playwright-report/
 playwright/.cache/
+.browser-test-runtime/
 
 # 阶段/过程文档：本地保留，不纳入版本库
 CODE_AUDIT_REPORT.md

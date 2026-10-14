@@ -17,11 +17,14 @@ export default defineConfig({
       include: [
         'src/lib/**',
         'src/analysis/**',
+        'src/learning/**',
         'src/store/docStore.ts',
         'packages/analysis-contracts/src/**',
         'services/analysis-service/src/**',
       ],
       exclude: [
+        'src/learning/testStore.ts',
+        'src/learning/testFixtures.ts',
         'src/lib/measure.ts',
         'services/analysis-service/src/index.ts',
         'services/analysis-service/src/infrastructure/postgres/**',

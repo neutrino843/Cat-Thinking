@@ -8,11 +8,14 @@ export default tseslint.config(
   {
     ignores: [
       '**/dist/**',
+      '**/.browser-test-runtime/**',
       'node_modules/**',
       'playwright-report/**',
       'test-results/**',
       'coverage/**',
       'coverage-postgres/**',
+      'coverage-provider-audit/**',
+      'coverage-local-artifacts/**',
     ],
   },
   js.configs.recommended,
@@ -28,6 +31,7 @@ export default tseslint.config(
       'vitest.config.ts',
       'vitest.postgres.config.ts',
       'playwright.config.ts',
+      'playwright.analysis.config.ts',
     ],
     languageOptions: {
       globals: { ...globals.browser },

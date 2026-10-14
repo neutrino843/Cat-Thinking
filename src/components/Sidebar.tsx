@@ -7,6 +7,7 @@ import {
   deleteTemplate,
   getBlob,
   listDocs,
+  listSourcesByDoc,
   listTemplates,
   listTrash,
   loadDoc,
@@ -16,12 +17,14 @@ import {
   restoreDoc,
   saveDoc,
   saveDocumentBundle,
+  saveImportedDocumentBundle,
   type CustomTemplate,
   type TrashMeta,
 } from '../store/db'
 import { buildDoc, findTpl, TEMPLATES } from '../data/templates'
 import { cloneDocBlobs, cloneFromTemplate } from '../lib/templateClone'
 import { parseImported } from '../lib/exporters'
+import { decodeImportedBlobs } from '../lib/importedBlobs'
 import { exportTemplate, importTemplateFile } from '../lib/templateIO'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
@@ -140,12 +143,13 @@ export default function Sidebar() {
   }
 
   const createFromCustom = async (t: CustomTemplate) => {
-    const { doc: d, blobMap } = cloneFromTemplate(t.doc)
+    const sourceDocuments = await listSourcesByDoc(t.doc.id)
+    const { doc: d, blobMap, sources } = cloneFromTemplate(t.doc, sourceDocuments)
     d.title = t.name
     await cloneDocBlobs(t.doc.id, d.id, blobMap, getBlob, (id, docId, blob, nodeId) =>
       putBlob(id, docId, blob, nodeId),
     )
-    await saveDoc(d)
+    await saveDocumentBundle(d, sources)
     useDoc.getState().openDoc(d)
     emitDocsChanged()
     setMenuOpen(false)
@@ -222,18 +226,8 @@ export default function Sidebar() {
 
   const importFile = async (file: File) => {
     try {
-      const { doc: d, blobs, sources } = parseImported(await file.text(), file.name)
-      await saveDocumentBundle(d, sources)
-      // M7-P3：把 JSON 中的 _blobs dataURL 还原为 Blob 并写入 IndexedDB
-      for (const [blobId, meta] of Object.entries(blobs)) {
-        try {
-          const res = await fetch(meta.dataURL)
-          const blob = await res.blob()
-          await putBlob(blobId, d.id, blob)
-        } catch {
-          /* 单个 blob 还原失败不阻断导入 */
-        }
-      }
+      const imported = parseImported(await file.text(), file.name)
+      const d = await saveImportedDocumentBundle(imported.doc, imported.sources, decodeImportedBlobs(imported.blobs))
       // 导入备份可能与已打开标签同 id；先摘除旧会话，避免 M11 优先恢复陈旧内存副本。
       const state = useDoc.getState()
       if (state.tabs.includes(d.id)) state.closeTab(d.id)

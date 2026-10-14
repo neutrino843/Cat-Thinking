@@ -16,9 +16,11 @@ vi.mock('../lib/exporters', async () => {
 })
 
 vi.mock('../store/db', () => ({
+  BLOB_QUOTA_BYTES: 64 * 1024 * 1024,
   getBlob: vi.fn(async () => undefined),
   putBlob: vi.fn(async () => {}),
   saveTemplate: vi.fn(async () => 'tpl-new-id'),
+  listSourcesByDoc: vi.fn(async () => []),
 }))
 
 describe('templateIO · .msz-tpl 往返', () => {
@@ -52,7 +54,7 @@ describe('templateIO · .msz-tpl 往返', () => {
 
     await importTemplateFile(file)
 
-    expect(db.saveTemplate).toHaveBeenCalledWith('导入模板', expect.objectContaining({ rootId: doc.rootId }))
+    expect(db.saveTemplate).toHaveBeenCalledWith('导入模板', expect.objectContaining({ rootId: doc.rootId }), [], new Map())
     // 无 _blobs 时 putBlob 不被调用
     expect(db.putBlob).not.toHaveBeenCalled()
   })

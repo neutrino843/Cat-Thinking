@@ -7,8 +7,11 @@ RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY packages/analysis-contracts packages/analysis-contracts
 COPY services/analysis-service services/analysis-service
+COPY scripts/write-analysis-build.mjs scripts/write-analysis-build.mjs
+ARG ANALYSIS_BUILD_COMMIT
 RUN npm run build --workspace @cat-thinking/analysis-contracts \
-    && npm run build --workspace @cat-thinking/analysis-service
+    && npm run build --workspace @cat-thinking/analysis-service \
+    && node scripts/write-analysis-build.mjs
 
 FROM node:24.13.1-bookworm-slim@sha256:a81a03dd965b4052269a57fac857004022b522a4bf06e7a739e25e18bce45af2 AS production-dependencies
 WORKDIR /app
@@ -22,6 +25,7 @@ ENV NODE_ENV=production
 ENV ANALYSIS_HOST=0.0.0.0
 ENV ANALYSIS_PORT=8787
 WORKDIR /app
+COPY --from=build --chown=node:node /app/package-lock.json ./package-lock.json
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=production-dependencies --chown=node:node /app/packages/analysis-contracts/package.json ./packages/analysis-contracts/package.json
 COPY --from=production-dependencies --chown=node:node /app/services/analysis-service/package.json ./services/analysis-service/package.json

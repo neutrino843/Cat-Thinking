@@ -18,6 +18,7 @@ export interface ProviderInvocationPolicy {
   readonly staleAfterMs: number
   readonly maxRunEstimatedTokens: number
   readonly maxRunEstimatedCostMicros: number
+  readonly maxRunInvocations?: number
 }
 
 export const DEFAULT_PROVIDER_INVOCATION_POLICY: ProviderInvocationPolicy = Object.freeze({
@@ -45,17 +46,20 @@ export interface ProviderInvocationInput {
   readonly nodeKey: string
   readonly runAttempt: number
   readonly request: ModelRequest
+  readonly expectedRoute?: ProviderInvocationRoute
+}
+
+export interface ProviderInvocationRoute {
+  readonly providerId: string
+  readonly modelId: string
+  readonly profileVersion: string
+  readonly promptVersion: string
 }
 
 export interface ProviderInvocationResult {
   readonly response: ModelResponse
   readonly invocation: StoredProviderInvocation
-  readonly route: Readonly<{
-    providerId: string
-    modelId: string
-    profileVersion: string
-    promptVersion: string
-  }>
+  readonly route: Readonly<ProviderInvocationRoute>
 }
 
 export type ProviderInvocationCoordinatorErrorKind =
@@ -65,7 +69,9 @@ export type ProviderInvocationCoordinatorErrorKind =
   | 'outcome_unknown'
   | 'already_succeeded'
   | 'already_failed'
+  | 'route_mismatch'
   | 'ledger_conflict'
+  | 'release_not_ready'
 
 export class ProviderInvocationCoordinatorError extends Error {
   constructor(
@@ -73,7 +79,7 @@ export class ProviderInvocationCoordinatorError extends Error {
     readonly retryable: boolean,
     readonly safeCode: string,
     readonly details?: Readonly<{
-      dimension?: 'tokens' | 'cost'
+      dimension?: 'tokens' | 'cost' | 'invocations'
       actual?: number
       maximum?: number
       providerId?: string
@@ -96,6 +102,7 @@ interface CircuitPermit {
 }
 
 export interface ProviderInvocationCoordinatorOptions {
+  readonly canInvoke?: () => Promise<boolean>
   readonly router: ProviderRouter
   readonly ledger: ProviderInvocationLedger
   readonly estimateCostMicros: (input: ProviderCostEstimateInput) => number
@@ -122,6 +129,7 @@ const defaultDelay = (milliseconds: number, signal: AbortSignal): Promise<void> 
     reject(new ProviderGatewayError({
       providerId: 'coordinator',
       kind: 'aborted',
+      acceptance: 'not_accepted',
       retryable: false,
       safeCode: 'caller_aborted',
     }))
@@ -132,6 +140,7 @@ const defaultDelay = (milliseconds: number, signal: AbortSignal): Promise<void> 
     reject(new ProviderGatewayError({
       providerId: 'coordinator',
       kind: 'aborted',
+      acceptance: 'not_accepted',
       retryable: false,
       safeCode: 'caller_aborted',
     }))
@@ -155,6 +164,7 @@ const requestInputTokenUpperBound = (request: ModelRequest): number => {
 }
 
 export class ProviderInvocationCoordinator {
+  private readonly canInvoke?: () => Promise<boolean>
   private readonly router: ProviderRouter
   private readonly ledger: ProviderInvocationLedger
   private readonly estimateCostMicros: (input: ProviderCostEstimateInput) => number
@@ -177,7 +187,9 @@ export class ProviderInvocationCoordinator {
     positiveInteger(policy.staleAfterMs, 'staleAfterMs', 86_400_000)
     positiveInteger(policy.maxRunEstimatedTokens, 'maxRunEstimatedTokens')
     nonNegativeInteger(policy.maxRunEstimatedCostMicros, 'maxRunEstimatedCostMicros')
+    if (policy.maxRunInvocations !== undefined) positiveInteger(policy.maxRunInvocations, 'maxRunInvocations')
     this.router = options.router
+    this.canInvoke = options.canInvoke
     this.ledger = options.ledger
     this.estimateCostMicros = options.estimateCostMicros
     this.policy = Object.freeze({ ...policy })
@@ -188,8 +200,17 @@ export class ProviderInvocationCoordinator {
 
   async generate(input: ProviderInvocationInput, signal: AbortSignal): Promise<ProviderInvocationResult> {
     const selection = this.router.route(input.request.role, input.request.qualityProfile)
+    if (input.expectedRoute && !this.routeMatches(input.expectedRoute, selection)) {
+      throw new ProviderInvocationCoordinatorError(
+        'route_mismatch',
+        false,
+        'provider_route_mismatch',
+        { providerId: selection.provider.id },
+      )
+    }
     this.validateRequestAgainstRoute(input.request, selection)
     if (signal.aborted) throw this.aborted(selection.provider.id)
+    await this.assertCanInvoke()
     const permit = this.acquireCircuitPermit(selection.provider.id)
     let callStarted = false
     try {
@@ -218,6 +239,7 @@ export class ProviderInvocationCoordinator {
         estimatedCostMicros,
         maxRunEstimatedTokens: this.policy.maxRunEstimatedTokens,
         maxRunEstimatedCostMicros: this.policy.maxRunEstimatedCostMicros,
+        maxRunInvocations: this.policy.maxRunInvocations,
         staleAfterMs: this.policy.staleAfterMs,
         now: this.now(),
       })
@@ -254,6 +276,11 @@ export class ProviderInvocationCoordinator {
   ): Promise<ProviderInvocationResult> {
     let attempts = 0
     while (attempts < this.policy.maxAttempts) {
+      try { await this.assertCanInvoke() } catch (error) {
+        await this.completeFailure(input, attempts, error)
+        this.releaseUnusedCircuitPermit(permit)
+        throw error
+      }
       attempts += 1
       try {
         const response = await selection.provider.generate(input.request, signal)
@@ -296,13 +323,16 @@ export class ProviderInvocationCoordinator {
           && error.kind === 'invalid_response'
           && error.safeCode === 'reported_output_tokens_exceeded'
         ) throw error
-        const circuitOpened = this.recordCircuitFailure(permit, error)
-        if (!this.shouldRetry(error, attempts) || circuitOpened) {
-          await this.completeFailure(input, attempts, error)
-          throw error
+        const failure = error instanceof ProviderGatewayError || error instanceof ProviderInvocationCoordinatorError
+          ? error : new ProviderGatewayError({ providerId: selection.provider.id,
+            kind: 'outcome_unknown', retryable: false, safeCode: 'unexpected_transport_failure' })
+        const circuitOpened = this.recordCircuitFailure(permit, failure)
+        if (!this.shouldRetry(failure, attempts) || circuitOpened) {
+          await this.completeFailure(input, attempts, failure)
+          throw failure
         }
         try {
-          await this.delay(this.retryDelay(error, attempts), signal)
+          await this.delay(this.retryDelay(failure, attempts), signal)
         } catch (delayError) {
           await this.completeFailure(input, attempts, delayError)
           throw delayError
@@ -312,6 +342,12 @@ export class ProviderInvocationCoordinator {
     throw new Error('provider invocation retry loop exhausted unexpectedly')
   }
 
+  private async assertCanInvoke(): Promise<void> {
+    if (!this.canInvoke) return
+    try { if (await this.canInvoke()) return } catch { /* Fail closed without propagating configuration details. */ }
+    throw new ProviderInvocationCoordinatorError('release_not_ready', false, 'release_gate_closed')
+  }
+
   private async completeFailure(
     input: ProviderInvocationInput,
     attempts: number,
@@ -319,17 +355,21 @@ export class ProviderInvocationCoordinator {
     response?: ModelResponse,
   ): Promise<void> {
     const providerError = error instanceof ProviderGatewayError ? error : undefined
+    const usage = response?.usage ?? providerError?.usage
+    const outcomeUnknown = attempts > 0 && !(error instanceof ProviderInvocationCoordinatorError)
+      && (!providerError || providerError.acceptance === 'unknown'
+        || providerError.acceptance === 'accepted' && !usage)
     const completed = await this.ledger.completeProviderInvocation({
       tenantId: input.tenantId,
       invocationId: input.request.invocationId,
       transportAttempts: attempts,
       now: this.now(),
-      result: 'failed',
+      result: outcomeUnknown ? 'outcome_unknown' : 'failed',
       failureKind: providerError?.kind,
-      safeCode: providerError?.safeCode ?? 'unexpected_error',
-      actualInputTokens: response?.usage.inputTokens,
-      actualOutputTokens: response?.usage.outputTokens,
-      providerRequestId: response?.providerRequestId,
+      safeCode: providerError?.safeCode ?? (error instanceof ProviderInvocationCoordinatorError ? error.safeCode : 'unexpected_error'),
+      actualInputTokens: usage?.inputTokens,
+      actualOutputTokens: usage?.outputTokens,
+      providerRequestId: response?.providerRequestId ?? providerError?.providerRequestId,
     })
     if (completed.outcome !== 'updated') {
       throw this.ledgerConflict(providerError?.providerId)
@@ -344,6 +384,13 @@ export class ProviderInvocationCoordinator {
       throw new RangeError('provider input exceeds routed provider character limit')
     }
     positiveInteger(request.maxOutputTokens, 'maxOutputTokens', selection.provider.capabilities.maxOutputTokens)
+  }
+
+  private routeMatches(expected: ProviderInvocationRoute, selection: ProviderRouteSelection): boolean {
+    return expected.providerId === selection.provider.id
+      && expected.modelId === selection.provider.modelId
+      && expected.profileVersion === selection.provider.profileVersion
+      && expected.promptVersion === selection.profile.promptVersion
   }
 
   private existingInvocationError(invocation: StoredProviderInvocation): ProviderInvocationCoordinatorError {
@@ -363,6 +410,7 @@ export class ProviderInvocationCoordinator {
     return attempts < this.policy.maxAttempts
       && error instanceof ProviderGatewayError
       && error.retryable
+      && error.acceptance === 'not_accepted'
       && RETRYABLE_FAILURE_KINDS.includes(error.kind as (typeof RETRYABLE_FAILURE_KINDS)[number])
   }
 
@@ -436,7 +484,7 @@ export class ProviderInvocationCoordinator {
   }
 
   private isCircuitFailure(kind: ProviderFailureKind): boolean {
-    return kind === 'timeout' || kind === 'rate_limited' || kind === 'unavailable'
+    return kind === 'timeout' || kind === 'rate_limited' || kind === 'unavailable' || kind === 'outcome_unknown'
   }
 
   private ledgerConflict(providerId?: string): ProviderInvocationCoordinatorError {
@@ -452,6 +500,7 @@ export class ProviderInvocationCoordinator {
     return new ProviderGatewayError({
       providerId,
       kind: 'aborted',
+      acceptance: 'not_accepted',
       retryable: false,
       safeCode: 'caller_aborted',
     })

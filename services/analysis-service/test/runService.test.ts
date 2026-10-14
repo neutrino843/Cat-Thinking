@@ -185,7 +185,7 @@ describe('durable run service with the reference store', () => {
     await expectServiceError(service.listEvents('tenant-1', created.run.id, 'unknown-event'), 409, 'conflict')
   })
 
-  it('cancels once, rejects stale changes, and allows only a cancelled artifact to retry', async () => {
+  it('cancels once and rejects retries that would reactivate a cancelled run', async () => {
     const { service } = setup()
     const created = await service.createRun('tenant-1', makeRequest())
     const cancelled = await service.cancel('tenant-1', created.run.id, 1)
@@ -193,13 +193,11 @@ describe('durable run service with the reference store', () => {
 
     expect(cancelled).toMatchObject({ accepted: true, revision: 2 })
     expect(duplicate).toMatchObject({ accepted: false, revision: 2 })
-    const retried = await service.retryArtifact('tenant-1', created.run.id, 'summary', 2)
+    await expectServiceError(service.retryArtifact('tenant-1', created.run.id, 'summary', 2), 409, 'conflict')
     const run = await service.getRun('tenant-1', created.run.id)
-    expect(retried).toMatchObject({ accepted: true, revision: 3, kind: 'summary' })
     expect(run).toMatchObject({
-      status: 'generating',
-      stage: 'summary',
-      artifactStates: { summary: { status: 'pending', attempt: 1 } },
+      status: 'cancelled', revision: 2,
+      artifactStates: { summary: { status: 'cancelled', attempt: 0 } },
     })
     await expectServiceError(service.retryArtifact('tenant-1', created.run.id, 'summary', 3), 409, 'conflict')
     await expectServiceError(service.retryArtifact('tenant-1', created.run.id, 'mindmap', 3), 409, 'conflict')

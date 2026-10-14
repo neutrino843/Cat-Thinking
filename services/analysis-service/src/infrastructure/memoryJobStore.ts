@@ -9,6 +9,7 @@ import {
   evidenceGraphSchema,
   sourceReceiptSchema,
   uploadSourcePartSchema,
+  usageSchema,
   type AnalysisEventV1,
   type AnalysisRunV1,
   type ArtifactDescriptorV1,
@@ -29,6 +30,8 @@ import {
   type LeaseRequest,
   type RunTransition,
   type RunTransitionResult,
+  type RetryTransitionContext,
+  type RequestKeyLookup,
   type StoreSourcePartInput,
   type StoreEvidenceCardInput,
   type StoredEvidenceCard,
@@ -38,6 +41,7 @@ import {
   type StoredSourceUpload,
 } from '../domain/jobStore.js'
 import { validateArtifactDescriptor } from '../domain/artifactValidator.js'
+import { abandonmentTransition } from '../domain/abandonment.js'
 import {
   assertProviderInvocationCompletion,
   assertProviderInvocationReservation,
@@ -117,8 +121,48 @@ const sourceView = (source: MutableSourceUpload): StoredSourceUpload => ({
 })
 
 export class InMemoryJobStore implements JobStore {
+  /** Optional internal personal scope lets the memory profile fixture share this exact query policy. */
+  async listDispatchableRuns(now: number, limit: number, profileScope?: {
+    readonly profileId: string; readonly boundRuns: readonly ExpiredRunReference[]
+  }) {
+    if (!Number.isSafeInteger(limit) || limit <= 0) throw new RangeError('limit must be positive')
+    const bindings = profileScope ? new Set(profileScope.boundRuns.map((ref) => runKey(ref.tenantId, ref.runId))) : undefined
+    return [...this.runs.values()].filter((record) => !record.contentDeleted && (record.run.expiresAt ?? Infinity) > now
+      && (profileScope ? record.run.request.providerProfileId === profileScope.profileId && bindings?.has(runKey(record.tenantId, record.run.id)) === true
+        : record.run.request.providerProfileId === undefined)
+      && ['queued', 'planning', 'mapping', 'merging', 'generating'].includes(record.run.status)
+      && (this.leases.get(leaseKey(record.tenantId, record.run.id, 'dispatcher:run'))?.expiresAt ?? 0) <= now)
+      // An expired, deliberately retained lease records a recent dispatch
+      // attempt. Ranking it after untouched work prevents large incompatible
+      // backlogs from returning to the front each time their cooldown expires.
+      .sort((a, b) => this.dispatchAttemptedAt(a) - this.dispatchAttemptedAt(b) || a.run.id.localeCompare(b.run.id))
+      .slice(0, limit).map((record) => ({ tenantId: record.tenantId, runId: record.run.id }))
+  }
+
+  private dispatchAttemptedAt(record: StoredRunRecord): number {
+    return Math.max(record.run.updatedAt, this.leases.get(leaseKey(record.tenantId, record.run.id, 'dispatcher:run'))?.expiresAt ?? 0)
+  }
+
+  async getRunLedgerUsage(tenantId: string, runId: string) {
+    if (!this.runs.has(runKey(tenantId, runId))) return undefined
+    const rows = [...this.providerInvocations.values()].filter((row) => row.tenantId === tenantId && row.runId === runId)
+    return {
+      invocationCount: rows.length,
+      unresolvedCount: rows.filter((row) => row.status === 'running' || row.status === 'outcome_unknown').length,
+      estimatedInputTokens: rows.reduce((sum, row) => sum + row.estimatedInputTokens, 0),
+      reservedOutputTokens: rows.reduce((sum, row) => sum + row.reservedOutputTokens, 0),
+      usage: usageSchema.parse({
+        inputTokens: rows.reduce((sum, row) => sum + (row.actualInputTokens ?? 0), 0),
+        outputTokens: rows.reduce((sum, row) => sum + (row.actualOutputTokens ?? 0), 0),
+        estimatedCostMicros: rows.reduce((sum, row) => sum + row.estimatedCostMicros, 0),
+        currency: 'USD' as const,
+      }),
+    }
+  }
   private readonly runs = new Map<string, StoredRunRecord>()
   private readonly requestKeys = new Map<string, string>()
+  // Minimal identity barrier; retention cleanup never removes abandoned request keys.
+  private readonly abandonedRequests = new Map<string, { runId?: string }>()
   private readonly sources = new Map<string, MutableSourceUpload>()
   private readonly leases = new Map<string, JobLease>()
   private readonly evidenceCache = new Map<string, StoredEvidenceCard>()
@@ -138,6 +182,9 @@ export class InMemoryJobStore implements JobStore {
   ): Promise<Readonly<{ run: AnalysisRunV1; reused: boolean; event?: AnalysisEventV1 }>> {
     const run = cloneRun(runInput)
     const event = cloneEvent(eventInput)
+    if (this.abandonedRequests.has(requestKey(tenantId, run.requestKey))) {
+      throw new JobStoreConflictError('request key abandoned')
+    }
     const existingRunId = this.requestKeys.get(requestKey(tenantId, run.requestKey))
     if (existingRunId) {
       const existing = this.runs.get(runKey(tenantId, existingRunId))
@@ -162,16 +209,60 @@ export class InMemoryJobStore implements JobStore {
     return record ? cloneRun(record.run) : undefined
   }
 
+  async lookupRunByRequestKey(tenantId: string, value: string): Promise<RequestKeyLookup> {
+    const key = requestKey(tenantId, value)
+    const abandoned = this.abandonedRequests.get(key)
+    if (abandoned) return { status: 'abandoned', ...abandoned }
+    const id = this.requestKeys.get(key)
+    const record = id ? this.runs.get(runKey(tenantId, id)) : undefined
+    return record ? { status: 'found', run: cloneRun(record.run) } : { status: 'absent' }
+  }
+
+  async abandonRequest(tenantId: string, value: string, now: number): Promise<Readonly<{ runId?: string }>> {
+    const key = requestKey(tenantId, value)
+    const existing = this.abandonedRequests.get(key)
+    if (existing) return { ...existing }
+    const runId = this.requestKeys.get(key)
+    const record = runId ? this.runs.get(runKey(tenantId, runId)) : undefined
+    // No await between the barrier and content removal: create/abandon share one JS turn.
+    this.abandonedRequests.set(key, { runId })
+    if (record && runId) {
+      for (const source of [...this.sources.keys()]) {
+        if (source.startsWith(`${tenantId}\u0000${runId}\u0000`)) this.sources.delete(source)
+      }
+      this.deleteEvidenceForRun(tenantId, runId)
+      this.deleteArtifactsForRun(tenantId, runId)
+      record.contentDeleted = true
+      const transition = abandonmentTransition(record.run, (record.events.at(-1)?.sequence ?? -1) + 1, now)
+      if (transition) { record.run = transition.run; record.events.push(transition.event) }
+    }
+    return { runId }
+  }
+
   async transitionRun(
     tenantId: string,
     runId: string,
     expectedRevision: number,
     build: (current: AnalysisRunV1, nextSequence: number) => RunTransition,
+    guard?: (current: AnalysisRunV1, context: RetryTransitionContext) => void,
   ): Promise<RunTransitionResult> {
     const record = this.runs.get(runKey(tenantId, runId))
     if (!record) return { outcome: 'missing' }
     if (record.run.revision !== expectedRevision) {
       return { outcome: 'revision_conflict', run: cloneRun(record.run) }
+    }
+    if (guard) {
+      const outline = this.artifacts.get(artifactKey(tenantId, runId, 'outline'))
+      guard(cloneRun(record.run), {
+        contentDeleted: record.contentDeleted,
+        graph: this.evidenceGraphs.get(runKey(tenantId, runId)),
+        outline: outline ? cloneArtifact(outline) : undefined,
+        sourceSnapshotReady: record.run.request.manifest.sources.every((snapshot) => {
+          const source = this.sources.get(sourceKey(tenantId, runId, snapshot.sourceId))
+          return source?.complete && source.computedHash === snapshot.contentHash
+        }),
+        invocations: [...this.providerInvocations.values()].filter((row) => row.tenantId === tenantId && row.runId === runId).map(cloneProviderInvocation),
+      })
     }
     const nextSequence = (record.events.at(-1)?.sequence ?? -1) + 1
     const transition = build(cloneRun(record.run), nextSequence)
@@ -490,12 +581,17 @@ export class InMemoryJobStore implements JobStore {
 
     let reservedTokens = 0
     let reservedCost = 0
+    let invocationCount = 0
     for (const candidate of this.providerInvocations.values()) {
       if (candidate.tenantId !== input.tenantId || candidate.runId !== input.runId) continue
+      invocationCount += 1
       reservedTokens += candidate.estimatedInputTokens + candidate.reservedOutputTokens
       reservedCost += candidate.estimatedCostMicros
     }
     const requestedTokens = input.estimatedInputTokens + input.reservedOutputTokens
+    if (input.maxRunInvocations !== undefined && invocationCount >= input.maxRunInvocations) {
+      return { outcome: 'budget_exceeded', dimension: 'invocations', actual: invocationCount + 1, maximum: input.maxRunInvocations }
+    }
     const totalTokens = reservedTokens + requestedTokens
     if (!Number.isSafeInteger(totalTokens) || totalTokens > input.maxRunEstimatedTokens) {
       return {
@@ -544,31 +640,37 @@ export class InMemoryJobStore implements JobStore {
     const key = invocationKey(input.tenantId, input.invocationId)
     const existing = this.providerInvocations.get(key)
     if (!existing) return { outcome: 'missing' }
-    if (existing.status !== 'running') {
+    if (existing.status !== 'running' && existing.status !== 'outcome_unknown') {
       return { outcome: 'state_conflict', invocation: cloneProviderInvocation(existing) }
     }
+    const actualInputTokens = input.actualInputTokens === undefined ? existing.actualInputTokens
+      : Math.max(existing.actualInputTokens ?? 0, input.actualInputTokens)
+    const actualOutputTokens = input.actualOutputTokens === undefined ? existing.actualOutputTokens
+      : Math.max(existing.actualOutputTokens ?? 0, input.actualOutputTokens)
     const completed: StoredProviderInvocation = input.result === 'succeeded'
       ? Object.freeze({
           ...existing,
           status: 'succeeded' as const,
-          transportAttempts: input.transportAttempts,
-          actualInputTokens: input.actualInputTokens,
-          actualOutputTokens: input.actualOutputTokens,
-          providerRequestId: input.providerRequestId,
-          updatedAt: input.now,
-          completedAt: input.now,
+          failureKind: undefined,
+          safeCode: undefined,
+          transportAttempts: Math.max(existing.transportAttempts, input.transportAttempts),
+          actualInputTokens,
+          actualOutputTokens,
+          providerRequestId: input.providerRequestId ?? existing.providerRequestId,
+          updatedAt: Math.max(existing.updatedAt, input.now),
+          completedAt: Math.max(existing.completedAt ?? 0, input.now),
         })
       : Object.freeze({
           ...existing,
-          status: 'failed' as const,
-          transportAttempts: input.transportAttempts,
+          status: input.result,
+          transportAttempts: Math.max(existing.transportAttempts, input.transportAttempts),
           failureKind: input.failureKind,
           safeCode: input.safeCode,
-          actualInputTokens: input.actualInputTokens,
-          actualOutputTokens: input.actualOutputTokens,
-          providerRequestId: input.providerRequestId,
-          updatedAt: input.now,
-          completedAt: input.now,
+          actualInputTokens,
+          actualOutputTokens,
+          providerRequestId: input.providerRequestId ?? existing.providerRequestId,
+          updatedAt: Math.max(existing.updatedAt, input.now),
+          completedAt: Math.max(existing.completedAt ?? 0, input.now),
         })
     this.providerInvocations.set(key, completed)
     return { outcome: 'updated', invocation: cloneProviderInvocation(completed) }
@@ -631,7 +733,7 @@ export class InMemoryJobStore implements JobStore {
     const record = this.runs.get(runKey(tenantId, runId))
     if (!record) return { outcome: 'missing' }
     if (record.contentDeleted) return { outcome: 'already_clean' }
-    if (record.run.expiresAt === undefined || record.run.expiresAt > now) return { outcome: 'not_due' }
+    if (record.run.expiresAt === undefined || (record.run.expiresAt ?? Infinity) > now) return { outcome: 'not_due' }
     for (const key of [...this.sources.keys()]) {
       if (key.startsWith(`${tenantId}\u0000${runId}\u0000`)) this.sources.delete(key)
     }
@@ -657,7 +759,8 @@ export class InMemoryJobStore implements JobStore {
   async acquireLease(request: LeaseRequest): Promise<JobLease | undefined> {
     if (request.durationMs <= 0) throw new RangeError('lease duration must be positive')
     const record = this.runs.get(runKey(request.tenantId, request.runId))
-    if (!record || record.contentDeleted || terminalRunStatuses.has(record.run.status)) return undefined
+    if (!record || record.contentDeleted || terminalRunStatuses.has(record.run.status)
+      || (record.run.expiresAt ?? Infinity) <= request.now) return undefined
     const key = leaseKey(request.tenantId, request.runId, request.nodeKey)
     const current = this.leases.get(key)
     if (current && current.expiresAt > request.now && current.ownerId !== request.ownerId) return undefined
@@ -687,6 +790,7 @@ export class InMemoryJobStore implements JobStore {
       || !record
       || record.contentDeleted
       || terminalRunStatuses.has(record.run.status)
+      || (record.run.expiresAt ?? Infinity) <= now
       || current.ownerId !== identity.ownerId
       || current.attempt !== identity.attempt
       || current.expiresAt <= now
@@ -700,12 +804,16 @@ export class InMemoryJobStore implements JobStore {
     const key = leaseKey(identity.tenantId, identity.runId, identity.nodeKey)
     const current = this.leases.get(key)
     if (!current || current.ownerId !== identity.ownerId || current.attempt !== identity.attempt) return false
-    return this.leases.delete(key)
+    if (current.expiresAt === 0) return false
+    this.leases.set(key, Object.freeze({ ...current, expiresAt: 0 }))
+    return true
   }
 
   private hasActiveLease(identity: LeaseIdentity, now: number): boolean {
     const current = this.leases.get(leaseKey(identity.tenantId, identity.runId, identity.nodeKey))
+    const record = this.runs.get(runKey(identity.tenantId, identity.runId))
     return current !== undefined
+      && record !== undefined && !record.contentDeleted && (record.run.expiresAt ?? Infinity) > now
       && current.ownerId === identity.ownerId
       && current.attempt === identity.attempt
       && current.expiresAt > now

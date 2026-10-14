@@ -7,6 +7,7 @@ import type { FastifyInstance } from 'fastify'
 import { buildAnalysisServer, classifyHttpError } from '../src/api/server.js'
 import { loadAnalysisServiceConfig } from '../src/config.js'
 import { createEngineCapabilities } from '../src/domain/capabilities.js'
+import type { EngineAvailability } from '../src/domain/capabilities.js'
 import { RunService } from '../src/domain/runService.js'
 import { ServiceHttpError, createContractError } from '../src/errors.js'
 import { InMemoryJobStore } from '../src/infrastructure/memoryJobStore.js'
@@ -41,22 +42,43 @@ afterEach(async () => {
 })
 
 describe('analysis service security boundary', () => {
+  it('requires every release gate and reevaluates availability for admission after startup', async () => {
+    const config = loadAnalysisServiceConfig({ NODE_ENV: 'test', ANALYSIS_AUTH_MODE: 'service-token',
+      ANALYSIS_SERVICE_TOKEN: token, ANALYSIS_CORS_ORIGINS: origin })
+    const gates = { jobStoreReady: true, providerReady: true, dispatcherReady: true, usageReady: true, recoveryReady: true, liveSmokeReady: true }
+    for (const gate of Object.keys(gates)) {
+      expect(createEngineCapabilities(config, { ...gates, [gate]: false }).acceptsRuns).toBe(false)
+    }
+    let availability: EngineAvailability = gates
+    const server = await buildAnalysisServer(config, { logger: false,
+      runService: new RunService({ store: new InMemoryJobStore(), retentionSeconds: 3600 }),
+      availability: async () => availability,
+    })
+    openServers.push(server)
+    expect((await server.inject({ method: 'POST', url: '/api/analysis/v1/runs', headers: authorizedHeaders, payload: {} })).statusCode).toBe(400)
+    availability = { ...gates, dispatcherReady: false }
+    expect((await server.inject({ method: 'POST', url: '/api/analysis/v1/runs', headers: authorizedHeaders, payload: {} })).statusCode).toBe(503)
+    expect((await server.inject({ method: 'GET', url: '/api/analysis/v1/capabilities', headers: authorizedHeaders })).json().acceptsRuns).toBe(false)
+  })
   it('reports each unavailable capability independently', () => {
     const config = loadAnalysisServiceConfig({ NODE_ENV: 'test' })
     expect(createEngineCapabilities(config)).toMatchObject({
       acceptsRuns: false,
       supportsSse: false,
-      degradedReasons: ['provider.not-configured', 'job-store.not-configured', 'dispatcher.not-ready'],
+      degradedReasons: ['provider.not-configured', 'job-store.not-configured', 'dispatcher.not-ready', 'usage.not-ready', 'recovery.not-ready', 'provider.smoke-not-verified'],
     })
     expect(createEngineCapabilities(config, { providerReady: true })).toMatchObject({
       acceptsRuns: false,
       supportsSse: false,
-      degradedReasons: ['job-store.not-configured', 'dispatcher.not-ready'],
+      degradedReasons: ['job-store.not-configured', 'dispatcher.not-ready', 'usage.not-ready', 'recovery.not-ready', 'provider.smoke-not-verified'],
     })
     expect(createEngineCapabilities(config, {
       jobStoreReady: true,
       providerReady: true,
       dispatcherReady: true,
+      usageReady: true,
+      recoveryReady: true,
+      liveSmokeReady: true,
     })).toMatchObject({ acceptsRuns: true, degradedReasons: [] })
   })
 
@@ -117,6 +139,9 @@ describe('analysis service security boundary', () => {
       'provider.not-configured',
       'job-store.not-configured',
       'dispatcher.not-ready',
+      'usage.not-ready',
+      'recovery.not-ready',
+      'provider.smoke-not-verified',
     ])
     expect(capabilities.supportsSse).toBe(false)
     expect(response.headers['content-security-policy']).toContain("default-src 'none'")

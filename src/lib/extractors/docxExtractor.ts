@@ -133,8 +133,9 @@ function styleHeadingLevels(stylesXml?: string): Map<string, number> {
     const id = attribute(style, 'styleId')
     if (!id) continue
     const name = attribute(elements(style, 'name')[0], 'val')
-    const outline = Number(attribute(elements(style, 'outlineLvl')[0], 'val'))
-    const level = Number.isInteger(outline) && outline >= 0 && outline < 6
+    const outlineValue = attribute(elements(style, 'outlineLvl')[0], 'val')
+    const outline = Number(outlineValue)
+    const level = /^[0-5]$/.test(outlineValue)
       ? outline + 1
       : inferHeadingLevel(`${id} ${name}`)
     if (level) result.set(id, level)
@@ -226,7 +227,7 @@ export async function extractDocx(file: File): Promise<ExtractedDocument> {
     kind: 'docx',
     structure: 'markdown',
     text,
-    extractor: 'cat-docx-ooxml-v1',
+    extractor: 'cat-docx-ooxml-v2',
     pageSpans: [],
     warnings: stylesBytes ? [] : ['DOCX 未包含样式表，标题层级可能不完整'],
   }

@@ -5,17 +5,20 @@ import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import Fastify, { LogController, type FastifyInstance } from 'fastify'
 import type { AnalysisServiceConfig } from '../config.js'
-import { createEngineCapabilities } from '../domain/capabilities.js'
+import { createEngineCapabilities, type EngineAvailability } from '../domain/capabilities.js'
 import {
   ServiceHttpError,
   createContractError,
   createErrorResponse,
+  serviceUnavailableError,
 } from '../errors.js'
 import { createLoggerOptions } from '../telemetry/logger.js'
 import { createAuthenticationHook } from './auth.js'
 import { createOriginGuard } from './originGuard.js'
 import { registerRunRoutes } from './runRoutes.js'
 import type { RunService } from '../domain/runService.js'
+import { registerPersonalRoutes } from './personalRoutes.js'
+import type { PersonalAnalysisRuntime } from '../personal/personalRuntime.js'
 
 export interface BuildAnalysisServerOptions {
   readonly logger?: false
@@ -23,6 +26,11 @@ export interface BuildAnalysisServerOptions {
   readonly runService?: RunService
   readonly providerReady?: boolean
   readonly dispatcherReady?: boolean
+  readonly usageReady?: boolean
+  readonly recoveryReady?: boolean
+  readonly liveSmokeReady?: boolean
+  readonly availability?: () => Promise<EngineAvailability>
+  readonly personalRuntime?: PersonalAnalysisRuntime
 }
 
 const invalidRequestError = (messageKey: string): ServiceHttpError => new ServiceHttpError(
@@ -189,17 +197,20 @@ export const buildAnalysisServer = async (
   await server.register(async (api) => {
     api.addHook('onRequest', createOriginGuard(config.corsOrigins))
     api.addHook('onRequest', createAuthenticationHook(config))
+    if (config.personalReadOnly) api.addHook('onRequest', async (request) => {
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) throw serviceUnavailableError()
+    })
 
     const jobStoreReady = options.runService !== undefined
     const providerReady = options.providerReady ?? false
     const dispatcherReady = options.dispatcherReady ?? false
-    const acceptsRuns = jobStoreReady && providerReady && dispatcherReady
-    api.get('/capabilities', async () => createEngineCapabilities(config, {
-      jobStoreReady,
-      providerReady,
-      dispatcherReady,
-    }))
-    registerRunRoutes(api, config, { runService: options.runService, acceptsRuns })
+    const capabilities = async () => createEngineCapabilities(config, options.availability
+      ? await options.availability()
+      : { jobStoreReady, providerReady, dispatcherReady, usageReady: options.usageReady,
+          recoveryReady: options.recoveryReady, liveSmokeReady: options.liveSmokeReady })
+    api.get('/capabilities', capabilities)
+    registerPersonalRoutes(api, options.personalRuntime)
+    registerRunRoutes(api, config, { runService: options.runService, acceptsRuns: async () => (await capabilities()).acceptsRuns })
   }, { prefix: '/api/analysis/v1' })
 
   server.setNotFoundHandler(async () => {

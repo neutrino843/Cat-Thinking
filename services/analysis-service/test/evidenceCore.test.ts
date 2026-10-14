@@ -16,7 +16,7 @@ import {
   planEvidenceChunks,
   type ChunkPlannerPolicy,
 } from '../src/domain/chunkPlanner.js'
-import { calculateEvidenceCoverage, mergeEvidenceCards } from '../src/domain/evidenceMerger.js'
+import { calculateEvidenceCoverage, EvidenceGraphCapacityExceededError, mergeEvidenceCards } from '../src/domain/evidenceMerger.js'
 import {
   EvidenceValidationError,
   inspectEvidenceCard,
@@ -176,6 +176,93 @@ describe('evidence chunk policy boundaries', () => {
 })
 
 describe('evidence validation and deterministic merge', () => {
+  const relationFixture = (counts: readonly number[], concepts: boolean) => {
+    const text = 'synthetic relation input '.repeat(50)
+    const snapshot = source(text)
+    const initial = planEvidenceChunks([{ snapshot, text }], policy)[0]!
+    const chunks = counts.map((_count, index) => ({ ...initial, chunkId: `chunk-relations-${index}`, ordinal: index, total: counts.length }))
+    const cards = chunks.map((chunk, index) => {
+      const base = cardFor(chunk, text)
+      const citation = base.claims[0]!.citations
+      const ids = Array.from({ length: counts[index]! }, (_unused, item) => `item-${index}-${item}`)
+      return evidenceCardSchema.parse({ ...base,
+        terms: concepts ? ids.map((id) => ({ id, term: id, citations: citation })) : [],
+        claims: concepts ? [{ ...base.claims[0]!, conceptIds: ids }]
+          : ids.map((id) => ({ id, kind: 'fact', statement: id, conceptIds: [], citations: citation })),
+        learningObjectives: [{ id: 'objective', text: concepts ? `topic-${index}` : 'same objective',
+          evidenceIds: concepts ? ['claim-local'] : ids }],
+      })
+    })
+    const input = { runId: 'run-relations', chunks, cards, sourceContentHashes: [snapshot.contentHash],
+      coverage: { input: 1, analysis: 1, citation: 1, chunksCompleted: cards.length, chunksFailed: 0, chunksTotal: chunks.length },
+      missingChunkIds: [], chunkPlanHash: hashChunkPlan(chunks), policyVersion: policy.version,
+      promptVersion: 'evidence-map-v1', generatorProfile: 'fixture-v1', createdAt: 1_791_500_000_000 }
+    return input
+  }
+
+  it.each([[[25, 25], 1], [[25, 26], 2], [[50, 50, 1], 3]] as const)(
+    'preserves every concept relation across bounded claim groups for %j', (counts, groups) => {
+      const input = relationFixture(counts, true)
+      const graph = mergeEvidenceCards(input)
+      expect(graph.claims).toHaveLength(groups)
+      expect(graph.claims.every((claim) => claim.conceptIds.length <= 50)).toBe(true)
+      expect(new Set(graph.claims.flatMap((claim) => claim.conceptIds))).toEqual(new Set(graph.terms.map((term) => term.id)))
+      for (const [index, card] of input.cards.entries()) {
+        const objective = graph.learningObjectives.find((item) => item.text === `topic-${index}`)!
+        const mapped = graph.claims.find((claim) => claim.id === objective.evidenceIds[0])!
+        for (const term of card.terms) expect(mapped.conceptIds).toContain(graph.terms.find((item) => item.term === term.term)!.id)
+      }
+      expect(mergeEvidenceCards({ ...input, cards: [...input.cards].reverse(), chunks: [...input.chunks].reverse() })).toEqual(graph)
+      expect(graph.policyVersion).toMatch(/^evidence-merge-v2:/)
+    },
+  )
+
+  it.each([[[50, 50], 1], [[50, 51], 2], [[100, 100, 1], 3]] as const)(
+    'preserves every evidence relation across bounded objective groups for %j', (counts, groups) => {
+      const input = relationFixture(counts, false)
+      const graph = mergeEvidenceCards(input)
+      expect(graph.learningObjectives).toHaveLength(groups)
+      expect(graph.learningObjectives.every((item) => item.evidenceIds.length <= 100)).toBe(true)
+      expect(new Set(graph.learningObjectives.flatMap((item) => item.evidenceIds))).toEqual(new Set(graph.claims.map((claim) => claim.id)))
+      expect(mergeEvidenceCards({ ...input, cards: [...input.cards].reverse() })).toEqual(graph)
+    },
+  )
+
+  it('deduplicates overlapping bounded groups without duplicate IDs or broken local mappings', () => {
+    const relations = Array.from({ length: 63 }, (_unused, index) =>
+      Array.from({ length: 6 }, (_next, item) => item).filter((item) => (index + 1) & (1 << item)))
+      .filter((items) => items.length <= 3)
+    const input = relationFixture(relations.map(() => 1), true)
+    const cards = input.cards.map((card, index) => {
+      const terms = relations[index]!.flatMap((group) => Array.from({ length: 16 }, (_unused, item) => ({
+        id: `term-${group}-${item}`, term: `same-concept-${group}-${item}`, citations: card.claims[0]!.citations,
+      })))
+      return evidenceCardSchema.parse({ ...card, terms, claims: [{ ...card.claims[0]!, conceptIds: terms.map((term) => term.id) }] })
+    })
+    const graph = mergeEvidenceCards({ ...input, cards })
+    expect(new Set(graph.claims.map((claim) => claim.id)).size).toBe(graph.claims.length)
+    expect(graph.claims.every((claim) => claim.conceptIds.length <= 50)).toBe(true)
+    expect(new Set(graph.claims.flatMap((claim) => claim.conceptIds)).size).toBe(96)
+    for (const [index, card] of cards.entries()) {
+      const objective = graph.learningObjectives.find((item) => item.text === `topic-${index}`)!
+      const group = graph.claims.find((claim) => claim.id === objective.evidenceIds[0])!
+      for (const term of card.terms) expect(group.conceptIds).toContain(graph.terms.find((item) => item.term === term.term)!.id)
+    }
+    expect(mergeEvidenceCards({ ...input, cards: [...cards].reverse() })).toEqual(graph)
+  })
+
+  it('classifies whole-graph overflow as a typed budget failure without dropping input', () => {
+    const input = relationFixture([1], false)
+    const base = input.cards[0]!
+    const chunks = Array.from({ length: 101 }, (_unused, index) => ({ ...input.chunks[0]!, chunkId: `capacity-${index}`, ordinal: index, total: 101 }))
+    const cards = chunks.map((chunk, index) => evidenceCardSchema.parse({ ...base, chunkId: chunk.chunkId,
+      claims: Array.from({ length: 200 }, (_unused, item) => ({ ...base.claims[0]!, id: `claim-${item}`, statement: `unique-${index}-${item}` })),
+      learningObjectives: [],
+    }))
+    expect(() => mergeEvidenceCards({ ...input, chunks, cards })).toThrow(EvidenceGraphCapacityExceededError)
+    expect(() => mergeEvidenceCards({ ...input, chunks, cards })).toThrow(expect.objectContaining({ dimension: 'claims', actual: 20_001, maximum: 20_000 }))
+  })
+
   it('rejects invalid identity, ranges, pages, quotes and dangling references', () => {
     const text = '光合作用把光能转化为化学能。'.repeat(20)
     const snapshot = source(text)
@@ -281,7 +368,7 @@ describe('evidence validation and deterministic merge', () => {
     const base = cardFor(chunks[0]!, text)
     const termObjective = {
       ...base,
-      claims: [{ ...base.claims[0]!, conceptIds: ['missing-local-term'] }],
+      claims: [{ ...base.claims[0]!, conceptIds: ['term-local'] }],
       learningObjectives: [{ ...base.learningObjectives[0]!, evidenceIds: ['term-local'] }],
     }
     const mergeInput = {
@@ -304,6 +391,9 @@ describe('evidence validation and deterministic merge', () => {
     const merged = mergeEvidenceCards(mergeInput)
     expect(merged.claims[0]?.conceptIds[0]).toMatch(/^term:/)
     expect(merged.learningObjectives[0]?.evidenceIds).toEqual([merged.terms[0]?.id])
+    expect(() => mergeEvidenceCards({ ...mergeInput, cards: [{ ...termObjective,
+      claims: [{ ...base.claims[0]!, conceptIds: ['missing-local-term'] }],
+    }] })).toThrow(/unknown concept/)
 
     expect(() => mergeEvidenceCards({
       ...mergeInput,

@@ -72,6 +72,19 @@ export interface Relation {
   label?: string
   /** 颜色 key：'' 用主题 ink；'b0'..'b5' 用分支色 */
   color?: string
+  /** Local source copies, never a generated node/remote source identifier. */
+  sourceRefs?: RelationSourceReference[]
+}
+
+export interface RelationSourceReference {
+  version: 1
+  sourceId: string
+  contentHash: string
+  /** UTF-16 offsets in the copied SourceDocument.text. */
+  start: number
+  end: number
+  page?: number
+  locator?: string
 }
 
 /** 概要：花括号框选一组兄弟节点 */
@@ -135,6 +148,8 @@ export interface SourceDocument {
   importedAt: number
   extractor: string
   text: string
+  /** Optional verified immutable-copy identity; legacy imports compute their hash when analyzed. */
+  contentHash?: string
   charCount: number
   anchors: SourceAnchor[]
   /** Added compatibly: legacy persisted sources can fall back to anchors. */

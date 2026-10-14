@@ -7,6 +7,11 @@ import { analysisRequestSchema, analysisRunSchema } from './runs.js'
 
 export const engineCapabilitiesSchema = z
   .object({
+    operatingMode: z.enum(['deployment', 'personal']).optional(),
+    pricingKnown: z.boolean().optional(),
+    activeProfileId: identifierSchema.optional(),
+    modelId: z.string().min(1).max(200).optional(),
+    maxSelectedCharacters: z.number().int().positive().safe().optional(),
     service: z.literal('cat-analysis-engine'),
     serviceVersion: z.string().trim().min(1).max(100),
     acceptsRuns: z.boolean(),

@@ -4,6 +4,9 @@ import {
   analysisEventSchema,
   analysisRequestSchema,
   analysisRunSchema,
+  runRequestLookupSchema,
+  abandonRunRequestResultSchema,
+  runUsageSchema,
   canonicalizeJson,
   cancelRunResultSchema,
   deleteRunContentResultSchema,
@@ -24,9 +27,14 @@ import {
   type SourceReceiptV1,
   type StartRunResultV1,
   type UploadSourcePartV1,
+  type RunRequestLookupV1,
+  type AbandonRunRequestResultV1,
+  type RunUsageV1,
 } from '@cat-thinking/analysis-contracts'
 import { ServiceHttpError, createContractError } from '../errors.js'
 import { RunEventBroker } from './eventBroker.js'
+import { assertArtifactRetryAllowed } from './artifactRetryPolicy.js'
+import { serviceUnavailableError } from '../errors.js'
 import {
   JobStoreConflictError,
   JobStoreNotFoundError,
@@ -101,6 +109,10 @@ export interface RunServiceOptions {
   readonly broker?: RunEventBroker
   readonly now?: () => number
   readonly createId?: () => string
+  readonly canAdmit?: () => Promise<boolean>
+  readonly maxRunEstimatedTokens?: number
+  readonly maxRunEstimatedCostMicros?: number
+  readonly providerProfileMode?: 'deployment' | 'personal'
 }
 
 export class RunService {
@@ -109,6 +121,9 @@ export class RunService {
   private readonly retentionSeconds: number
   private readonly now: () => number
   private readonly createId: () => string
+  private canAdmit: () => Promise<boolean>
+  private readonly retryLimits: { maxRunEstimatedTokens: number; maxRunEstimatedCostMicros: number }
+  private readonly providerProfileMode: 'deployment' | 'personal'
 
   constructor(options: RunServiceOptions) {
     this.store = options.store
@@ -116,6 +131,18 @@ export class RunService {
     this.broker = options.broker ?? new RunEventBroker()
     this.now = options.now ?? Date.now
     this.createId = options.createId ?? randomUUID
+    this.canAdmit = options.canAdmit ?? (async () => true)
+    this.providerProfileMode = options.providerProfileMode ?? 'deployment'
+    this.retryLimits = { maxRunEstimatedTokens: options.maxRunEstimatedTokens ?? Number.MAX_SAFE_INTEGER,
+      maxRunEstimatedCostMicros: options.maxRunEstimatedCostMicros ?? Number.MAX_SAFE_INTEGER }
+  }
+
+  /** Server installs the same admission policy used for capabilities. */
+  setAdmissionGuard(guard: () => Promise<boolean>): void { this.canAdmit = guard }
+
+  private async requireAdmission(): Promise<void> {
+    try { if (await this.canAdmit()) return } catch { /* Fail closed. */ }
+    throw serviceUnavailableError()
   }
 
   checkHealth(): Promise<boolean> {
@@ -124,6 +151,11 @@ export class RunService {
 
   async createRun(tenantId: string, requestInput: AnalysisRequestV1): Promise<RunCreatedV1> {
     const request = analysisRequestSchema.parse(requestInput)
+    if (this.providerProfileMode === 'deployment' && request.providerProfileId !== undefined) {
+      throw httpError(400, 'invalid_request', 'client', false, 'analysis.request.provider_profile_unsupported')
+    }
+    if (request.options.externalKnowledge) throw httpError(400, 'invalid_request', 'client', false, 'analysis.request.external_knowledge_unsupported')
+    await this.requireAdmission()
     const now = this.now()
     const run = analysisRunSchema.parse({
       version: ANALYSIS_CONTRACT_VERSION,
@@ -164,7 +196,11 @@ export class RunService {
       createdAt: now,
       requestKey: request.requestKey,
     })
-    const created = await this.store.createRun(tenantId, run, acceptedEvent)
+    const created = await this.store.createRun(tenantId, run, acceptedEvent).catch((error: unknown) => {
+      if (error instanceof JobStoreConflictError) throw conflict(error.reason === 'personal profile changed'
+        ? 'analysis.personal.profile_changed' : 'analysis.run.request_abandoned')
+      throw error
+    })
     if (created.reused && canonicalizeJson(created.run.request) !== canonicalizeJson(request)) {
       throw conflict('analysis.run.request_key_collision')
     }
@@ -220,6 +256,7 @@ export class RunService {
   }
 
   async startRun(tenantId: string, runId: string, expectedRevision: number): Promise<StartRunResultV1> {
+    await this.requireAdmission()
     const current = await this.requireRun(tenantId, runId)
     if (current.status !== 'receiving') throw conflict('analysis.run.not_receiving')
     for (const source of current.request.manifest.sources) {
@@ -261,7 +298,26 @@ export class RunService {
   }
 
   async getRun(tenantId: string, runId: string): Promise<AnalysisRunV1> {
-    return this.requireRun(tenantId, runId)
+    const run = await this.requireRun(tenantId, runId)
+    const ledger = await this.store.getRunLedgerUsage(tenantId, runId)
+    return ledger && ledger.invocationCount > 0 ? analysisRunSchema.parse({ ...run, usage: ledger.usage }) : run
+  }
+
+  async lookupRequest(tenantId: string, requestKey: string): Promise<RunRequestLookupV1> {
+    return runRequestLookupSchema.parse({ version: ANALYSIS_CONTRACT_VERSION, ...await this.store.lookupRunByRequestKey(tenantId, requestKey) })
+  }
+
+  async abandonRequest(tenantId: string, requestKey: string): Promise<AbandonRunRequestResultV1> {
+    const result = await this.store.abandonRequest(tenantId, requestKey, this.now())
+    if (result.runId) this.broker.publish(result.runId)
+    return abandonRunRequestResultSchema.parse({ version: ANALYSIS_CONTRACT_VERSION, requestKey, abandoned: true, ...result })
+  }
+
+  async getUsage(tenantId: string, runId: string): Promise<RunUsageV1> {
+    const ledger = await this.store.getRunLedgerUsage(tenantId, runId)
+    if (!ledger) throw notFound()
+    return runUsageSchema.parse({ version: ANALYSIS_CONTRACT_VERSION, runId, ...ledger,
+      completeness: ledger.unresolvedCount === 0 ? 'complete' : 'unresolved' })
   }
 
   async listEvents(
@@ -358,6 +414,9 @@ export class RunService {
     kind: ArtifactKind,
     expectedRevision: number,
   ): Promise<RetryArtifactAcceptedV1> {
+    // Never hold a store lock while the admission callback performs a health query.
+    await this.requireAdmission()
+    const now = this.now()
     const transitioned = await this.store.transitionRun(
       tenantId,
       runId,
@@ -365,10 +424,9 @@ export class RunService {
       (run, nextSequence) => {
         const state = run.artifactStates[kind]
         if (!state) throw conflict('analysis.artifact.not_requested', { kind })
-        if (state.status !== 'failed' && state.status !== 'cancelled') {
+        if (state.status !== 'failed') {
           throw conflict('analysis.artifact.not_retryable', { kind })
         }
-        const now = this.now()
         const next = analysisRunSchema.parse({
           ...run,
           revision: run.revision + 1,
@@ -396,6 +454,7 @@ export class RunService {
           }),
         }
       },
+      (run, context) => assertArtifactRetryAllowed(run, kind, context, now, this.retryLimits),
     )
     const run = this.unwrapTransition(transitioned, expectedRevision)
     this.broker.publish(runId)

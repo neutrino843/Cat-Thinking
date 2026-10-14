@@ -2,6 +2,7 @@ import type { AnalysisErrorV1, AnalysisRunV1 } from '@cat-thinking/analysis-cont
 import { createContractError } from '../errors.js'
 import { ProviderGatewayError } from './providerError.js'
 import { ProviderInvocationCoordinatorError } from './providerInvocationCoordinator.js'
+import { ProviderRoutingError } from './providerRouter.js'
 
 const withStage = (
   error: AnalysisErrorV1,
@@ -12,10 +13,27 @@ export const providerContractError = (
   error: unknown,
   stage?: AnalysisRunV1['stage'],
 ): AnalysisErrorV1 | undefined => {
+  if (error instanceof ProviderRoutingError) {
+    return withStage(createContractError(
+      'provider_unavailable',
+      'availability',
+      error.code === 'route_unavailable',
+      'analysis.provider.route_unavailable',
+      {
+        reason: error.code,
+        ...(error.role ? { role: error.role } : {}),
+        ...(error.qualityProfile ? { qualityProfile: error.qualityProfile } : {}),
+      },
+    ), stage)
+  }
   if (error instanceof ProviderGatewayError) {
     const details = {
       providerId: error.providerId,
       providerCode: error.safeCode,
+    }
+    if (error.acceptance === 'unknown') {
+      return withStage(createContractError('provider_unavailable', 'availability', false,
+        'analysis.provider.invocation_unavailable', { ...details, reason: 'invocation_outcome_unknown' }), stage)
     }
     switch (error.kind) {
       case 'aborted':
@@ -53,6 +71,7 @@ export const providerContractError = (
       case 'rejected':
       case 'invalid_response':
       case 'response_too_large':
+      case 'outcome_unknown':
         return withStage(createContractError(
           'provider_rejected',
           'provider',

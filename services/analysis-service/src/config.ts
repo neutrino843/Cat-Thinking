@@ -96,6 +96,8 @@ const parseProviderBaseUrl = (value: string): URL | undefined => {
 const selectedEnvironmentSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    ANALYSIS_OPERATING_MODE: z.enum(['deployment', 'personal']).default('deployment'),
+    ANALYSIS_PERSONAL_READ_ONLY: booleanFromEnvironment(false),
     ANALYSIS_HOST: z.string().trim().min(1).max(255).default('127.0.0.1'),
     ANALYSIS_PORT: integerFromEnvironment(8_787, 1, 65_535),
     ANALYSIS_LOG_LEVEL: z.enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
@@ -121,6 +123,9 @@ const selectedEnvironmentSchema = z
     ANALYSIS_SSE_HEARTBEAT_MS: integerFromEnvironment(15_000, 1_000, 120_000),
     ANALYSIS_SSE_POLL_MS: integerFromEnvironment(1_000, 100, 10_000),
     ANALYSIS_LEASE_MS: integerFromEnvironment(30_000, 1_000, 600_000),
+    ANALYSIS_RELEASE_HOLD: booleanFromEnvironment(true),
+    ANALYSIS_RELEASE_ATTESTATION_PATH: z.string().min(1).max(2048).optional(),
+    ANALYSIS_RELEASE_PUBLIC_KEY_PATH: z.string().min(1).max(2048).optional(),
     ANALYSIS_CLEANUP_BATCH_SIZE: integerFromEnvironment(100, 1, 1_000),
     ANALYSIS_CLEANUP_INTERVAL_MS: integerFromEnvironment(60_000, 1_000, 3_600_000),
     ANALYSIS_PROVIDER_MODE: z.enum(['disabled', 'openai-compatible']).default('disabled'),
@@ -135,6 +140,8 @@ const selectedEnvironmentSchema = z
     ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS: integerFromEnvironment(200_000, 1_000, 10_000_000),
     ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS: integerFromEnvironment(16_384, 1, 1_000_000),
     ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES: integerFromEnvironment(2_000_000, 1_024, 20_000_000),
+    ANALYSIS_PROVIDER_INPUT_MICROS_PER_MILLION_TOKENS: integerFromEnvironment(0, 0, 1_000_000_000),
+    ANALYSIS_PROVIDER_OUTPUT_MICROS_PER_MILLION_TOKENS: integerFromEnvironment(0, 0, 1_000_000_000),
     ANALYSIS_PROVIDER_MAX_ATTEMPTS: integerFromEnvironment(2, 1, 5),
     ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS: integerFromEnvironment(250, 1, 60_000),
     ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS: integerFromEnvironment(5_000, 1, 60_000),
@@ -146,6 +153,21 @@ const selectedEnvironmentSchema = z
   })
   .strict()
   .superRefine((environment, context) => {
+    if (environment.ANALYSIS_PERSONAL_READ_ONLY && environment.ANALYSIS_OPERATING_MODE !== 'personal') {
+      context.addIssue({ code: 'custom', path: ['ANALYSIS_PERSONAL_READ_ONLY'], message: 'read-only personal verification requires personal mode' })
+    }
+    if (environment.ANALYSIS_OPERATING_MODE === 'personal') {
+      const loopback = (host: string) => ['127.0.0.1', '::1', '[::1]', 'localhost'].includes(host)
+      const databaseHost = (() => { try { return new URL(environment.ANALYSIS_DATABASE_URL ?? '').hostname } catch { return '' } })()
+      if (environment.NODE_ENV === 'production' || !['127.0.0.1', '::1'].includes(environment.ANALYSIS_HOST)
+        || environment.ANALYSIS_AUTH_MODE !== 'service-token' || environment.ANALYSIS_TRUST_PROXY_HOPS !== 0
+        || environment.ANALYSIS_CORS_ORIGINS.length === 0
+        || environment.ANALYSIS_CORS_ORIGINS.some((origin) => !loopback(new URL(origin).hostname))
+        || environment.ANALYSIS_JOB_STORE !== 'postgres' || !loopback(databaseHost)
+        || environment.ANALYSIS_PROVIDER_MODE !== 'disabled' || !environment.ANALYSIS_RELEASE_HOLD) {
+        context.addIssue({ code: 'custom', path: ['ANALYSIS_OPERATING_MODE'], message: 'personal mode requires an authenticated, held, loopback-only service and database' })
+      }
+    }
     if (environment.ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS > environment.ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS) {
       context.addIssue({
         code: 'custom',
@@ -261,6 +283,9 @@ const selectedEnvironmentSchema = z
   })
 
 export interface AnalysisServiceConfig {
+  readonly operatingMode: 'deployment' | 'personal'
+  readonly personalReadOnly: boolean
+  readonly release: Readonly<{ hold: boolean; attestationPath?: string; publicKeyPath?: string }>
   readonly serviceVersion: string
   readonly environment: 'development' | 'test' | 'production'
   readonly host: string
@@ -310,6 +335,8 @@ export interface AnalysisServiceConfig {
         maxInputCharacters: number
         maxOutputTokens: number
         maxResponseBytes: number
+        inputMicrosPerMillionTokens: number
+        outputMicrosPerMillionTokens: number
         invocationPolicy: Readonly<{
           maxAttempts: number
           retryBaseDelayMs: number
@@ -325,6 +352,8 @@ export interface AnalysisServiceConfig {
 
 const selectEnvironment = (environment: NodeJS.ProcessEnv): Record<string, string | undefined> => ({
   NODE_ENV: environment.NODE_ENV,
+  ANALYSIS_OPERATING_MODE: environment.ANALYSIS_OPERATING_MODE,
+  ANALYSIS_PERSONAL_READ_ONLY: environment.ANALYSIS_PERSONAL_READ_ONLY,
   ANALYSIS_HOST: environment.ANALYSIS_HOST,
   ANALYSIS_PORT: environment.ANALYSIS_PORT,
   ANALYSIS_LOG_LEVEL: environment.ANALYSIS_LOG_LEVEL,
@@ -350,6 +379,9 @@ const selectEnvironment = (environment: NodeJS.ProcessEnv): Record<string, strin
   ANALYSIS_SSE_HEARTBEAT_MS: environment.ANALYSIS_SSE_HEARTBEAT_MS,
   ANALYSIS_SSE_POLL_MS: environment.ANALYSIS_SSE_POLL_MS,
   ANALYSIS_LEASE_MS: environment.ANALYSIS_LEASE_MS,
+  ANALYSIS_RELEASE_HOLD: environment.ANALYSIS_RELEASE_HOLD,
+  ANALYSIS_RELEASE_ATTESTATION_PATH: environment.ANALYSIS_RELEASE_ATTESTATION_PATH,
+  ANALYSIS_RELEASE_PUBLIC_KEY_PATH: environment.ANALYSIS_RELEASE_PUBLIC_KEY_PATH,
   ANALYSIS_CLEANUP_BATCH_SIZE: environment.ANALYSIS_CLEANUP_BATCH_SIZE,
   ANALYSIS_CLEANUP_INTERVAL_MS: environment.ANALYSIS_CLEANUP_INTERVAL_MS,
   ANALYSIS_PROVIDER_MODE: environment.ANALYSIS_PROVIDER_MODE,
@@ -364,6 +396,8 @@ const selectEnvironment = (environment: NodeJS.ProcessEnv): Record<string, strin
   ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS: environment.ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS,
   ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS: environment.ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS,
   ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES: environment.ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES,
+  ANALYSIS_PROVIDER_INPUT_MICROS_PER_MILLION_TOKENS: environment.ANALYSIS_PROVIDER_INPUT_MICROS_PER_MILLION_TOKENS,
+  ANALYSIS_PROVIDER_OUTPUT_MICROS_PER_MILLION_TOKENS: environment.ANALYSIS_PROVIDER_OUTPUT_MICROS_PER_MILLION_TOKENS,
   ANALYSIS_PROVIDER_MAX_ATTEMPTS: environment.ANALYSIS_PROVIDER_MAX_ATTEMPTS,
   ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS: environment.ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS,
   ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS: environment.ANALYSIS_PROVIDER_RETRY_MAX_DELAY_MS,
@@ -405,6 +439,8 @@ export const loadAnalysisServiceConfig = (
         maxInputCharacters: parsed.ANALYSIS_PROVIDER_MAX_INPUT_CHARACTERS,
         maxOutputTokens: parsed.ANALYSIS_PROVIDER_MAX_OUTPUT_TOKENS,
         maxResponseBytes: parsed.ANALYSIS_PROVIDER_MAX_RESPONSE_BYTES,
+        inputMicrosPerMillionTokens: parsed.ANALYSIS_PROVIDER_INPUT_MICROS_PER_MILLION_TOKENS,
+        outputMicrosPerMillionTokens: parsed.ANALYSIS_PROVIDER_OUTPUT_MICROS_PER_MILLION_TOKENS,
         invocationPolicy: Object.freeze({
           maxAttempts: parsed.ANALYSIS_PROVIDER_MAX_ATTEMPTS,
           retryBaseDelayMs: parsed.ANALYSIS_PROVIDER_RETRY_BASE_DELAY_MS,
@@ -419,7 +455,11 @@ export const loadAnalysisServiceConfig = (
     : Object.freeze({ mode: 'disabled' as const })
 
   return Object.freeze({
+    operatingMode: parsed.ANALYSIS_OPERATING_MODE,
+    personalReadOnly: parsed.ANALYSIS_PERSONAL_READ_ONLY,
     serviceVersion: SERVICE_VERSION,
+    release: Object.freeze({ hold: parsed.ANALYSIS_RELEASE_HOLD,
+      attestationPath: parsed.ANALYSIS_RELEASE_ATTESTATION_PATH, publicKeyPath: parsed.ANALYSIS_RELEASE_PUBLIC_KEY_PATH }),
     environment: parsed.NODE_ENV,
     host: parsed.ANALYSIS_HOST,
     port: parsed.ANALYSIS_PORT,

@@ -49,6 +49,7 @@ export interface ReserveProviderInvocationInput extends ProviderInvocationIdenti
   readonly estimatedCostMicros: number
   readonly maxRunEstimatedTokens: number
   readonly maxRunEstimatedCostMicros: number
+  readonly maxRunInvocations?: number
   readonly staleAfterMs: number
   readonly now: number
 }
@@ -58,7 +59,7 @@ export type ReserveProviderInvocationResult =
   | Readonly<{ outcome: 'existing'; invocation: StoredProviderInvocation }>
   | Readonly<{
       outcome: 'budget_exceeded'
-      dimension: 'tokens' | 'cost'
+      dimension: 'tokens' | 'cost' | 'invocations'
       actual: number
       maximum: number
     }>
@@ -78,7 +79,7 @@ export type CompleteProviderInvocationInput = CompleteProviderInvocationInputBas
       providerRequestId?: string
     }>
   | Readonly<{
-      result: 'failed'
+      result: 'failed' | 'outcome_unknown'
       failureKind?: ProviderFailureKind
       safeCode: string
       actualInputTokens?: number
@@ -152,11 +153,13 @@ export const assertProviderInvocationReservation = (input: ReserveProviderInvoca
   assertNonNegativeSafeInteger(input.estimatedCostMicros, 'estimatedCostMicros')
   assertPositiveSafeInteger(input.maxRunEstimatedTokens, 'maxRunEstimatedTokens')
   assertNonNegativeSafeInteger(input.maxRunEstimatedCostMicros, 'maxRunEstimatedCostMicros')
+  if (input.maxRunInvocations !== undefined) assertPositiveSafeInteger(input.maxRunInvocations, 'maxRunInvocations')
   assertPositiveSafeInteger(input.staleAfterMs, 'staleAfterMs')
   assertNonNegativeSafeInteger(input.now, 'now')
 }
 
 export const assertProviderInvocationCompletion = (input: CompleteProviderInvocationInput): void => {
+  if (!['succeeded', 'failed', 'outcome_unknown'].includes(input.result)) throw new TypeError('invocation result is invalid')
   if (!SAFE_IDENTIFIER.test(input.tenantId)) throw new TypeError('tenantId is invalid')
   if (!SAFE_IDENTIFIER.test(input.invocationId)) throw new TypeError('invocationId is invalid')
   assertNonNegativeSafeInteger(input.transportAttempts, 'transportAttempts')

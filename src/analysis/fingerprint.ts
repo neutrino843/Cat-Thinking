@@ -89,8 +89,8 @@ export const createSourceSnapshot = async (
     contentHash: await sha256Hex(source.text, digest),
     charCount: source.charCount,
     byteCount: new TextEncoder().encode(source.text).byteLength,
-    pageCount,
-    selectedRange: range,
+    ...(pageCount === undefined ? {} : { pageCount }),
+    ...(range === undefined ? {} : { selectedRange: range }),
     locators,
   }
 }
@@ -101,6 +101,10 @@ export interface RequestKeyInput {
   artifacts: readonly ArtifactKind[]
   options: AnalysisOptionsV1
   engineCapabilityVersion: string
+  /** Persisted per explicit user intent; distinguishes a new analysis after content deletion. */
+  intentId?: string
+  /** Public immutable selection only; never a credential or mutable model label. */
+  providerProfileId?: string
 }
 
 export const createAnalysisRequestKey = async (
@@ -122,6 +126,8 @@ export const createAnalysisRequestKey = async (
     artifacts: orderedArtifacts(input.artifacts),
     options: input.options,
     engineCapabilityVersion: input.engineCapabilityVersion,
+    ...(input.intentId === undefined ? {} : { intentId: input.intentId }),
+    ...(input.providerProfileId === undefined ? {} : { providerProfileId: input.providerProfileId }),
   })
   return sha256Hex(canonical, digest)
 }

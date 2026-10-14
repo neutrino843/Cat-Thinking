@@ -62,6 +62,7 @@ export const ANALYSIS_LIMITS = {
   maxEvidenceChunks: 2_000,
   maxEvidenceCards: 2_000,
   maxEvidenceClaims: 20_000,
+  maxEvidenceCitationsPerItem: 20,
   maxEvidenceTerms: 20_000,
   maxLearningObjectives: 10_000,
   maxArtifactBytes: 2_000_000,

@@ -11,6 +11,7 @@ import { identifierSchema, sha256Schema, timestampSchema, unitIntervalSchema, un
 import { analysisErrorSchema } from './errors.js'
 import { artifactKindSchema } from './artifacts.js'
 import { sourceManifestSchema } from './sources.js'
+import { providerModelIdSchema } from './providerSettings.js'
 
 export const qualityProfileSchema = z.enum(QUALITY_PROFILES)
 export const runStatusSchema = z.enum(RUN_STATUSES)
@@ -35,6 +36,7 @@ export const analysisRequestSchema = z
     manifest: sourceManifestSchema,
     artifacts: z.array(artifactKindSchema).min(1).max(ARTIFACT_KINDS.length),
     options: analysisOptionsSchema,
+    providerProfileId: identifierSchema.optional(),
   })
   .strict()
   .superRefine((request, context) => {
@@ -103,7 +105,7 @@ export const usageSchema = z
 export const providerRouteSchema = z
   .object({
     providerId: identifierSchema,
-    modelId: identifierSchema,
+    modelId: providerModelIdSchema,
     profileVersion: identifierSchema,
     promptVersion: identifierSchema,
   })

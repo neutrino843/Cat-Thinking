@@ -4,6 +4,7 @@ import { useSettings } from '../store/settings'
 import { exportCurrent } from '../lib/exporters'
 import { openMSZCurrent, quickSaveCurrent, saveMSZAs } from '../lib/fileHandle'
 import { saveTemplate } from '../store/db'
+import { requestLatestTutorial } from '../lib/tutorial'
 
 interface Cmd {
   id: string
@@ -16,6 +17,8 @@ function buildCmds(): Cmd[] {
   const d = () => useDoc.getState()
   const s = () => useSettings.getState()
   return [
+    { id: 'learning-open', label: '打开今日学习与课程工作台', run: () => window.dispatchEvent(new CustomEvent('msz:learning-open')) },
+    { id: 'tutorial-open', label: '打开最新版使用教程', run: requestLatestTutorial },
     {
       id: 'child',
       label: '新建子节点',

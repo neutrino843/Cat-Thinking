@@ -10,6 +10,7 @@ import {
   canonicalizeJson,
   mindMapArtifactEnvelopeSchema,
   quizArtifactEnvelopeSchema,
+  providerRouteSchema,
   summaryArtifactEnvelopeSchema,
   uploadSourcePartSchema,
   validateArtifactAgainstManifest,
@@ -17,6 +18,18 @@ import {
 } from '../src'
 
 describe('analysis contract fixtures', () => {
+  it('binds personal provider identity as metadata and still rejects credentials in a run request', () => {
+    expect(analysisRequestSchema.parse({ ...validRequestFixture, providerProfileId: 'personal-profile-1' }).providerProfileId)
+      .toBe('personal-profile-1')
+    expect(analysisRequestSchema.safeParse({ ...validRequestFixture, providerProfileId: '../private' }).success).toBe(false)
+    expect(analysisRequestSchema.safeParse({ ...validRequestFixture, apiKey: 'never-a-run-credential' }).success).toBe(false)
+  })
+  it('retains slash and colon model identifiers in run provenance without allowing arbitrary metadata', () => {
+    const route = { providerId: 'siliconflow', modelId: 'Pro/zai-org/GLM-5.1:latest', profileVersion: 'personal-profile-1', promptVersion: 'artifact-v1' }
+    expect(providerRouteSchema.parse(route).modelId).toBe(route.modelId)
+    expect(providerRouteSchema.safeParse({ ...route, modelId: 'model with spaces' }).success).toBe(false)
+    expect(providerRouteSchema.safeParse({ ...route, apiKey: 'never-a-route-credential' }).success).toBe(false)
+  })
   it('accepts a complete multi-artifact request', () => {
     const request = analysisRequestSchema.parse(validRequestFixture)
 
