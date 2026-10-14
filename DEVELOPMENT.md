@@ -645,7 +645,7 @@ export function migrateDoc(doc: DocDataV1 | DocData): DocData {
 2. `documentExtractors.ts`：统一格式检测和解析器注册；TXT/Markdown 直接解析，PDF/DOCX 动态加载，避免增加首屏依赖。
 3. `pdfExtractor.ts`：基于 PDF.js 在浏览器内提取文本、恢复行、清理页边缘页码、限制 200 页，并把节点锚点关联到页码；扫描件给出明确 OCR 提示。
 4. `docxExtractor.ts`：直接解析 OOXML；保留标题层级、段落和表格文本。解压前检查路径穿越、分卷、加密、压缩方式、条目数、展开体积和异常压缩比，并拒绝 XML 实体声明。
-5. 安全与性能边界：源文件 5MB、提取文本 200 万字符、初始导图 400 节点；节点超限只截断草稿，完整原文仍保留。
+5. 安全与性能边界：TXT、Markdown、文字型 PDF、DOCX、PPTX 单文件最大 25MB，提取文本 200 万字符、初始导图 400 节点；节点超限只截断草稿，完整原文仍保留。扫描版 PDF 暂无 OCR，PPTX 演讲者备注不提取。
 6. Dexie schema v7 新增 `sources` 表；`saveDocumentBundle` 原子替换文档与完整来源集合；永久删除时与 blob、版本快照一并清理。
 7. `DocumentImportDialog`：展示格式、文件、推断标题、字符/章节/段落/节点统计、一级结构和警告，确认后才落盘；提取期间禁用重复提交。
 8. 原有“导入导图”与“从文档生成”分流；JSON/.msz 无损备份包含 `_sources`，导入时严格校验锚点和大小。

@@ -19,6 +19,18 @@
       "description": "OOXML document with headings, paragraphs, a tab, and a table",
       "bytes": 37972,
       "sha256": "bf22dcf8cd945ec2f94467efc0c558e8526e4e43414af09951e5a5f5dba5f659"
+    },
+    "structured-course.pptx": {
+      "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "description": "Two-slide deck with title placeholders, body text, and speaker notes",
+      "bytes": 34041,
+      "sha256": "39dcffb9d83c23283ecc69c4641a42173936a9ccee37ce3288a56b900b2e32ca"
+    },
+    "corrupt.pptx": {
+      "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "description": "Truncated PPTX without a ZIP central directory",
+      "bytes": 17020,
+      "sha256": "207ca71a086bfaea5d33bc08bab63f9f0298c921fa115df851e731d98bea8634"
     }
   }
 }

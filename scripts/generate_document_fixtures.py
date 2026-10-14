@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
+from pptx import Presentation
+from pptx.util import Inches as PptxInches, Pt as PptxPt
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
@@ -202,6 +205,74 @@ def create_scanned_pdf() -> Path:
     return path
 
 
+def shuffle_pptx_slide_order(path: Path) -> None:
+    """Swap the first two sldId r:id attributes so play order differs from file names.
+
+    Real-browser e2e must follow the sldIdLst rels order (slide2 first);
+    falling back to file-name order would flip the extracted chapter order.
+    rIds are template-dependent (the default deck already uses rId7/rId9),
+    so they are discovered from the XML instead of hard-coded.
+    """
+    with zipfile.ZipFile(path, "r") as source:
+        members = [(item.filename, source.read(item.filename)) for item in source.infolist()]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as target:
+        for name, payload in sorted(members):
+            if name == "ppt/presentation.xml":
+                xml = payload.decode("utf-8")
+                # 只在 sldIdLst 内交换；slideMaster/notesMaster 的 r:id 不能动。
+                section = re.search(r"<p:sldIdLst>.*?</p:sldIdLst>", xml, re.DOTALL)
+                if section:
+                    block = section.group(0)
+                    rids = re.findall(r'r:id="([^"]+)"', block)
+                    if len(rids) >= 2:
+                        first, second = rids[0], rids[1]
+                        swapped = (block
+                                   .replace(f'r:id="{first}"', 'r:id="__SHUFFLE__"', 1)
+                                   .replace(f'r:id="{second}"', f'r:id="{first}"', 1)
+                                   .replace('r:id="__SHUFFLE__"', f'r:id="{second}"', 1))
+                        xml = xml.replace(block, swapped, 1)
+                payload = xml.encode("utf-8")
+            info = zipfile.ZipInfo(name, date_time=(2026, 10, 9, 9, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o600 << 16
+            target.writestr(info, payload)
+    path.write_bytes(buffer.getvalue())
+
+
+def create_pptx() -> Path:
+    """Two-slide deck mirroring the DOCX fixture; speaker notes must stay out of extraction."""
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    path = OUTPUT / "structured-course.pptx"
+    presentation = Presentation()
+
+    first = presentation.slides.add_slide(presentation.slide_layouts[1])
+    first.shapes.title.text = "第一章 来源锚点"
+    body = first.placeholders[1]
+    body.text = "把导图节点连接到对应幻灯片。"
+    body.text_frame.add_paragraph().text = "页锚点记录幻灯片序号。"
+    first.notes_slide.notes_text_frame.text = "演讲者备注：不应进入导图。"
+
+    second = presentation.slides.add_slide(presentation.slide_layouts[1])
+    second.shapes.title.text = "第二章 可编辑导图"
+    second.placeholders[1].text = "导入后的节点仍可重命名、移动、撤销和重新导出。"
+
+    presentation.core_properties.title = "PPTX Import Course"
+    presentation.core_properties.author = "Cat-Thinking"
+    presentation.save(path)
+    shuffle_pptx_slide_order(path)
+    normalize_docx_zip(path)
+    return path
+
+
+def create_corrupt_pptx(source: Path) -> Path:
+    """Truncate the valid deck so the ZIP central directory disappears."""
+    path = OUTPUT / "corrupt.pptx"
+    payload = source.read_bytes()
+    path.write_bytes(payload[: len(payload) // 2])
+    return path
+
+
 def write_metadata() -> None:
     files = {
         "structured-course.pdf": {
@@ -215,6 +286,14 @@ def write_metadata() -> None:
         "structured-course.docx": {
             "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "description": "OOXML document with headings, paragraphs, a tab, and a table",
+        },
+        "structured-course.pptx": {
+            "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "description": "Two-slide deck with title placeholders, body text, and speaker notes",
+        },
+        "corrupt.pptx": {
+            "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "description": "Truncated PPTX without a ZIP central directory",
         },
     }
     manifest = {"schemaVersion": 1, "generatedAt": "2026-10-09T09:00:00Z", "files": {}}
@@ -255,6 +334,19 @@ def write_metadata() -> None:
                 "第二章 可编辑导图",
             ],
         },
+        "structuredPptx": {
+            "file": "structured-course.pptx",
+            "title": "第二章 可编辑导图",
+            "requiredText": [
+                "把导图节点连接到对应幻灯片。",
+                "第二章 可编辑导图",
+            ],
+            "anchorPages": [1, 2],
+        },
+        "corruptPptx": {
+            "file": "corrupt.pptx",
+            "errorContains": "PPTX 缺少 ZIP 中央目录",
+        },
     }
     (OUTPUT / "expected.json").write_text(
         json.dumps(expected, ensure_ascii=False, indent=2) + "\n",
@@ -264,13 +356,16 @@ def write_metadata() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--format", choices=("docx", "pdf", "metadata", "all"), default="all")
+    parser.add_argument("--format", choices=("docx", "pdf", "pptx", "metadata", "all"), default="all")
     args = parser.parse_args()
     if args.format in ("docx", "all"):
         create_docx()
     if args.format in ("pdf", "all"):
         create_structured_pdf()
         create_scanned_pdf()
+    if args.format in ("pptx", "all"):
+        deck = create_pptx()
+        create_corrupt_pptx(deck)
     if args.format in ("metadata", "all"):
         write_metadata()
 

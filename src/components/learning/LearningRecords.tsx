@@ -13,7 +13,9 @@ export default function LearningRecords({ snapshot, action, busy, onPractice }: 
       const assessment = snapshot.assessments.filter((e) => e.attemptId === attempt.id).at(-1)
       return <li key={attempt.id}><strong>{question?.question.prompt ?? '原题不可用'}</strong><span>{attempt.submittedAt === null ? '旧记录导入 无精确提交时间' : new Date(attempt.submittedAt).toLocaleString('zh-CN')} · {attempt.learningDate}</span>
         <p>回答：{typeof attempt.answer === 'boolean' ? attempt.answer ? '正确' : '错误' : String(attempt.answer)}</p>
+        <p>{attempt.assistance ? `辅助记录：提示 ${attempt.assistance.hints} 次；${attempt.assistance.fullExplanation ? '看过完整解释' : '未看完整解释'}；${attempt.assistance.sourceViewed ? '提交前回看过原文' : '未回看原文'}。` : '旧记录未记录辅助情况。'}{attempt.confidence !== undefined && ` 提交前信心 ${attempt.confidence}%。`}</p>
         <p>{assessment ? ({ success: '本次参考答案比较一致或已完成自评', partial: '自评未完成', failure: '建议补学', disputed: '答案待核对', skipped: '已跳过' })[assessment.outcome] : '等待自评'}{assessment?.reason ? ` · ${assessment.reason}` : ''}</p>
+        {assessment?.origin === 'ai-review' && <p>包含用户核对后的 AI 反馈记录；原始回答、比较与自评状态保留。</p>}
         <details><summary>查看自评与错因修订</summary>{snapshot.assessments.filter((e) => e.attemptId === attempt.id).map((e) => <p key={e.id}>{new Date(e.createdAt).toLocaleString('zh-CN')} · {e.outcome} {e.reason ?? ''}</p>)}</details>
         <button className="tbtn" disabled={!question} onClick={() => onPractice('', questionKey(attempt.question))}>再次练习</button></li>
     })}</ol>{!snapshot.attempts.length && <p>尚无长期作答记录。从保存的学习资料进入练习后，提交会记录在这里。</p>}

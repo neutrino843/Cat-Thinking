@@ -180,6 +180,11 @@ export const validateGeneratedArtifact = (input: ValidateArtifactInput): Artifac
       message: 'quiz question count differs from the request',
     })
   }
+  const support = input.run.request.options.learningSupport
+  if (artifact.kind === 'quiz' && support?.mode === 'variation') for (const [index, question] of artifact.payload.questions.entries()) {
+    if (support.quizType && support.quizType !== 'mixed' && question.type !== support.quizType) issues.push({ code: 'contract_invalid', path: `payload.questions.${index}.type`, message: 'Question type differs from the explicit learning request.' })
+    if (support.difficulty && question.difficulty !== support.difficulty) issues.push({ code: 'contract_invalid', path: `payload.questions.${index}.difficulty`, message: 'Question difficulty differs from the explicit learning request.' })
+  }
   for (const issue of validateArtifactAgainstManifest(artifact, input.run.request.manifest)) {
     issues.push({ code: 'contract_invalid', path: issue.path, message: issue.message })
   }

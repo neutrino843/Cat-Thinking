@@ -13,12 +13,11 @@ import LearningDataPanel from './LearningDataPanel'
 import LearningRecords from './LearningRecords'
 
 export type LearningView = 'today' | 'knowledge' | 'practice' | 'materials' | 'records' | 'exam' | 'application' | 'backup'
-export interface LearningTarget { courseId?: string; archiveId?: string; pointId?: string; localDocId?: string; localNodeId?: string; view?: LearningView; questionKey?: string }
+export interface LearningTarget { courseId?: string; archiveId?: string; pointId?: string; localDocId?: string; localNodeId?: string; view?: LearningView; questionKey?: string; sessionId?: string }
 type View = LearningView
 const VIEWS: { id: View; title: string }[] = [
-  { id: 'today', title: '今日' }, { id: 'knowledge', title: '知识' }, { id: 'practice', title: '练习' },
-  { id: 'materials', title: '资料' }, { id: 'records', title: '记录' }, { id: 'exam', title: '备考' },
-  { id: 'application', title: '应用' }, { id: 'backup', title: '备份' },
+  { id: 'today', title: '学习' }, { id: 'knowledge', title: '知识' }, { id: 'practice', title: '练习' },
+  { id: 'materials', title: '资料' }, { id: 'exam', title: '备考' },
 ]
 
 export default function LearningWorkspace({ initialTarget, onClose, inline = false }: { initialTarget: LearningTarget; onClose: () => void; inline?: boolean }) {
@@ -101,14 +100,15 @@ export default function LearningWorkspace({ initialTarget, onClose, inline = fal
       <form onSubmit={(e) => { e.preventDefault(); void action(async () => { const created = await createCourse({ name: name.trim() }); setName(''); setLoading(true); setCourseId(created.id) }) }}>
         <label className="sr-only" htmlFor="new-learning-course">新课程名称</label><input id="new-learning-course" maxLength={120} value={name} onChange={(e) => setName(e.target.value)} placeholder="新课程名称" required />
         <button className="tbtn" disabled={busy || !name.trim()}>创建课程</button></form></div>
-    <nav className="learning-tabs" aria-label="课程功能">{VIEWS.map((item) => <button key={item.id} className="tbtn" aria-pressed={view === item.id} onClick={() => setView(item.id)}>{item.title}</button>)}</nav>
+    <nav className="learning-tabs" aria-label="课程功能">{VIEWS.map((item) => <button key={item.id} className="tbtn" aria-pressed={view === item.id} onClick={() => setView(item.id)}>{item.title}</button>)}<details className="learning-course-menu"><summary>课程操作</summary>{[{ id: 'application', title: '应用任务' }, { id: 'records', title: '记录' }, { id: 'backup', title: '备份' }].map((item) => <button key={item.id} className="tbtn" onClick={() => setView(item.id as LearningView)}>{item.title}</button>)}</details></nav>
     <div className="learning-content">
       {error && <p role="alert" className="learning-error">{error}</p>}
       {loading && <p role="status">正在读取学习资料…</p>}
       {!courses.length && !loading && <section className="learning-empty"><h3>先给资料一个归属</h3><p>创建一门课程，再把文档加入课程。在 AI 分析里选择所需内容并保存为学习资料，就可以持续练习和回查。</p><p>这里的阅读、作答、排期和课程备份均在本机完成。</p></section>}
       {snapshot && <div key={snapshot.course.id}>
+        {snapshot.course.example && <p className="learning-section" role="status">原创示例课程 · 不调用模型，不计入个人学习统计。</p>}
         {(view === 'today' || view === 'exam') && <ReviewDashboard snapshot={snapshot} exam={view === 'exam'} onPractice={practice} onKnowledge={(id) => { setPointId(id); setView('knowledge') }} action={action} busy={busy} />}
-        {(view === 'knowledge' || view === 'application') && <KnowledgeWorkspace snapshot={snapshot} selectedPointId={pointId} onSelectPoint={setPointId} onPractice={practice} action={action} busy={busy} applicationOnly={view === 'application'} />}
+        {(view === 'knowledge' || view === 'application') && <KnowledgeWorkspace snapshot={snapshot} selectedPointId={pointId} selectedSessionId={initialTarget.sessionId} onSelectPoint={setPointId} onPractice={practice} action={action} busy={busy} applicationOnly={view === 'application'} />}
         {view === 'practice' && <LearningPractice key={`${pointId}:${questionId}:${examSessionId}`} snapshot={snapshot} pointId={pointId} selectedQuestionKey={questionId} sessionId={examSessionId} action={action} busy={busy} onKnowledge={(id) => { setPointId(id); setView('knowledge') }} />}
         {view === 'materials' && <CourseOverview snapshot={snapshot} action={action} busy={busy} onDeleted={() => { setCourseId(''); setSnapshot(undefined) }} />}
         {view === 'records' && <LearningRecords snapshot={snapshot} action={action} busy={busy} onPractice={practice} />}

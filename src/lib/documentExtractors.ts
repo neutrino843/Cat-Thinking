@@ -1,7 +1,18 @@
 import type { SourceKind } from '../types'
 
-export const MAX_SOURCE_BYTES = 5 * 1024 * 1024
+export const MAX_SOURCE_BYTES = 25 * 1024 * 1024
 export const MAX_SOURCE_CHARS = 2_000_000
+
+/** 解析进度：reading（读文件）→ parsing（解压/逐页解析）→ structuring（生成导图结构）。 */
+export interface ImportProgress {
+  phase: 'reading' | 'parsing' | 'structuring'
+  /** 0-1，同 phase 内单调递增。 */
+  ratio: number
+  /** 用户可读的进度说明，如「第 3/20 页」。 */
+  detail?: string
+}
+
+export type ImportProgressListener = (progress: ImportProgress) => void
 
 export interface SourcePageSpan {
   page: number
@@ -21,7 +32,7 @@ export interface ExtractedDocument {
   warnings: string[]
 }
 
-type Extractor = (file: File) => Promise<ExtractedDocument>
+type Extractor = (file: File, onProgress?: ImportProgressListener) => Promise<ExtractedDocument>
 
 export function normalizeSourceText(input: string): string {
   return input
@@ -44,11 +55,19 @@ export function detectSourceKind(file: Pick<File, 'name' | 'type'>): SourceKind 
   if (ext === 'md' || ext === 'markdown' || file.type === 'text/markdown') return 'markdown'
   if (ext === 'txt' || ext === 'text' || file.type === 'text/plain') return 'text'
   if (ext === 'pdf' || file.type === 'application/pdf') return 'pdf'
+  // 旧版二进制 PPT 与启用宏的 PPTM 均不支持，提前给出可操作的引导。
+  if (ext === 'ppt' || ext === 'pptm') {
+    throw new Error('旧版 .ppt/.pptm 不受支持，请在 PowerPoint 中另存为 .pptx 后导入')
+  }
+  if (
+    ext === 'pptx' ||
+    file.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  ) return 'pptx'
   if (
     ext === 'docx' ||
     file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   ) return 'docx'
-  throw new Error('当前支持 TXT、Markdown、PDF 和 DOCX 文档')
+  throw new Error('当前支持 TXT、Markdown、PDF、DOCX 和 PPTX 文档')
 }
 
 async function extractText(file: File, kind: 'text' | 'markdown'): Promise<ExtractedDocument> {
@@ -67,20 +86,26 @@ const extractors: Record<SourceKind, Extractor> = {
   text: (file) => extractText(file, 'text'),
   markdown: (file) => extractText(file, 'markdown'),
   // 重型格式按需加载；首屏和普通导图编辑不下载解析器代码。
-  pdf: async (file) => (await import('./extractors/pdfExtractor')).extractPdf(file),
-  docx: async (file) => (await import('./extractors/docxExtractor')).extractDocx(file),
+  pdf: async (file, onProgress) => (await import('./extractors/pdfExtractor')).extractPdf(file, onProgress),
+  docx: async (file, onProgress) => (await import('./extractors/docxExtractor')).extractDocx(file, onProgress),
+  pptx: async (file, onProgress) => (await import('./extractors/pptxExtractor')).extractPptx(file, onProgress),
 }
 
 /** Cat-Thinking 内建解析入口；不依赖外部进程、固定端口或绝对路径。 */
-export async function extractDocument(file: File): Promise<ExtractedDocument> {
+export async function extractDocument(
+  file: File,
+  onProgress?: ImportProgressListener,
+): Promise<ExtractedDocument> {
   if (file.size > MAX_SOURCE_BYTES) {
     throw new Error(`文档大小不能超过 ${MAX_SOURCE_BYTES / 1024 / 1024}MB`)
   }
+  onProgress?.({ phase: 'reading', ratio: 0.1, detail: file.name })
   const kind = detectSourceKind(file)
-  const result = await extractors[kind](file)
+  const result = await extractors[kind](file, onProgress)
   if (!result.text) throw new Error('文档内容为空，无法生成导图')
   if (result.text.length > MAX_SOURCE_CHARS) {
     throw new Error(`文档文本超过 ${MAX_SOURCE_CHARS.toLocaleString('zh-CN')} 字符，请拆分后导入`)
   }
+  onProgress?.({ phase: 'structuring', ratio: 0.9 })
   return result
 }

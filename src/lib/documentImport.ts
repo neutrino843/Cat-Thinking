@@ -2,6 +2,7 @@ import { ANALYSIS_LIMITS } from '@cat-thinking/analysis-contracts'
 import type { DocData, MindNodeData, SourceDocument } from '../types'
 import {
   extractDocument,
+  type ImportProgressListener,
   type SourcePageSpan,
 } from './documentExtractors'
 
@@ -10,6 +11,7 @@ export {
   MAX_SOURCE_CHARS,
   normalizeSourceText,
 } from './documentExtractors'
+export type { ImportProgress, ImportProgressListener } from './documentExtractors'
 export const MAX_DRAFT_NODES = 400
 export const MAX_SOURCE_LOCATORS = ANALYSIS_LIMITS.maxSourceLocators
 const NODE_LABEL_MAX = 120
@@ -371,16 +373,21 @@ function buildDraft(
 }
 
 /** Cat-Thinking 内建文档导入入口。所有解析均在浏览器内完成，重型格式按需加载。 */
-export async function prepareDocumentImport(file: File): Promise<DocumentImportDraft> {
-  const extracted = await extractDocument(file)
+export async function prepareDocumentImport(
+  file: File,
+  onProgress?: ImportProgressListener,
+): Promise<DocumentImportDraft> {
+  const extracted = await extractDocument(file, onProgress)
+  onProgress?.({ phase: 'structuring', ratio: 0.92 })
   const built = buildDraft(
     extracted.text,
     extracted.structure,
     file,
     extracted.pageSpans,
     extracted.titleHint,
-    extracted.structure === 'text' || extracted.kind === 'docx',
+    extracted.structure === 'text' || extracted.kind === 'docx' || extracted.kind === 'pptx',
   )
+  onProgress?.({ phase: 'structuring', ratio: 1 })
   const source: SourceDocument = {
     version: 1,
     id: built.sourceId,

@@ -31,7 +31,8 @@ import { useSettings } from '../store/settings'
 import { closeDocTab, createDocTab, emitDocsChanged, openDocById } from '../lib/tabs'
 import VersionHistory from './VersionHistory'
 import DocumentImportDialog from './DocumentImportDialog'
-import { prepareDocumentImport, type DocumentImportDraft } from '../lib/documentImport'
+import type { DocumentImportDraft } from '../lib/documentImport'
+import { importQueue, type ImportTask } from '../lib/importQueue'
 import { useT } from '../i18n'
 
 type View = 'library' | 'trash'
@@ -39,6 +40,13 @@ type View = 'library' | 'trash'
 /** 事件常量：Palette 触发 trash-open / trash-empty 时派发，Sidebar 监听切换视图 */
 const TRASH_OPEN_EVENT = 'msz:trash-open'
 const TRASH_EMPTY_EVENT = 'msz:trash-empty'
+
+/** 导入队列 phase 对应的界面文案；进度 detail（如「第 3/20 页」）存在时优先展示。 */
+const IMPORT_PHASE_LABEL_KEYS = {
+  reading: 'import.progress.reading',
+  parsing: 'import.progress.parsing',
+  structuring: 'import.progress.structuring',
+} as const
 
 function fmtMD(ts: number): string {
   const d = new Date(ts)
@@ -58,8 +66,14 @@ export default function Sidebar() {
   const [view, setView] = useState<View>('library')
   /** M15：版本历史模态打开的文档 id，null 表示关闭 */
   const [historyDocId, setHistoryDocId] = useState<string | null>(null)
-  const [documentDraft, setDocumentDraft] = useState<DocumentImportDraft | null>(null)
-  const [documentImporting, setDocumentImporting] = useState(false)
+  const [documentDrafts, setDocumentDrafts] = useState<DocumentImportDraft[]>([])
+  const [importTasks, setImportTasks] = useState<readonly ImportTask[]>(() => importQueue.snapshot)
+  const documentImporting = importTasks.some(({ status }) => status === 'queued' || status === 'parsing')
+  const activeImportTask = importTasks.find(({ status }) => status === 'parsing')
+  const documentProgressLabel = activeImportTask
+    ? activeImportTask.progress?.detail
+      ?? t(IMPORT_PHASE_LABEL_KEYS[activeImportTask.progress?.phase ?? 'parsing'])
+    : ''
   const activeId = useDoc((s) => s.doc.id)
   const dark = useSettings((s) => s.dark)
   /** M7-P5：悬停预览的模板（{name, doc}），null 表示不显示 */
@@ -71,6 +85,9 @@ export default function Sidebar() {
   const refresh = async () => setMetas(await listDocs())
   const refreshTrash = async () => setTrash(await listTrash().catch(() => []))
   const refreshTemplates = async () => setCustoms(await listTemplates().catch(() => []))
+
+  // 订阅导入队列：多文件导入时按钮/状态随队列进度刷新
+  useEffect(() => importQueue.subscribe(setImportTasks), [])
 
   // 修审计 M-5：数据加载 effect 加取消标记，避免快速切换时旧响应覆盖新状态；
   // 同时消除「effect 内同步调用 setState」反模式告警（此处 setState 实际在 await 之后）
@@ -239,25 +256,21 @@ export default function Sidebar() {
     }
   }
 
-  const prepareSourceDocument = async (file: File) => {
-    if (documentImporting) return
-    setDocumentImporting(true)
-    try {
-      setDocumentDraft(await prepareDocumentImport(file))
-    } catch (e) {
-      alert(t('import.failed') + (e as Error).message)
-    } finally {
-      setDocumentImporting(false)
-    }
+  const prepareSourceDocuments = (files: File[]) => {
+    importQueue.enqueue(files, {
+      onDraft: (draft) => setDocumentDrafts((prev) => [...prev, draft]),
+      onFailure: (name, message) => alert(`${t('import.failed')}${name}：${message}`),
+    })
   }
 
   const confirmSourceDocument = async () => {
-    if (!documentDraft) return
-    await saveDocumentBundle(documentDraft.doc, [documentDraft.source])
-    useDoc.getState().openDoc(documentDraft.doc)
+    const draft = documentDrafts[0]
+    if (!draft) return
+    await saveDocumentBundle(draft.doc, [draft.source])
+    useDoc.getState().openDoc(draft.doc)
     emitDocsChanged()
     await refresh()
-    setDocumentDraft(null)
+    setDocumentDrafts((prev) => prev.slice(1))
   }
 
   /* 回收站操作 */
@@ -472,7 +485,7 @@ export default function Sidebar() {
               onClick={() => documentFileRef.current?.click()}
               disabled={documentImporting}
             >
-              {documentImporting ? t('import.extracting') : t('import.document')}
+              {documentImporting ? (documentProgressLabel || t('import.extracting')) : t('import.document')}
             </button>
             <button className="tbtn" onClick={() => fileRef.current?.click()}>
               {t('import.map')}
@@ -491,12 +504,13 @@ export default function Sidebar() {
             <input
               ref={documentFileRef}
               type="file"
-              accept=".txt,.text,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              multiple
+              accept=".txt,.text,.md,.markdown,.pdf,.docx,.pptx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation"
               disabled={documentImporting}
               hidden
               onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void prepareSourceDocument(f)
+                const files = Array.from(e.target.files ?? [])
+                if (files.length) prepareSourceDocuments(files)
                 e.target.value = ''
               }}
             />
@@ -544,10 +558,11 @@ export default function Sidebar() {
       {historyDocId && (
         <VersionHistory docId={historyDocId} onClose={() => setHistoryDocId(null)} />
       )}
-      {documentDraft && (
+      {documentDrafts.length > 0 && documentDrafts[0] && (
         <DocumentImportDialog
-          draft={documentDraft}
-          onClose={() => setDocumentDraft(null)}
+          key={documentDrafts[0].source.id}
+          draft={documentDrafts[0]}
+          onClose={() => setDocumentDrafts((prev) => prev.slice(1))}
           onConfirm={confirmSourceDocument}
         />
       )}

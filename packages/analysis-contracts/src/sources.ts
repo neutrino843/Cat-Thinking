@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ANALYSIS_CONTRACT_VERSION, ANALYSIS_LIMITS } from './constants.js'
 import { byteCountSchema, identifierSchema, sha256Schema, uniqueValues } from './common.js'
 
-export const sourceKindSchema = z.enum(['text', 'markdown', 'pdf', 'docx'])
+export const sourceKindSchema = z.enum(['text', 'markdown', 'pdf', 'docx', 'pptx'])
 
 const sourceRangeShape = {
   start: z.number().int().nonnegative(),
@@ -57,6 +57,13 @@ export const sourceSnapshotSchema = z
       context.addIssue({
         code: 'custom',
         message: 'PDF sources require pageCount',
+        path: ['pageCount'],
+      })
+    }
+    if (source.kind === 'pptx' && source.pageCount === undefined) {
+      context.addIssue({
+        code: 'custom',
+        message: 'PPTX sources require pageCount',
         path: ['pageCount'],
       })
     }

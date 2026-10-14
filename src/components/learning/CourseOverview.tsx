@@ -8,6 +8,9 @@ import { openDocById } from '../../lib/tabs'
 import { learningDate } from '../../learning/reviewScheduler'
 import { useLearningClock } from './useLearningClock'
 import ArchiveDetails from './ArchiveDetails'
+import CourseGoals from './CourseGoals'
+import LearningSupportPanel from './LearningSupportPanel'
+import { prepareFreshAnalysis } from '../../learning/freshAnalysis'
 
 export type LearningAction = (operation: () => Promise<unknown>) => Promise<void>
 export default function CourseOverview({ snapshot, action, busy, onDeleted }: { snapshot: CourseSnapshot; action: LearningAction; busy: boolean; onDeleted: () => void }) {
@@ -41,6 +44,8 @@ export default function CourseOverview({ snapshot, action, busy, onDeleted }: { 
       {revision !== course.revision && <p role="status">设置有其他更新。保存会检查版本，或先重新读取。</p>}
       <div className="learning-actions"><button className="tbtn" disabled={busy}>保存学习设置</button><button className="tbtn" type="button" disabled={busy} onClick={reload}>重新读取设置</button></div>
     </form>
+    <CourseGoals snapshot={snapshot} action={action} busy={busy} />
+    <LearningSupportPanel snapshot={snapshot} pointIds={[]} action={action} busy={busy} />
     <h4>加入已有文档</h4>
     <form className="learning-fields" onSubmit={(e) => { e.preventDefault(); void action(async () => { await attachDocument(course.id, docId, chapter); setDocId(''); setChapter('') }) }}>
       <label>文档<select value={docId} onChange={(e) => setDocId(e.target.value)} required><option value="">选择文档</option>{docs.filter((doc) => !snapshot.documents.some((r) => r.docId === doc.id)).map((doc) => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select></label>
@@ -48,9 +53,11 @@ export default function CourseOverview({ snapshot, action, busy, onDeleted }: { 
     </form>
     <ul className="learning-list">{snapshot.documents.map((record) => { const doc = snapshot.docs.find((item) => item.id === record.docId); return <li key={record.id}>
       <strong>{doc?.title ?? '原文档已删除'}</strong><span>{record.chapter || '暂存区'}</span><div className="learning-actions">
+        <label>资料角色<select value={record.role ?? 'notes'} disabled={busy} onChange={(event) => void action(() => saveEntity({ ...record, role: event.target.value as 'syllabus' | 'slides' | 'textbook' | 'notes' }, record.revision))}><option value="syllabus">教学大纲</option><option value="slides">教师课件</option><option value="textbook">教材</option><option value="notes">个人笔记</option></select></label>
         <button className="tbtn" disabled={!doc || busy} onClick={() => void openDocById(record.docId)}>打开编辑文档</button>
         <button className="tbtn" disabled={busy} onClick={() => void action(() => detachDocument(course.id, record.docId))}>移出课程</button>
         {doc && <button className="tbtn" onClick={async () => { await openDocById(record.docId); window.dispatchEvent(new Event('msz:learning-close-for-analysis')) }}>打开 AI 分析</button>}
+        {doc && <button className="tbtn" disabled={busy} onClick={() => void action(async () => { const fresh = await prepareFreshAnalysis(course.id, record.docId, record.chapter); await openDocById(fresh.id); window.dispatchEvent(new Event('msz:learning-close-for-analysis')) })}>新分析，保留旧记录</button>}
       </div></li> })}</ul>
     {!snapshot.documents.length && <p>尚无资料。可以先返回编辑器导入文档，再加入课程。</p>}
     <h4>已保存学习资料</h4><p>无题目或需要补充范围时，先打开课程文档的 AI 分析，重新选择来源与内容后明确发起新分析；已有归档保留。查看覆盖、排期和练习均不发起生成。</p>

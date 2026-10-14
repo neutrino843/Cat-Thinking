@@ -1,22 +1,23 @@
-import { artifactEnvelopeSchema, canonicalizeJson, identifierSchema, sourceManifestSchema, validateArtifactAgainstManifest } from '@cat-thinking/analysis-contracts'
+import { artifactEnvelopeSchema, canonicalizeJson, identifierSchema, sourceKindSchema, sourceManifestSchema, validateArtifactAgainstManifest } from '@cat-thinking/analysis-contracts'
 import { createSourceSnapshot, sha256Hex } from '../analysis/fingerprint'
 import type { SourceDocument } from '../types'
 import { LearningError, type ArchivedSourceRef, type LearningArchive, type LearningEntity, type QuestionRef } from './model'
 
 const baseKeys = ['version', 'id', 'courseId', 'revision', 'createdAt', 'updatedAt', 'kind']
 const fields: Record<LearningEntity['kind'], string[]> = {
-  course: ['name', 'goal', 'timeZone', 'dailyMinutes', 'dailyQuestionLimit', 'examDate', 'goalVersion', 'automaticReviews'],
-  document: ['docId', 'chapter'], point: ['title', 'definition', 'chapter', 'parentId', 'aliases', 'notes', 'sourceRefs', 'questionRefs', 'status', 'docId', 'nodeId', 'questionLevels', 'goalIncluded', 'archiveId', 'generatedNodeId'],
+  course: ['name', 'goal', 'timeZone', 'dailyMinutes', 'dailyQuestionLimit', 'examDate', 'goalVersion', 'automaticReviews', 'goals', 'example'],
+  document: ['docId', 'chapter', 'role'], point: ['title', 'definition', 'chapter', 'parentId', 'aliases', 'notes', 'sourceRefs', 'questionRefs', 'status', 'docId', 'nodeId', 'questionLevels', 'goalIncluded', 'archiveId', 'generatedNodeId'],
   archive: ['originDocId', 'provenanceDocId', 'runId', 'title', 'manifest', 'sources', 'artifacts', 'contentHash'],
-  attempt: ['question', 'answer', 'submittedAt', 'learningDate', 'answerRevealed', 'origin', 'confidence', 'sessionId'],
-  draft: ['question', 'answer', 'answerRevealed', 'attemptId'],
-  assessment: ['attemptId', 'outcome', 'difficulty', 'selfAssessmentComplete', 'reason', 'rubricChecks', 'sequence'],
+  attempt: ['question', 'answer', 'submittedAt', 'learningDate', 'answerRevealed', 'origin', 'confidence', 'sessionId', 'assistance', 'recallText'],
+  draft: ['question', 'answer', 'answerRevealed', 'attemptId', 'assistance', 'recallText'],
+  assessment: ['attemptId', 'outcome', 'difficulty', 'selfAssessmentComplete', 'reason', 'rubricChecks', 'sequence', 'feedbackArchiveId', 'origin'],
   schedule: ['question', 'status', 'dueDate', 'stage', 'lastLearningDate', 'lastAttemptId', 'manual', 'ruleVersion', 'successfulLearningDates', 'suspendedReason'],
   relation: ['fromPointId', 'toPointId', 'type', 'confirmed', 'sourceRefs'],
   merge: ['fromPointId', 'toPointId', 'action', 'undoOf', 'beforePoints', 'beforeRelations', 'afterPointRevisions', 'afterRelationRevisions', 'undoDisabledReason'],
-  session: ['title', 'pointIds', 'status', 'steps', 'endedAt', 'purpose', 'questions'],
+  session: ['title', 'pointIds', 'status', 'steps', 'endedAt', 'purpose', 'questions', 'checkpoint', 'examConfig', 'planning'],
   application: ['pointIds', 'title', 'prompt', 'response', 'rubric', 'checks', 'status', 'learningDate'],
   issue: ['question', 'reason', 'note', 'status'], binding: ['docId', 'archiveId', 'artifactId', 'mappings', 'status'],
+  support: ['mode', 'docId', 'pointIds', 'sourceRefs', 'prompt', 'learnerAnswer', 'hintLevel', 'quizType', 'difficulty', 'status', 'generatedArchiveId', 'questionRef', 'attemptId', 'sessionId', 'viewedAt'],
 }
 function invalid(): never { throw new LearningError('invalid', '学习数据结构、版本或范围无效。') }
 export const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -49,7 +50,7 @@ export function parseArchivedSourceRef(v: unknown): ArchivedSourceRef {
 }
 export function parseSourceDocument(v: unknown): SourceDocument {
   const r = strictObject(v, ['version', 'id', 'docId', 'name', 'kind', 'mime', 'size', 'lastModified', 'importedAt', 'extractor', 'text', 'contentHash', 'charCount', 'anchors', 'locators'])
-  if (r.version !== 1) invalid(); id(r.id); id(r.docId); text(r.name, 500); one(r.kind, ['text', 'markdown', 'pdf', 'docx']); text(r.mime, 200); text(r.extractor, 100)
+  if (r.version !== 1) invalid(); id(r.id); id(r.docId); text(r.name, 500); if (!sourceKindSchema.safeParse(r.kind).success) invalid(); text(r.mime, 200); text(r.extractor, 100)
   number(r.size, 0, 64 * 1024 * 1024); number(r.lastModified); number(r.importedAt); text(r.text, 8_000_000); number(r.charCount)
   if (r.charCount !== (r.text as string).length || r.contentHash !== undefined && (typeof r.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(r.contentHash))) invalid()
   array(r.anchors, 100_000)
@@ -73,15 +74,25 @@ export function parseLearningEntity(v: unknown): LearningEntity {
     case 'course':
       if (r.id !== r.courseId) invalid(); text(r.name, 200); if (!(r.name as string).trim()) invalid(); text(r.goal); text(r.timeZone, 100)
       try { new Intl.DateTimeFormat('en', { timeZone: r.timeZone as string }).format() } catch { invalid() }
-      number(r.dailyMinutes, 1, 1440); number(r.dailyQuestionLimit, 1, 1000); number(r.goalVersion, 1); if (r.examDate !== undefined) date(r.examDate); if (r.automaticReviews !== undefined) bool(r.automaticReviews); break
-    case 'document': id(r.docId); text(r.chapter, 500); break
+      number(r.dailyMinutes, 1, 1440); number(r.dailyQuestionLimit, 1, 1000); number(r.goalVersion, 1); if (r.examDate !== undefined) date(r.examDate); if (r.automaticReviews !== undefined) bool(r.automaticReviews)
+      if (r.example !== undefined) bool(r.example)
+      if (r.goals !== undefined) {
+        array(r.goals, 1000); const ids = new Set<string>()
+        for (const raw of r.goals) { const g = strictObject(raw, ['id', 'title', 'level', 'priority', 'pointIds', 'confirmed']); id(g.id); text(g.title, 500); if (!(g.title as string).trim() || ids.has(g.id as string)) invalid(); ids.add(g.id as string); one(g.level, ['recall', 'explanation', 'application']); one(g.priority, ['normal', 'important', 'required']); array(g.pointIds, 1000); g.pointIds.forEach(id); if (new Set(g.pointIds).size !== g.pointIds.length) invalid(); bool(g.confirmed) }
+      }
+      break
+    case 'document': id(r.docId); text(r.chapter, 500); if (r.role !== undefined) one(r.role, ['syllabus', 'slides', 'textbook', 'notes']); break
     case 'point':
       text(r.title, 500); text(r.definition); text(r.chapter, 500); text(r.notes); array(r.aliases, 100); r.aliases.forEach((x) => text(x, 500))
       array(r.sourceRefs, 200); r.sourceRefs.forEach(parseArchivedSourceRef); array(r.questionRefs, 500); r.questionRefs.forEach(parseQuestionRef); one(r.status, ['active', 'pending', 'retired'])
       if (!(r.title as string).trim() || new Set(r.questionRefs.map((q) => { const reference = q as QuestionRef; return canonicalizeJson([reference.archiveId, reference.artifactId, reference.questionId]) })).size !== r.questionRefs.length) invalid()
       for (const key of ['parentId', 'docId', 'nodeId', 'archiveId', 'generatedNodeId']) if (r[key] !== undefined) id(r[key])
       if (r.goalIncluded !== undefined) bool(r.goalIncluded)
-      if (r.questionLevels !== undefined) { if (!isRecord(r.questionLevels) || Object.keys(r.questionLevels).length > 500) invalid(); for (const [key, value] of Object.entries(r.questionLevels)) { id(key); one(value, ['recall', 'explanation', 'application']) } }
+      if (r.questionLevels !== undefined) {
+        if (!isRecord(r.questionLevels) || Object.keys(r.questionLevels).length > 500) invalid()
+        const references = new Set((r.questionRefs as QuestionRef[]).map((ref) => JSON.stringify([ref.archiveId, ref.artifactId, ref.questionId])))
+        for (const [key, value] of Object.entries(r.questionLevels)) { if (!references.has(key)) id(key); one(value, ['recall', 'explanation', 'application']) }
+      }
       break
     case 'archive':
       id(r.originDocId); id(r.provenanceDocId); id(r.runId); text(r.title, 500); if (typeof r.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(r.contentHash)) invalid()
@@ -91,9 +102,10 @@ export function parseLearningEntity(v: unknown): LearningEntity {
       parseQuestionRef(r.question); if (typeof r.answer === 'string') text(r.answer, 10_000); else if (typeof r.answer === 'number') number(r.answer, 0, 1000); else if (typeof r.answer !== 'boolean') { array(r.answer, 100); r.answer.forEach((x) => text(x, 10_000)) }
       if (r.submittedAt !== null) number(r.submittedAt); date(r.learningDate); bool(r.answerRevealed); one(r.origin, ['practice', 'legacy']); if (r.confidence !== undefined) number(r.confidence, 0, 100); if (r.sessionId !== undefined) id(r.sessionId); break
     case 'draft':
-      parseQuestionRef(r.question); if (typeof r.answer === 'string') text(r.answer, 10_000); else if (typeof r.answer === 'number') number(r.answer, 0, 1000); else bool(r.answer)
+      parseQuestionRef(r.question); if (typeof r.answer === 'string') text(r.answer, 10_000); else if (typeof r.answer === 'number') number(r.answer, 0, 1000); else if (r.answer !== null) bool(r.answer)
       bool(r.answerRevealed); id(r.attemptId); break
     case 'assessment':
+      if (r.feedbackArchiveId !== undefined) id(r.feedbackArchiveId); if (r.origin !== undefined) one(r.origin, ['self', 'ai-review'])
       id(r.attemptId); one(r.outcome, ['success', 'partial', 'failure', 'disputed', 'skipped']); one(r.difficulty, ['again', 'hard', 'good', 'easy']); bool(r.selfAssessmentComplete); if (r.reason !== undefined) text(r.reason, 2000); if (r.rubricChecks !== undefined) { array(r.rubricChecks, 100); r.rubricChecks.forEach(bool) } if (r.sequence !== undefined) number(r.sequence, 1); break
     case 'schedule':
       parseQuestionRef(r.question); one(r.status, ['active', 'paused', 'remediation']); date(r.dueDate); number(r.stage, 0, 4); bool(r.manual); text(r.ruleVersion, 100)
@@ -124,6 +136,16 @@ export function parseLearningEntity(v: unknown): LearningEntity {
         if (!r.questions.length || new Set(r.questions.map((q) => { const ref = q as QuestionRef; return canonicalizeJson([ref.archiveId, ref.artifactId, ref.questionId]) })).size !== r.questions.length) invalid()
       }
       if (r.purpose === 'exam' && r.questions === undefined || r.purpose !== 'exam' && r.questions !== undefined) invalid()
+      if (r.examConfig !== undefined) { if (r.purpose !== 'exam') invalid(); const c = strictObject(r.examConfig, ['durationMinutes', 'mode']); number(c.durationMinutes, 1, 180); one(c.mode, ['simulation', 'guided']) }
+      if (r.planning !== undefined) { const p = strictObject(r.planning, ['date', 'minutes']); date(p.date); number(p.minutes, 0, 1440) }
+      if (r.checkpoint !== undefined) {
+        const c = strictObject(r.checkpoint, ['stepIndex', 'paused', 'hidden', 'goalVersion', 'pointRevisions', 'archiveHashes', 'questionKey', 'position', 'endedReason'])
+        number(c.stepIndex, 0, Math.max(0, r.steps.length - 1)); bool(c.paused); bool(c.hidden); number(c.goalVersion, 1)
+        if (!isRecord(c.pointRevisions) || Object.keys(c.pointRevisions).length > 1000 || !isRecord(c.archiveHashes) || Object.keys(c.archiveHashes).length > 1000) invalid()
+        for (const [key, value] of Object.entries(c.pointRevisions)) { id(key); if (!r.pointIds.includes(key)) invalid(); number(value, 1) }
+        for (const [key, value] of Object.entries(c.archiveHashes)) { id(key); if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) invalid() }
+        if (c.questionKey !== undefined) text(c.questionKey, 1000); if (c.position !== undefined) number(c.position, 0, 10_000_000); if (c.endedReason !== undefined) one(c.endedReason, ['completed', 'user'])
+      }
       break
     case 'application':
       array(r.pointIds, 1000); r.pointIds.forEach(id); text(r.title, 500); text(r.prompt); text(r.response); array(r.rubric, 100); r.rubric.forEach((x) => text(x, 2000)); array(r.checks, 100); r.checks.forEach(bool)
@@ -131,10 +153,21 @@ export function parseLearningEntity(v: unknown): LearningEntity {
       one(r.status, ['pending', 'completed', 'skipped']); if (r.status === 'completed' && (!(r.response as string).trim() || !r.checks.every(Boolean))) invalid()
       if (r.learningDate !== undefined) date(r.learningDate); break
     case 'issue': parseQuestionRef(r.question); one(r.reason, ['answer', 'ambiguous', 'outside-source']); text(r.note); one(r.status, ['open', 'resolved']); break
+    case 'support':
+      one(r.mode, ['explain', 'compare', 'hint', 'feedback', 'goals', 'variation', 'supplement']); id(r.docId); text(r.prompt, 3000); if (!(r.prompt as string).trim()) invalid()
+      array(r.pointIds, 1000); r.pointIds.forEach(id); array(r.sourceRefs, 100); r.sourceRefs.forEach(parseArchivedSourceRef); if (!r.sourceRefs.length) invalid()
+      one(r.status, ['prepared', 'viewed', 'accepted', 'rejected']); if (r.learnerAnswer !== undefined) text(r.learnerAnswer, 10000); if (r.hintLevel !== undefined) number(r.hintLevel, 1, 3)
+      for (const key of ['generatedArchiveId', 'attemptId', 'sessionId']) if (r[key] !== undefined) id(r[key]); if (r.questionRef !== undefined) parseQuestionRef(r.questionRef)
+      if (r.quizType !== undefined) one(r.quizType, ['mixed', 'multiple-choice', 'true-false', 'short-answer']); if (r.difficulty !== undefined) one(r.difficulty, ['easy', 'medium', 'hard']); if (r.viewedAt !== undefined) number(r.viewedAt)
+      break
     case 'binding':
       id(r.docId); id(r.archiveId); id(r.artifactId); one(r.status, ['active', 'pending', 'retired']); array(r.mappings, 100_000)
       for (const raw of r.mappings) { const m = strictObject(raw, ['generatedNodeId', 'localNodeId', 'pointId', 'originalText', 'originalNote']); id(m.generatedNodeId); id(m.localNodeId); id(m.pointId); text(m.originalText, 500); if (m.originalNote !== undefined) text(m.originalNote) } break
   }
+  if ((kind === 'attempt' || kind === 'draft') && r.assistance !== undefined) {
+    const a = strictObject(r.assistance, ['hints', 'fullExplanation', 'sourceViewed', 'recorded']); number(a.hints, 0, 1000); bool(a.fullExplanation); bool(a.sourceViewed); bool(a.recorded)
+  }
+  if ((kind === 'attempt' || kind === 'draft') && r.recallText !== undefined) text(r.recallText, 10000)
   return JSON.parse(JSON.stringify(r)) as LearningEntity
 }
 

@@ -20,7 +20,7 @@ export interface DailyPlanCandidate {
 export interface DailyPlanOptions { learningDate: string; timeBudgetMinutes: number; questionLimit: number }
 export interface PlannedLearningTask extends DailyPlanCandidate { recommendationReason: string }
 export interface DeferredLearningTask extends PlannedLearningTask {
-  deferredBecause: 'not-due' | 'paused' | 'source-invalid' | 'time-capacity' | 'question-capacity'
+  deferredBecause: 'not-due' | 'paused' | 'source-invalid' | 'time-capacity' | 'question-capacity' | 'user-deferred'
   deferredReason: string
 }
 export interface DailyPlan {

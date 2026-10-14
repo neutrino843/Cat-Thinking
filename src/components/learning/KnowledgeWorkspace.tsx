@@ -6,7 +6,9 @@ import { findKnowledgeCandidates, buildLearningPath, addConfirmedPrerequisite, m
 import { buildKnowledgeCoverage } from '../../learning/coverageView'
 import { sourceExcerpt, sameQuestion, archivedQuestions } from '../../learning/workspaceView'
 import type { LearningAction } from './CourseOverview'
-import GuidedLearning from './GuidedLearning'
+import SessionLearning from './SessionLearning'
+import { createGuidedSession } from '../../learning/session'
+import LearningSupportPanel from './LearningSupportPanel'
 
 const COVERAGE = { 'no-questions': '尚无题目', 'recall-only': '目前只有记忆练习', 'has-explanation': '有解释练习', 'has-application': '有应用任务' }
 const OBSERVATION = { unpracticed: '尚未练习', 'needs-remediation': '建议补学', 'awaiting-review': '待复习', 'delayed-success': '已有不同日成功', 'assessment-pending': '待自评', 'self-assessed': '已完成自评', 'practice-recorded': '有练习记录', paused: '已暂停' }
@@ -31,7 +33,7 @@ function PointEditor({ point, snapshot, action, busy }: { point: KnowledgePoint;
     <label>核心说明<textarea value={definition} onChange={(e) => setDefinition(e.target.value)} maxLength={10000} /></label>
     <label>所属章节<input value={chapter} maxLength={120} onChange={(e) => setChapter(e.target.value)} /></label>
     <label>我的补充<textarea value={notes} maxLength={10000} onChange={(e) => setNotes(e.target.value)} placeholder="记录自己的解释，和原文依据分开" /></label>
-    <label className="learning-option"><input type="checkbox" checked={includeGoal} onChange={(e) => setIncludeGoal(e.target.checked)} />纳入当前课程学习目标</label>
+    {snapshot.course.goals ? <p>当前学习与备考范围按已确认的课程目标目录安排。</p> : <label className="learning-option"><input type="checkbox" checked={includeGoal} onChange={(e) => setIncludeGoal(e.target.checked)} />纳入当前课程学习目标</label>}
     {point.questionRefs.length > 0 && <fieldset><legend>确认题目归属 共同依据只表示相关</legend>{point.questionRefs.map((ref) => {
       const key = `${ref.archiveId}/${ref.artifactId}/${ref.questionId}`
       const q = allQuestions.find((item) => sameQuestion(item.ref, ref))
@@ -60,8 +62,8 @@ function ApplicationEditor({ task, action, busy }: { task: ApplicationTask; acti
     <button className="tbtn" disabled={busy}>保存应用任务</button><p>自评完成不表示迁移能力已达标；实验与重要结论仍需要实际执行或他人核对。</p></form>
 }
 
-export default function KnowledgeWorkspace({ snapshot, selectedPointId, onSelectPoint, onPractice, action, busy, applicationOnly = false }: {
-  snapshot: CourseSnapshot; selectedPointId: string; onSelectPoint: (id: string) => void; onPractice: (pointId: string) => void; action: LearningAction; busy: boolean; applicationOnly?: boolean
+export default function KnowledgeWorkspace({ snapshot, selectedPointId, selectedSessionId, onSelectPoint, onPractice, action, busy, applicationOnly = false }: {
+  snapshot: CourseSnapshot; selectedPointId: string; selectedSessionId?: string; onSelectPoint: (id: string) => void; onPractice: (pointId: string) => void; action: LearningAction; busy: boolean; applicationOnly?: boolean
 }) {
   const [newTitle, setNewTitle] = useState('')
   const [query, setQuery] = useState('')
@@ -70,7 +72,7 @@ export default function KnowledgeWorkspace({ snapshot, selectedPointId, onSelect
   const [taskTitle, setTaskTitle] = useState('')
   const [taskPrompt, setTaskPrompt] = useState('')
   const [rubric, setRubric] = useState('说明关键概念\n结合原文或实际观察\n标明仍需核对的问题')
-  const [hiddenPointId, setHiddenPointId] = useState('')
+  const [hiddenPointId] = useState('')
   const point = snapshot.points.find((p) => p.id === selectedPointId && p.status !== 'retired') ?? snapshot.points.find((p) => p.status !== 'retired')
   const coverage = buildKnowledgeCoverage(snapshot)
   const observations = new Map(coverage.map((item) => [item.pointId, item]))
@@ -80,7 +82,7 @@ export default function KnowledgeWorkspace({ snapshot, selectedPointId, onSelect
   const mergePoint = snapshot.points.find((p) => p.id === mergeTarget)
   const latestMerge = snapshot.merges.filter((m) => m.action === 'merge' && !snapshot.merges.some((u) => u.undoOf === m.id)).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)).at(-1)
   const graphExpected = { points: Object.fromEntries(snapshot.points.map((p) => [p.id, p.revision])), relations: Object.fromEntries(snapshot.relations.map((r) => [r.id, r.revision])) }
-  const session = snapshot.sessions.filter((s) => s.status === 'active' && point && s.pointIds.includes(point.id)).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)).at(-1)
+  const session = snapshot.sessions.find((s) => s.id === selectedSessionId && s.status === 'active' && s.purpose !== 'exam' && point && s.pointIds.includes(point.id)) ?? snapshot.sessions.filter((s) => s.status === 'active' && s.purpose !== 'exam' && point && s.pointIds.includes(point.id)).sort((a, b) => a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)).at(-1)
   return <section><h3>{applicationOnly ? '解释与应用任务' : '知识体系与学习单元'}</h3>
     {!applicationOnly && <form className="learning-fields" onSubmit={(e) => { e.preventDefault(); void action(async () => {
       const saved: KnowledgePoint = await saveEntity({ ...learningBase(snapshot.course.id), kind: 'point', title: newTitle.trim(), definition: '', chapter: '', aliases: [], notes: '', sourceRefs: [], questionRefs: [], status: 'active', goalIncluded: false }, null)
@@ -93,11 +95,13 @@ export default function KnowledgeWorkspace({ snapshot, selectedPointId, onSelect
       {point && <div className="learning-detail">
         <h4>{point.title}</h4><p>{point.status === 'pending' ? '资料关联待你确认。' : '知识点身份已确认。'} {COVERAGE[observations.get(point.id)?.coverageStatus ?? 'no-questions']}</p>
         {!applicationOnly && <><div className="learning-actions"><button className="tbtn primary" onClick={() => onPractice(point.id)}>练这个知识点</button>
-          <button className="tbtn" disabled={busy || !!session} onClick={() => void action(() => saveEntity({ ...learningBase(snapshot.course.id), kind: 'session', title: point.title, pointIds: [point.id], status: 'active', steps: ['read','recall','practice','source','explain'].map((item) => ({ pointId: point.id, action: item as 'read', status: 'pending', note: '' })) }, null))}>开始引导学习</button></div>
-          {session && <GuidedLearning key={session.id} session={session} snapshot={snapshot} point={point} action={action} busy={busy} onPractice={() => onPractice(point.id)} hidden={hiddenPointId === point.id} onHide={(hidden) => setHiddenPointId(hidden ? point.id : '')} />}
-          <div hidden={hiddenPointId === point.id}><PointEditor key={point.id} point={point} snapshot={snapshot} action={action} busy={busy} /></div>
+          <button className="tbtn" disabled={busy || !!session || point.status !== 'active'} onClick={() => void action(() => saveEntity(createGuidedSession(snapshot, [point]), null))}>开始引导学习</button></div>
+          {session && <SessionLearning key={session.id} session={session} snapshot={snapshot} action={action} busy={busy} />}
+          <div hidden={!!session || hiddenPointId === point.id}><PointEditor key={point.id} point={point} snapshot={snapshot} action={action} busy={busy} /></div>
           <details className="learning-section"><summary>原文依据 {point.sourceRefs.length}</summary>{point.sourceRefs.map((ref, index) => { const archive = snapshot.archives.find((a) => a.id === ref.archiveId); const source = archive && sourceExcerpt(archive, ref.sourceId, ref.start, ref.end); return <div key={index}><strong>{source?.name ?? '原文不可用'}</strong><small>{source?.location}</small><blockquote>{source?.quote}</blockquote></div> })}{!point.sourceRefs.length && <p>这是个人整理，尚无已保存原文依据。</p>}</details>
           {observations.get(point.id)?.reasons.map((reason) => <p key={reason}>{reason}</p>)}
+          <section className="learning-section"><h4>这个知识点的学习证据</h4><p>资料：{({ valid: '有效', changed: '版本变化', pending: '待确认', missing: '缺少依据' })[observations.get(point.id)?.sourceStatus ?? 'missing']} · 练习：{COVERAGE[observations.get(point.id)?.coverageStatus ?? 'no-questions']} · 观察：{OBSERVATION[observations.get(point.id)?.observation ?? 'unpracticed']}</p><details><summary>查看真实作答依据</summary><ul>{observations.get(point.id)?.evidence.map((evidence) => <li key={evidence.attemptId}>{evidence.learningDate ?? '日期未记录'} · {evidence.questionType === 'short-answer' ? '简答自评' : '客观比较'} · {({ success: '本次符合参考', partial: '部分完成', failure: '需要补学', unanswered: '尚未作答', disputed: '题目待核对', skipped: '已跳过', 'assessment-pending': '等待自评' })[evidence.outcome]} · {evidence.answerRevealed ? '使用过原文、提示或答案辅助' : '未记录答案辅助'}<button className="tbtn" onClick={() => onPractice(point.id)}>回到关联练习</button></li>)}</ul>{!observations.get(point.id)?.evidence.length && <p>尚无作答证据；缺题与不会分别处理。</p>}</details></section>
+          <LearningSupportPanel key={point.id} snapshot={snapshot} pointIds={[point.id]} action={action} busy={busy} sessionId={session?.id} />
           <h4>确认前置知识</h4><form className="learning-fields" onSubmit={(e) => { e.preventDefault(); void action(async () => {
             const relation: KnowledgeRelation = { ...learningBase(snapshot.course.id), kind: 'relation', fromPointId: prerequisite, toPointId: point.id, type: 'prerequisite', confirmed: true }
             const relations = addConfirmedPrerequisite(snapshot, relation)

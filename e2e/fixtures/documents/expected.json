@@ -25,5 +25,21 @@
       "SourceDocument | 保存规范化原文和提取器版本",
       "第二章 可编辑导图"
     ]
+  },
+  "structuredPptx": {
+    "file": "structured-course.pptx",
+    "title": "第二章 可编辑导图",
+    "requiredText": [
+      "把导图节点连接到对应幻灯片。",
+      "第二章 可编辑导图"
+    ],
+    "anchorPages": [
+      1,
+      2
+    ]
+  },
+  "corruptPptx": {
+    "file": "corrupt.pptx",
+    "errorContains": "PPTX 缺少 ZIP 中央目录"
   }
 }

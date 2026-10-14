@@ -77,7 +77,7 @@ export const createSourceSnapshot = async (
           start: Math.max(locator.start, range.start),
           end: Math.min(locator.end, range.end),
         }))
-  const pageCount = source.kind === 'pdf'
+  const pageCount = source.kind === 'pdf' || source.kind === 'pptx'
     ? Math.max(1, ...allLocators.map((locator) => locator.page ?? 1))
     : undefined
 

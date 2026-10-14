@@ -4,6 +4,7 @@ const LEARNING_GOALS = [
   { label: '整理要点', kinds: ['summary', 'outline'], description: '先读摘要，再按大纲梳理重点。' },
   { label: '理解结构', kinds: ['outline', 'mindmap'], description: '用大纲与可编辑导图理清层级和联系。' },
   { label: '自测复习', kinds: ['quiz'], description: '先作答，再查看本次待复习内容与原文。' },
+  { label: '考前整理', kinds: ['summary', 'quiz'], description: '按明确范围整理要点并检查题目覆盖；不预测考试重点。' },
 ] as const satisfies readonly { label: string; kinds: readonly ArtifactKind[]; description: string }[]
 
 /** Presets only change the selection. Generating always requires a separate click. */

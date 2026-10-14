@@ -21,7 +21,13 @@ export function coursePlanCandidates(snapshot: CourseSnapshot): DailyPlanCandida
       sourceStatus: item ? point?.sourceRefs.length ? observations.get(point.id)?.sourceStatus ?? 'pending' : 'valid' : 'missing' }
   })
   const practiced = coverage.filter((item) => item.practiced).map((item) => item.pointId)
-  const path = buildLearningPath(snapshot, practiced)
+  const goals = snapshot.course.goals?.filter((goal) => goal.confirmed)
+  const selectedPoints = goals ? new Set(goals.flatMap((goal) => goal.pointIds)) : undefined
+  if (selectedPoints) {
+    let added = true
+    while (added) { added = false; for (const relation of snapshot.relations) if (relation.confirmed && relation.type === 'prerequisite' && selectedPoints.has(relation.toPointId) && !selectedPoints.has(relation.fromPointId)) { selectedPoints.add(relation.fromPointId); added = true } }
+  }
+  const path = buildLearningPath(selectedPoints ? { ...snapshot, points: snapshot.points.filter((point) => selectedPoints.has(point.id)) } : snapshot, practiced)
   const neededBy = new Map<string, string[]>()
   for (const unit of path) {
     for (const prerequisite of unit.unpracticedPrerequisiteIds) neededBy.set(prerequisite, [...(neededBy.get(prerequisite) ?? []), unit.title])
@@ -29,6 +35,7 @@ export function coursePlanCandidates(snapshot: CourseSnapshot): DailyPlanCandida
   for (const [order, unit] of path.entries()) {
     const point = snapshot.points.find((item) => item.id === unit.pointId)
     if (!point) continue
+    if (snapshot.sessions.some((session) => session.status === 'active' && session.purpose !== 'exam' && session.pointIds.includes(point.id))) continue
     const state = observations.get(point.id)
     const needsRemediation = state?.observation === 'needs-remediation'
     if (practiced.includes(unit.pointId) && !needsRemediation) continue
@@ -38,7 +45,7 @@ export function coursePlanCandidates(snapshot: CourseSnapshot): DailyPlanCandida
       type: needsRemediation ? 'remediation' : isPrerequisite ? 'prerequisite' : 'new', title: point.title,
       reason: needsRemediation ? '已有回答显示需要补学，先回看定义和原文。' : isPrerequisite ? `这是 ${neededBy.get(point.id)?.join('、')} 已确认的前置知识，建议先学习。` :
         point.sourceRefs.length ? unit.reason : '这是个人整理，尚无原文依据；可先阅读并补充说明。',
-      estimatedMinutes: 10, questionCount: 0, order,
+      estimatedMinutes: 10, questionCount: 0, order: order - (goals?.some((goal) => goal.priority !== 'normal' && goal.pointIds.includes(point.id)) ? 1000 : 0),
       sourceStatus: point.sourceRefs.length ? state?.sourceStatus ?? 'pending' : 'valid' })
   }
   for (const point of snapshot.points.filter((item) => item.status === 'pending')) candidates.push({ id: `point:${point.id}`,

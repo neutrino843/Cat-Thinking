@@ -17,12 +17,23 @@ describe('learning home persisted facts', () => {
     const a = snapshot('生物'); const b = snapshot('算法')
     const home = buildLearningHome([a, b], 0)
     expect(home.tasks).toHaveLength(2); expect(home.minutes).toBe(20); expect(home.deferred).toBe(2)
-    expect(buildLearningHome([a, b], 0, '生物')).toMatchObject({ plannedCount: 1, minutes: 10 })
+    expect(buildLearningHome([a, b], 0, '生物')).toMatchObject({ plannedCount: 1, minutes: 20 })
     const search = buildLearningHome([a, b], 0, '', ' 算法 ')
     expect(search.courses.map((row) => row.course.id)).toEqual(['算法'])
     expect(search.tasks.map((task) => task.courseId)).toEqual(['算法'])
     expect(search.plannedCount).toBe(2)
     expect(buildLearningHome([a], 0, '', 'missing').tasks).toEqual([])
+  })
+  it('treats the course selector as a view filter without replanning global capacity', () => {
+    const snapshots = [snapshot('course-a'), snapshot('course-b'), snapshot('course-c')]
+    const all = buildLearningHome(snapshots, 0, '', '', { minutes: 20, questions: 20 })
+    const deferredCourse = all.backlog.find((task) => task.deferredReason.includes('跨课程'))?.courseId
+    expect(deferredCourse).toBeTruthy()
+    const filtered = buildLearningHome(snapshots, 0, deferredCourse, '', { minutes: 20, questions: 20 })
+    expect(filtered.minutes).toBe(all.minutes)
+    expect(filtered.tasks).toEqual([])
+    expect(filtered.backlog).toHaveLength(2)
+    expect(filtered.backlog.every((task) => task.courseId === deferredCourse)).toBe(true)
   })
   it('counts submitted practice attempts for the local date and excludes drafts and legacy attempts', () => {
     const a = snapshot('上海'); const b = snapshot('洛杉矶', 'America/Los_Angeles')

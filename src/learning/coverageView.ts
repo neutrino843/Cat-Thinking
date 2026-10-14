@@ -107,7 +107,7 @@ export function buildKnowledgeCoverage(input: CoverageInput): KnowledgeCoverage[
         }
         evidence.push({ attemptId: attempt.id, questionKey: key, learningDate: date,
           questionType: question.type === 'short-answer' ? 'short-answer' : 'objective', level: point.questionLevels?.[key] ?? 'recall', outcome,
-          answerRevealed: attempt.answerRevealed, importedHistory: attempt.origin === 'legacy' || attempt.submittedAt === null })
+          answerRevealed: attempt.answerRevealed || !!attempt.assistance && (attempt.assistance.hints > 0 || attempt.assistance.fullExplanation || attempt.assistance.sourceViewed), importedHistory: attempt.origin === 'legacy' || attempt.submittedAt === null })
       }
     }
     evidence.sort((left, right) => (input.attempts.find((attempt) => attempt.id === right.attemptId)?.submittedAt ?? -1) -

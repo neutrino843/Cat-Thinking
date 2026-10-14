@@ -6,7 +6,7 @@ import { verifyRelationSourceHashes } from '../lib/relationSources'
 import { sha256Hex } from '../analysis/fingerprint'
 import { isRecord, parseLearningEntity, parseSourceDocument, validateLearningArchive } from './archiveValidation'
 import { LearningError, newLearningId, type Course, type LearningEntity, type LearningArchive } from './model'
-import { prerequisiteCycle } from './knowledgeGraph'
+import { prerequisiteCycle, questionRefKey } from './knowledgeGraph'
 
 export const COURSE_PACKAGE_LIMITS = Object.freeze({ maxFileBytes: 192 * 1024 * 1024, maxPayloadBytes: 128 * 1024 * 1024, maxBlobBytes: 64 * 1024 * 1024, maxRecords: 50_000, maxDocuments: 1000, maxNodes: 50_000 })
 const FORMAT = 'maosizhi-course'
@@ -48,7 +48,7 @@ function inspectDocument(raw: unknown): DocData {
   return JSON.parse(JSON.stringify(validateDoc(structuredClone(top)))) as DocData
 }
 function entityReferences(record: LearningEntity): { questionRefs: { archiveId: string; artifactId: string; questionId: string }[]; sourceRefs: { archiveId: string; sourceId: string; end: number }[] } {
-  return { questionRefs: 'question' in record ? [record.question] : record.kind === 'point' ? record.questionRefs : record.kind === 'session' ? record.questions ?? [] : [], sourceRefs: record.kind === 'point' || record.kind === 'relation' ? record.sourceRefs ?? [] : [] }
+  return { questionRefs: 'question' in record ? [record.question] : record.kind === 'point' ? record.questionRefs : record.kind === 'session' ? record.questions ?? [] : record.kind === 'support' && record.questionRef ? [record.questionRef] : [], sourceRefs: record.kind === 'point' || record.kind === 'relation' || record.kind === 'support' ? record.sourceRefs ?? [] : [] }
 }
 export async function validateCoursePackagePayload(raw: unknown): Promise<CoursePackagePayload> {
   const input = keys(raw, ['format', 'version', 'exportedAt', 'course', 'records', 'documents', 'missingDocumentIds', 'contentHash'])
@@ -89,11 +89,12 @@ export async function validateCoursePackagePayload(raw: unknown): Promise<Course
   const ids = new Map(records.map((r) => [r.id, r])); const archiveMap = new Map<string, LearningArchive>()
   for (const record of records) if (record.kind === 'archive') archiveMap.set(record.id, await validateLearningArchive(record))
   const pointExists = (id: string) => ids.get(id)?.kind === 'point'
+  for (const goal of course.goals ?? []) if (goal.pointIds.some((id) => !pointExists(id))) invalid('目标目录关联知识点缺失。')
   for (const record of records) {
     const refs = entityReferences(record)
     for (const ref of refs.questionRefs) { const archive = archiveMap.get(ref.archiveId); const artifact = archive?.artifacts.find((a) => a.id === ref.artifactId && a.kind === 'quiz'); if (!artifact || artifact.kind !== 'quiz' || !artifact.payload.questions.some((q) => q.id === ref.questionId)) invalid('课程包题目身份不一致。') }
     for (const ref of refs.sourceRefs) { const source = archiveMap.get(ref.archiveId)?.sources.find((s) => s.id === ref.sourceId); if (!source || ref.end > source.text.length) invalid('课程包原文引用越界或缺失。') }
-    if (record.kind === 'attempt' || record.kind === 'draft') {
+    if (record.kind === 'attempt' || record.kind === 'draft' && record.answer !== null) {
       const artifact = archiveMap.get(record.question.archiveId)?.artifacts.find((a) => a.id === record.question.artifactId && a.kind === 'quiz')
       const question = artifact?.kind === 'quiz' ? artifact.payload.questions.find((q) => q.id === record.question.questionId) : undefined
       if (!question || question.type === 'multiple-choice' && (typeof record.answer !== 'number' || record.answer < 0 || record.answer >= question.options.length)
@@ -103,15 +104,18 @@ export async function validateCoursePackagePayload(raw: unknown): Promise<Course
     if (record.kind === 'point' && record.parentId && !pointExists(record.parentId)) invalid()
     if (record.kind === 'assessment') {
       const attempt = ids.get(record.attemptId); if (attempt?.kind !== 'attempt') invalid()
+      if (record.feedbackArchiveId && !archiveMap.has(record.feedbackArchiveId)) invalid('反馈归档缺失。')
       const artifact = archiveMap.get(attempt.question.archiveId)?.artifacts.find((a) => a.id === attempt.question.artifactId && a.kind === 'quiz')
       const question = artifact?.kind === 'quiz' ? artifact.payload.questions.find((q) => q.id === attempt.question.questionId) : undefined
       if (!question || record.rubricChecks !== undefined && (question.type !== 'short-answer' || record.rubricChecks.length !== question.rubric.length)) invalid('课程包简答自评要点与题目不一致。')
     }
     if (record.kind === 'attempt' && record.sessionId) {
       const session = ids.get(record.sessionId)
-      if (!session || session.kind !== 'session' || session.purpose !== 'exam' || !session.questions?.some((q) => q.archiveId === record.question.archiveId && q.artifactId === record.question.artifactId && q.questionId === record.question.questionId)) invalid('课程包作答场次与所选题目不一致。')
+      const matches = session?.kind === 'session' && (session.purpose === 'exam' ? session.questions?.some((q) => q.archiveId === record.question.archiveId && q.artifactId === record.question.artifactId && q.questionId === record.question.questionId) : session.pointIds.some((id) => { const point = ids.get(id); return point?.kind === 'point' && point.questionRefs.some((q) => q.archiveId === record.question.archiveId && q.artifactId === record.question.artifactId && q.questionId === record.question.questionId) }))
+      if (!matches) invalid('课程包作答场次与所选题目不一致。')
     }
     if (record.kind === 'schedule' && record.lastAttemptId && ids.get(record.lastAttemptId)?.kind !== 'attempt') invalid()
+    if (record.kind === 'support' && (record.pointIds.some((id) => !pointExists(id)) || record.attemptId && ids.get(record.attemptId)?.kind !== 'attempt' || record.sessionId && ids.get(record.sessionId)?.kind !== 'session' || record.generatedArchiveId && !archiveMap.has(record.generatedArchiveId))) invalid('辅助记录的关联无效。')
     if (record.kind === 'relation' && (!pointExists(record.fromPointId) || !pointExists(record.toPointId))) invalid()
     if (record.kind === 'merge' && (!pointExists(record.fromPointId) || !pointExists(record.toPointId) || record.undoOf && ids.get(record.undoOf)?.kind !== 'merge')) invalid()
     if (record.kind === 'merge') for (const prior of [...record.beforePoints ?? [], ...record.beforeRelations ?? []]) {
@@ -153,7 +157,7 @@ export async function exportCoursePackage(courseId: string, options: { password?
     if (await db.learningCourseTombstones.get(courseId)) invalid('课程已删除。')
     const course = await db.learningRecords.get(courseId); if (!course || course.kind !== 'course') invalid('课程不存在。')
     const records = (await db.learningRecords.where('courseId').equals(courseId).toArray()).filter((r) => r.id !== courseId)
-    const docIds = new Set(records.flatMap((r) => r.kind === 'document' || r.kind === 'binding' ? [r.docId] : []))
+    const docIds = new Set(records.flatMap((r) => r.kind === 'document' || r.kind === 'binding' || r.kind === 'support' ? [r.docId] : []))
     const documents = []; const missingDocumentIds: string[] = []
     for (const docId of docIds) {
       const row = await db.docs.get(docId); if (!row) { missingDocumentIds.push(docId); continue }
@@ -227,26 +231,38 @@ export async function restoreCoursePackage(preview: CoursePackagePreview, option
     return inspectDocument(result)
   }
   const localId = (id: string) => idMap.get(id) ?? id
+  const levelKeys = new Map<string, string>(); const selectionKeys = new Map<string, string>()
+  for (const record of payload.records) for (const ref of entityReferences(record).questionRefs) {
+    const newRef = { ...ref, archiveId: localId(ref.archiveId) }
+    levelKeys.set(questionRefKey(ref), questionRefKey(newRef))
+    selectionKeys.set(`${ref.archiveId}/${ref.artifactId}/${ref.questionId}`, `${newRef.archiveId}/${newRef.artifactId}/${newRef.questionId}`)
+  }
   const remapEntity = (input: LearningEntity): LearningEntity => {
     const r = structuredClone(input); r.id = localId(r.id); r.courseId = courseId
+    if (r.kind === 'course') r.goals = r.goals?.map((goal) => ({ ...goal, id: newLearningId(), pointIds: goal.pointIds.map(localId) }))
     if ('question' in r) r.question.archiveId = localId(r.question.archiveId)
     if (r.kind === 'archive') r.originDocId = docMap.get(r.originDocId) ?? r.originDocId
     if (r.kind === 'document') r.docId = mapped(docMap, r.docId)
     if (r.kind === 'point' || r.kind === 'relation') for (const ref of r.sourceRefs ?? []) ref.archiveId = localId(ref.archiveId)
     if (r.kind === 'point') {
+      if (r.questionLevels) r.questionLevels = Object.fromEntries(Object.entries(r.questionLevels).map(([key, value]) => [levelKeys.get(key) ?? key, value]))
       r.questionRefs.forEach((q) => q.archiveId = localId(q.archiveId)); if (r.parentId) r.parentId = localId(r.parentId); if (r.archiveId) r.archiveId = localId(r.archiveId)
       if (r.docId) { const oldDocId = r.docId; r.docId = docMap.get(oldDocId); if (r.nodeId) r.nodeId = nodeMaps.get(oldDocId)?.get(r.nodeId); if (!r.docId) { delete r.docId; delete r.nodeId } }
     }
-    if (r.kind === 'assessment') r.attemptId = localId(r.attemptId)
+    if (r.kind === 'assessment') { r.attemptId = localId(r.attemptId); if (r.feedbackArchiveId) r.feedbackArchiveId = localId(r.feedbackArchiveId) }
     if (r.kind === 'attempt' && r.sessionId) r.sessionId = localId(r.sessionId)
     if (r.kind === 'draft') r.attemptId = localId(r.attemptId) === r.attemptId ? newLearningId() : localId(r.attemptId)
+    if (r.kind === 'support') { r.docId = docMap.get(r.docId) ?? r.docId; r.pointIds = r.pointIds.map(localId); r.sourceRefs.forEach((ref) => ref.archiveId = localId(ref.archiveId)); if (r.questionRef) r.questionRef.archiveId = localId(r.questionRef.archiveId); if (r.attemptId) r.attemptId = localId(r.attemptId); if (r.sessionId) r.sessionId = localId(r.sessionId); if (r.generatedArchiveId) r.generatedArchiveId = localId(r.generatedArchiveId) }
     if (r.kind === 'schedule' && r.lastAttemptId) r.lastAttemptId = localId(r.lastAttemptId)
     if (r.kind === 'relation' || r.kind === 'merge') { r.fromPointId = localId(r.fromPointId); r.toPointId = localId(r.toPointId) }
     if (r.kind === 'merge') {
       if (r.undoOf) r.undoOf = localId(r.undoOf); if (r.beforePoints) r.beforePoints = r.beforePoints.map((p) => remapEntity(p) as typeof p); if (r.beforeRelations) r.beforeRelations = r.beforeRelations.map((p) => remapEntity(p) as typeof p)
       for (const key of ['afterPointRevisions', 'afterRelationRevisions'] as const) { const revisions = r[key]; if (revisions) r[key] = Object.fromEntries(Object.entries(revisions).map(([id, revision]) => [localId(id), revision])) }
     }
-    if (r.kind === 'session' || r.kind === 'application') { r.pointIds = r.pointIds.map(localId); if (r.kind === 'session') { r.steps.forEach((s) => s.pointId = localId(s.pointId)); r.questions?.forEach((q) => q.archiveId = localId(q.archiveId)) } }
+    if (r.kind === 'session' || r.kind === 'application') { r.pointIds = r.pointIds.map(localId); if (r.kind === 'session') { r.steps.forEach((s) => s.pointId = localId(s.pointId)); r.questions?.forEach((q) => q.archiveId = localId(q.archiveId)); if (r.checkpoint) {
+      r.checkpoint.pointRevisions = Object.fromEntries(Object.entries(r.checkpoint.pointRevisions).map(([id, revision]) => [localId(id), revision]))
+      r.checkpoint.archiveHashes = Object.fromEntries(Object.entries(r.checkpoint.archiveHashes).map(([id, hash]) => [localId(id), hash])); if (r.checkpoint.questionKey) r.checkpoint.questionKey = selectionKeys.get(r.checkpoint.questionKey)
+    } } }
     if (r.kind === 'binding') {
       const oldDocId = r.docId; const doc = payload.documents.find((d) => d.doc.id === oldDocId)?.doc
       r.docId = mapped(docMap, oldDocId); r.archiveId = localId(r.archiveId); r.mappings = r.mappings.filter((m) => doc?.nodes[m.localNodeId])
@@ -258,7 +274,7 @@ export async function restoreCoursePackage(preview: CoursePackagePreview, option
   }
   const missing = new Set(payload.missingDocumentIds)
   const records = payload.records.filter((r) => !(r.kind === 'document' || r.kind === 'binding') || !missing.has(r.docId)).map(remapEntity)
-  const course: Course = { ...payload.course, id: courseId, courseId, name: options.name?.trim() || `${payload.course.name}（恢复）`, revision: 1, automaticReviews: false, updatedAt: Date.now() }
+  const course: Course = { ...payload.course, ...(payload.course.goals ? { goals: payload.course.goals.map((goal) => ({ ...goal, id: newLearningId(), pointIds: goal.pointIds.map(localId) })) } : {}), id: courseId, courseId, name: options.name?.trim() || `${payload.course.name}（恢复）`, revision: 1, automaticReviews: false, updatedAt: Date.now() }
   parseLearningEntity(course)
   const documents = payload.documents.map((bundle) => {
     const docId = mapped(docMap, bundle.doc.id); const sourceIds = mapped(sourceMaps, bundle.doc.id); const nodeIds = mapped(nodeMaps, bundle.doc.id)

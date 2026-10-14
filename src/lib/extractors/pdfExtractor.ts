@@ -1,5 +1,5 @@
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import type { ExtractedDocument, SourcePageSpan } from '../documentExtractors'
+import type { ExtractedDocument, ImportProgressListener, SourcePageSpan } from '../documentExtractors'
 import { normalizeSourceText } from '../documentExtractors'
 
 const MAX_PDF_PAGES = 200
@@ -46,7 +46,7 @@ export function cleanPdfPageText(input: string): string {
   return normalizeSourceText(lines.join('\n'))
 }
 
-export async function extractPdf(file: File): Promise<ExtractedDocument> {
+export async function extractPdf(file: File, onProgress?: ImportProgressListener): Promise<ExtractedDocument> {
   const bytes = new Uint8Array(await file.arrayBuffer())
   if (bytes.length < 5 || new TextDecoder('ascii').decode(bytes.subarray(0, 5)) !== '%PDF-') {
     throw new Error('PDF 文件签名无效')
@@ -63,6 +63,11 @@ export async function extractPdf(file: File): Promise<ExtractedDocument> {
     const pageTexts: string[] = []
     let emptyPages = 0
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+      onProgress?.({
+        phase: 'parsing',
+        ratio: 0.15 + 0.7 * (pageNumber / pageCount),
+        detail: `第 ${pageNumber}/${pageCount} 页`,
+      })
       const page = await pdf.getPage(pageNumber)
       try {
         const content = await page.getTextContent()

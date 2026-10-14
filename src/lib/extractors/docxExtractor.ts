@@ -1,122 +1,8 @@
-import { strFromU8, unzip } from 'fflate'
+import { strFromU8 } from 'fflate'
 import type { ExtractedDocument } from '../documentExtractors'
 import { normalizeSourceText } from '../documentExtractors'
-
-const MAX_ZIP_ENTRIES = 5_000
-const MAX_EXPANDED_BYTES = 32 * 1024 * 1024
-const MAX_SINGLE_ENTRY_BYTES = 16 * 1024 * 1024
-const MAX_COMPRESSION_RATIO = 200
-
-interface ZipEntryMeta {
-  name: string
-  compressedSize: number
-  uncompressedSize: number
-}
-
-function u16(view: DataView, offset: number): number {
-  return view.getUint16(offset, true)
-}
-
-function u32(view: DataView, offset: number): number {
-  return view.getUint32(offset, true)
-}
-
-function safeArchivePath(name: string): boolean {
-  const normalized = name.replaceAll('\\', '/')
-  if (!normalized || normalized.includes('\0') || normalized.startsWith('/') || /^[a-z]:/i.test(normalized)) return false
-  return !normalized.split('/').some((part) => part === '..')
-}
-
-/**
- * 解压前读取 ZIP 中央目录，阻断路径穿越、加密包、异常条目数和 zip bomb。
- * DOCX 内容只在内存中读取，从不把归档路径写入文件系统。
- */
-export function inspectDocxArchive(bytes: Uint8Array): ZipEntryMeta[] {
-  if (bytes.length < 22) throw new Error('DOCX 文件结构不完整')
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  const minOffset = Math.max(0, bytes.length - 65_557)
-  let eocd = -1
-  for (let offset = bytes.length - 22; offset >= minOffset; offset--) {
-    if (u32(view, offset) === 0x06054b50) {
-      eocd = offset
-      break
-    }
-  }
-  if (eocd < 0) throw new Error('DOCX 缺少 ZIP 中央目录')
-  if (u16(view, eocd + 4) !== 0 || u16(view, eocd + 6) !== 0) throw new Error('不支持分卷 DOCX')
-
-  const entryCount = u16(view, eocd + 10)
-  const directorySize = u32(view, eocd + 12)
-  const directoryOffset = u32(view, eocd + 16)
-  if (entryCount === 0 || entryCount > MAX_ZIP_ENTRIES) throw new Error('DOCX 归档条目数量异常')
-  if (directoryOffset + directorySize > eocd) throw new Error('DOCX 中央目录范围非法')
-
-  const entries: ZipEntryMeta[] = []
-  let offset = directoryOffset
-  let expandedTotal = 0
-  let compressedTotal = 0
-  for (let index = 0; index < entryCount; index++) {
-    if (offset + 46 > eocd || u32(view, offset) !== 0x02014b50) throw new Error('DOCX 中央目录条目损坏')
-    const flags = u16(view, offset + 8)
-    const method = u16(view, offset + 10)
-    const compressedSize = u32(view, offset + 20)
-    const uncompressedSize = u32(view, offset + 24)
-    const nameLength = u16(view, offset + 28)
-    const extraLength = u16(view, offset + 30)
-    const commentLength = u16(view, offset + 32)
-    const next = offset + 46 + nameLength + extraLength + commentLength
-    if (next > eocd) throw new Error('DOCX 中央目录路径范围非法')
-    const name = strFromU8(bytes.subarray(offset + 46, offset + 46 + nameLength))
-    if (!safeArchivePath(name)) throw new Error(`DOCX 包含不安全路径：${name || '(empty)'}`)
-    if ((flags & 1) !== 0) throw new Error('不支持加密 DOCX')
-    if (method !== 0 && method !== 8) throw new Error(`DOCX 使用了不支持的压缩方式：${method}`)
-    if (uncompressedSize > MAX_SINGLE_ENTRY_BYTES) throw new Error(`DOCX 条目过大：${name}`)
-    expandedTotal += uncompressedSize
-    compressedTotal += compressedSize
-    if (expandedTotal > MAX_EXPANDED_BYTES) throw new Error('DOCX 解压后内容超过 32MB 安全限制')
-    entries.push({ name, compressedSize, uncompressedSize })
-    offset = next
-  }
-  if (!entries.some((entry) => entry.name === 'word/document.xml')) throw new Error('不是有效的 DOCX：缺少 word/document.xml')
-  if (compressedTotal > 0 && expandedTotal / compressedTotal > MAX_COMPRESSION_RATIO) {
-    throw new Error('DOCX 压缩比异常，已阻止可能的 zip bomb')
-  }
-  return entries
-}
-
-function unzipAsync(bytes: Uint8Array): Promise<Record<string, Uint8Array>> {
-  return new Promise((resolve, reject) => {
-    unzip(bytes, (error, data) => {
-      if (error) reject(new Error(`DOCX 解压失败：${error.message}`))
-      else resolve(data)
-    })
-  })
-}
-
-function localName(value: Element): string {
-  return (value.localName || value.tagName).replace(/^.*:/, '')
-}
-
-function elements(root: ParentNode, name: string): Element[] {
-  const expected = name.toLowerCase()
-  return Array.from(root.querySelectorAll('*')).filter((element) => localName(element).toLowerCase() === expected)
-}
-
-function attribute(element: Element | undefined, name: string): string {
-  if (!element) return ''
-  const expected = name.toLowerCase()
-  const found = Array.from(element.attributes).find((item) => (
-    item.localName || item.name
-  ).replace(/^.*:/, '').toLowerCase() === expected)
-  return found?.value ?? ''
-}
-
-function parseXml(xml: string, label: string): XMLDocument {
-  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error(`${label} 包含不允许的 XML 实体声明`)
-  const document = new DOMParser().parseFromString(xml, 'application/xml')
-  if (elements(document, 'parsererror').length) throw new Error(`${label} XML 已损坏`)
-  return document
-}
+import type { ImportProgressListener } from '../documentExtractors'
+import { attribute, elements, localName, parseOoxmlXml, unzipOoxml } from './ooxmlShared'
 
 function inferHeadingLevel(value: string): number | null {
   const matched = value.match(/(?:heading|标题)\s*([1-6])/i)
@@ -126,7 +12,7 @@ function inferHeadingLevel(value: string): number | null {
 function styleHeadingLevels(stylesXml?: string): Map<string, number> {
   const result = new Map<string, number>()
   if (!stylesXml) return result
-  const document = parseXml(stylesXml, 'DOCX styles.xml')
+  const document = parseOoxmlXml(stylesXml, 'DOCX styles.xml')
   const basedOn = new Map<string, string>()
   for (const style of elements(document, 'style')) {
     if (attribute(style, 'type') && attribute(style, 'type') !== 'paragraph') continue
@@ -185,7 +71,7 @@ function tableText(table: Element): string[] {
 }
 
 export function docxXmlToStructuredText(documentXml: string, stylesXml?: string): string {
-  const document = parseXml(documentXml, 'DOCX document.xml')
+  const document = parseOoxmlXml(documentXml, 'DOCX document.xml')
   const body = elements(document, 'body')[0]
   if (!body) throw new Error('DOCX 缺少正文 body')
   const styles = styleHeadingLevels(stylesXml)
@@ -211,18 +97,20 @@ export function docxXmlToStructuredText(documentXml: string, stylesXml?: string)
   return normalizeSourceText(blocks.join('\n\n'))
 }
 
-export async function extractDocx(file: File): Promise<ExtractedDocument> {
+export async function extractDocx(file: File, onProgress?: ImportProgressListener): Promise<ExtractedDocument> {
   const bytes = new Uint8Array(await file.arrayBuffer())
-  inspectDocxArchive(bytes)
-  const archive = await unzipAsync(bytes)
+  onProgress?.({ phase: 'parsing', ratio: 0.3, detail: '正在解压 DOCX' })
+  const archive = await unzipOoxml(bytes, 'DOCX', ['word/document.xml'])
   const documentBytes = archive['word/document.xml']
   if (!documentBytes) throw new Error('DOCX 正文缺失')
   const stylesBytes = archive['word/styles.xml']
+  onProgress?.({ phase: 'parsing', ratio: 0.6, detail: '正在解析 DOCX 结构' })
   const text = docxXmlToStructuredText(
     strFromU8(documentBytes),
     stylesBytes ? strFromU8(stylesBytes) : undefined,
   )
   if (!text) throw new Error('DOCX 中没有可提取的文本内容')
+  onProgress?.({ phase: 'parsing', ratio: 0.85 })
   return {
     kind: 'docx',
     structure: 'markdown',

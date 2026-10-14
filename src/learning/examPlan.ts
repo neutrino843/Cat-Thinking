@@ -104,8 +104,9 @@ export function examQuestionInventory(points: readonly KnowledgePoint[], archive
   return [...inventory.values()]
 }
 
-export function assembleExamQuestions(candidates: readonly ExamQuestionCandidate[], options: { scopePointIds: readonly string[]; count: number }): ExamQuestionSelection {
+export function assembleExamQuestions(candidates: readonly ExamQuestionCandidate[], options: { scopePointIds: readonly string[]; count: number; typeCounts?: Partial<Record<ExamQuestionCandidate['type'], number>> }): ExamQuestionSelection {
   if (!Number.isInteger(options.count) || options.count < 0 || options.count > 1000) throw new Error('模拟题数须为 0 到 1000 的整数。')
+  if (options.typeCounts && (Object.values(options.typeCounts).some((count) => !Number.isInteger(count) || count < 0) || Object.values(options.typeCounts).reduce((sum, count) => sum + count, 0) !== options.count)) throw new Error('各题型数量须为非负整数，合计等于模拟题量。')
   const scope = [...new Set(options.scopePointIds)]
   const seenIdentities = new Set<string>()
   const seenContent = new Set<string>()
@@ -124,7 +125,9 @@ export function assembleExamQuestions(candidates: readonly ExamQuestionCandidate
   while (selected.length < options.count && remaining.length) {
     remaining.sort((left, right) => right.pointIds.filter((id) => scope.includes(id) && !covered.has(id)).length -
       left.pointIds.filter((id) => scope.includes(id) && !covered.has(id)).length || questionRefKey(left.question).localeCompare(questionRefKey(right.question)))
-    const next = remaining.shift()
+    const index = options.typeCounts ? remaining.findIndex((question) => selected.filter((item) => item.type === question.type).length < (options.typeCounts?.[question.type] ?? 0)) : 0
+    if (index === -1) break
+    const next = remaining.splice(index, 1)[0]
     if (!next) break
     selected.push(next)
     next.pointIds.filter((id) => scope.includes(id)).forEach((id) => covered.add(id))
@@ -134,6 +137,7 @@ export function assembleExamQuestions(candidates: readonly ExamQuestionCandidate
   selected.forEach((question) => { typeCounts[question.type] += 1; levelCounts[question.level] += 1 })
   const missingCount = Math.max(0, options.count - selected.length)
   const reasons: string[] = []
+  if (options.typeCounts) for (const type of ['multiple-choice', 'true-false', 'short-answer'] as const) if ((options.typeCounts[type] ?? 0) > typeCounts[type]) reasons.push(`${type} 题型缺 ${(options.typeCounts[type] ?? 0) - typeCounts[type]} 题；不以其他题型替换。`)
   if (missingCount) reasons.push(`题库只有 ${eligible.length} 道可用且不重复的题目，距目标题量缺 ${missingCount} 道；未自动生成。`)
   const uncoveredPointIds = scope.filter((id) => !covered.has(id))
   if (uncoveredPointIds.length) reasons.push(`${uncoveredPointIds.length} 个知识点没有被本组现有题目覆盖。`)

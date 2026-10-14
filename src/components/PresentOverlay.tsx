@@ -36,11 +36,14 @@ export default function PresentOverlay() {
   const next = () => go(i + 1)
 
   const btn = {
-    background: 'transparent',
-    border: 'none',
+    background: theme.paper,
+    border: `1px solid ${theme.inkSoft}`,
+    borderRadius: 8,
     color: theme.ink,
     font: 'inherit',
     cursor: 'pointer',
+    minHeight: 44,
+    padding: '0 16px',
   } as const
 
   return (
@@ -66,7 +69,7 @@ export default function PresentOverlay() {
 
       <div className="present-bottom" style={{ background: theme.panel, borderColor: theme.inkSoft }}>
         <button className="present-nav" style={btn} onClick={prev} disabled={i === 0} aria-label="上一页">
-          ‹
+          上一页
         </button>
         <div className="present-meta">
           <span className="present-focus" aria-live="polite">
@@ -80,7 +83,7 @@ export default function PresentOverlay() {
           </span>
         </div>
         <button className="present-nav" style={btn} onClick={next} disabled={i === total - 1} aria-label="下一页">
-          ›
+          下一页
         </button>
       </div>
     </div>

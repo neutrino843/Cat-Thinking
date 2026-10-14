@@ -5,7 +5,7 @@ import { artifactContentHash, prepareArtifactIdentity, verifyPreparedArtifactIde
 import { deriveKnowledgePracticeLinks } from '../analysis/knowledgePracticeLinks'
 import { sha256Hex } from '../analysis/fingerprint'
 import type { QuizPracticeRecord } from '../analysis/quizPractice'
-import { prerequisiteCycle } from './knowledgeGraph'
+import { prerequisiteCycle, questionRefKey } from './knowledgeGraph'
 import { archiveHashPayload, parseLearningEntity, parseSourceDocument, validateLearningArchive } from './archiveValidation'
 import {
   LearningError, learningBase, newLearningId,
@@ -48,16 +48,30 @@ async function requireQuestion(courseId: string, ref: QuestionRef): Promise<void
 /** Only IndexedDB operations inside transactions; archived crypto checks happen at creation/read/export. */
 async function requireReferences(entity: LearningEntity): Promise<void> {
   if (entity.kind !== 'course') await requireCourse(entity.courseId)
+  if (entity.kind === 'course') for (const goal of entity.goals ?? []) for (const pointId of goal.pointIds) await requirePoint(entity.courseId, pointId)
+  if (entity.kind === 'support') {
+    if (!await db.docs.get(entity.docId)) throw new LearningError('missing', '辅助资料快照已不存在。')
+    for (const id of entity.pointIds) await requirePoint(entity.courseId, id)
+    for (const ref of entity.sourceRefs) { const archive = await getEntity(ref.archiveId, 'archive'); const source = archive?.sources.find((item) => item.id === ref.sourceId); if (!source || archive?.courseId !== entity.courseId || ref.end > source.text.length) throw new LearningError('invalid', '辅助来源已失效。') }
+    if (entity.questionRef) await requireQuestion(entity.courseId, entity.questionRef)
+    if (entity.generatedArchiveId && (await getEntity(entity.generatedArchiveId, 'archive'))?.courseId !== entity.courseId) throw new LearningError('invalid', '辅助归档不属于课程。')
+    if (entity.attemptId && (await getEntity(entity.attemptId, 'attempt'))?.courseId !== entity.courseId) throw new LearningError('invalid', '辅助作答不属于课程。')
+    if (entity.sessionId && (await getEntity(entity.sessionId, 'session'))?.courseId !== entity.courseId) throw new LearningError('invalid', '辅助会话不属于课程。')
+  }
   if ('question' in entity) await requireQuestion(entity.courseId, entity.question)
-  if (entity.kind === 'attempt' || entity.kind === 'draft') {
+  if (entity.kind === 'attempt' || entity.kind === 'draft' && entity.answer !== null) {
     const archive = await getEntity(entity.question.archiveId, 'archive'); const question = archive && getArchivedQuestion(archive, entity.question)
     if (!question || question.type === 'multiple-choice' && (typeof entity.answer !== 'number' || entity.answer < 0 || entity.answer >= question.options.length)
       || question.type === 'true-false' && typeof entity.answer !== 'boolean' || question.type === 'short-answer' && typeof entity.answer !== 'string') throw new LearningError('invalid', '作答类型与归档题目不一致。')
   }
   if (entity.kind === 'attempt' && entity.sessionId) {
     const session = await getEntity(entity.sessionId, 'session')
-    if (!session || session.courseId !== entity.courseId || session.purpose !== 'exam' || session.status !== 'active'
-      || !session.questions?.some((q) => q.archiveId === entity.question.archiveId && q.artifactId === entity.question.artifactId && q.questionId === entity.question.questionId)) throw new LearningError('conflict', '专项测验场次已结束或题目不属于该场次，请重新载入。')
+    if (session?.examConfig?.mode === 'simulation' && Date.now() >= session.createdAt + session.examConfig.durationMinutes * 60000) throw new LearningError('conflict', '模拟时间已结束，请结束场次并查看报告。')
+    const matches = session?.purpose === 'exam' ? session.questions?.some((q) => q.archiveId === entity.question.archiveId && q.artifactId === entity.question.artifactId && q.questionId === entity.question.questionId)
+      : session && (await listEntities(entity.courseId, 'point')).some((point) => point.status === 'active' && session.pointIds.includes(point.id) && point.questionRefs.some((q) => q.confirmed && q.archiveId === entity.question.archiveId && q.artifactId === entity.question.artifactId && q.questionId === entity.question.questionId))
+    if (!session || session.status !== 'active') throw new LearningError('conflict', '学习场次已结束，请重新载入。')
+    if (session.checkpoint?.paused) throw new LearningError('conflict', '学习场次已暂停，请继续会话后作答。')
+    if (session.courseId !== entity.courseId || !matches) throw new LearningError('conflict', '题目不属于该场次，请重新载入。')
   }
   if (entity.kind === 'attempt' && entity.origin === 'practice' || entity.kind === 'schedule' && entity.status !== 'paused') {
     const question = entity.question; const issues = await listEntities(entity.courseId, 'issue')
@@ -80,6 +94,7 @@ async function requireReferences(entity: LearningEntity): Promise<void> {
   }
   if (entity.kind === 'assessment') {
     const attempt = await getEntity(entity.attemptId, 'attempt'); if (!attempt || attempt.courseId !== entity.courseId) throw new LearningError('invalid', '作答记录不属于当前课程。')
+    if (entity.feedbackArchiveId && (await getEntity(entity.feedbackArchiveId, 'archive'))?.courseId !== entity.courseId) throw new LearningError('invalid', '反馈依据不属于当前课程。')
   }
   if (entity.kind === 'relation') {
     await requirePoint(entity.courseId, entity.fromPointId); await requirePoint(entity.courseId, entity.toPointId)
@@ -95,6 +110,12 @@ async function requireReferences(entity: LearningEntity): Promise<void> {
   }
   if (entity.kind === 'session' || entity.kind === 'application') for (const pointId of entity.pointIds) await requirePoint(entity.courseId, pointId)
   if (entity.kind === 'session') {
+    if (entity.status === 'active' && entity.checkpoint) {
+      const course = await requireCourse(entity.courseId)
+      if (entity.checkpoint.goalVersion !== course.goalVersion) throw new LearningError('conflict', '课程目标已变化，请重新核对会话。')
+      for (const [id, revision] of Object.entries(entity.checkpoint.pointRevisions)) { const point = await requirePoint(entity.courseId, id); if (point.revision !== revision || point.status !== 'active') throw new LearningError('conflict', '会话知识点已变化，请重新核对。') }
+      for (const [id, hash] of Object.entries(entity.checkpoint.archiveHashes)) if ((await getEntity(id, 'archive'))?.contentHash !== hash) throw new LearningError('conflict', '会话归档已变化或删除。')
+    }
     for (const ref of entity.questions ?? []) await requireQuestion(entity.courseId, ref)
     if (entity.purpose === 'exam' && entity.status === 'completed') {
       const attempts = await listEntities(entity.courseId, 'attempt')
@@ -122,7 +143,8 @@ export async function saveEntity<T extends LearningEntity>(input: T, expectedRev
       const membership = (await db.learningRecords.where('docId').equals(entity.docId).toArray()).find((r) => r.kind === 'document' && r.id !== entity.id)
       if (membership) throw new LearningError('conflict', '文档已加入另一门课程，请先移出。')
     }
-    const saved = { ...entity, revision: (current?.revision ?? 0) + 1, createdAt: current?.createdAt ?? entity.createdAt, updatedAt: Date.now() } as T
+    const goalChanged = entity.kind === 'course' && current?.kind === 'course' && (entity.goal !== current.goal || canonicalizeJson(entity.goals ?? []) !== canonicalizeJson(current.goals ?? []))
+    const saved = { ...entity, ...(goalChanged ? { goalVersion: Math.max(entity.goalVersion, (current as Course).goalVersion + 1) } : {}), revision: (current?.revision ?? 0) + 1, createdAt: current?.createdAt ?? entity.createdAt, updatedAt: Date.now() } as T
     await db.learningRecords.put(saved); if (previousGoals) await recordGoalScopeChange(entity.courseId, previousGoals); return saved
   })
 }
@@ -149,7 +171,7 @@ export async function loadCourseSnapshot(courseId: string): Promise<CourseSnapsh
     const rows = <K extends LearningKind>(kind: K) => records.filter((r): r is EntityOf<K> => r.kind === kind)
     const documents = rows('document'); const docs = []
     for (const membership of documents) { const doc = await db.docs.get(membership.docId); if (doc) docs.push({ id: doc.id, title: doc.title, createdAt: doc.createdAt, updatedAt: doc.updatedAt }) }
-    return { course, documents, docs, points: rows('point'), archives: rows('archive'), attempts: rows('attempt').sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), drafts: rows('draft'), assessments: rows('assessment').sort((a, b) => a.attemptId === b.attemptId && a.sequence !== undefined && b.sequence !== undefined ? a.sequence - b.sequence : a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)), schedules: rows('schedule'), relations: rows('relation'), merges: rows('merge'), sessions: rows('session'), applicationTasks: rows('application'), issues: rows('issue'), bindings: rows('binding') }
+    return { course, documents, docs, points: rows('point'), archives: rows('archive'), attempts: rows('attempt').sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), drafts: rows('draft'), assessments: rows('assessment').sort((a, b) => a.attemptId === b.attemptId && a.sequence !== undefined && b.sequence !== undefined ? a.sequence - b.sequence : a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)), schedules: rows('schedule'), relations: rows('relation'), merges: rows('merge'), sessions: rows('session'), applicationTasks: rows('application'), issues: rows('issue'), bindings: rows('binding'), supports: rows('support') }
   })
   await Promise.all(snapshot.archives.map(validateLearningArchive)); return snapshot
 }
@@ -360,6 +382,9 @@ export async function deletePracticeHistory(courseId: string, expectedCourseRevi
     const course = await requireCourse(courseId); if (course.revision !== expectedCourseRevision) conflict()
     const attempts = await listEntities(courseId, 'attempt'); const attemptIds = new Set(attempts.map((a) => a.id))
     await eraseRows([...attempts, ...(await listEntities(courseId, 'assessment'))])
+    for (const support of await listEntities(courseId, 'support')) if (support.attemptId && attemptIds.has(support.attemptId)) {
+      const changed = { ...support, status: 'rejected' as const, revision: support.revision + 1, updatedAt: Date.now() }; delete changed.attemptId; delete changed.learnerAnswer; await db.learningRecords.put(changed)
+    }
     for (const draft of await listEntities(courseId, 'draft')) if (attemptIds.has(draft.attemptId)) await db.learningRecords.put({ ...draft, attemptId: newLearningId(), revision: draft.revision + 1, updatedAt: Date.now() })
     for (const session of await listEntities(courseId, 'session')) if (session.purpose === 'exam') await db.learningRecords.put({ ...session, status: 'ended', endedAt: Date.now(), revision: session.revision + 1, updatedAt: Date.now() })
     for (const row of await listEntities(courseId, 'schedule')) {
@@ -375,11 +400,12 @@ export async function deleteLearningArchive(courseId: string, archiveId: string,
     const previousGoals = await goalScope(courseId)
     const rows = (await db.learningRecords.where('courseId').equals(courseId).toArray()).map(parseLearningEntity)
     const attempts = rows.filter((r) => r.kind === 'attempt' && r.question.archiveId === archiveId); const attemptIds = new Set(attempts.map((a) => a.id))
-    await eraseRows(rows.filter((r) => r.id === archiveId || r.kind === 'attempt' && attemptIds.has(r.id) || r.kind === 'assessment' && attemptIds.has(r.attemptId) || 'question' in r && r.question.archiveId === archiveId || r.kind === 'binding' && r.archiveId === archiveId))
+    await eraseRows(rows.filter((r) => r.id === archiveId || r.kind === 'attempt' && attemptIds.has(r.id) || r.kind === 'assessment' && (attemptIds.has(r.attemptId) || r.feedbackArchiveId === archiveId) || 'question' in r && r.question.archiveId === archiveId || r.kind === 'binding' && r.archiveId === archiveId || r.kind === 'support' && (r.generatedArchiveId === archiveId || r.sourceRefs.some((ref) => ref.archiveId === archiveId) || r.questionRef?.archiveId === archiveId || r.attemptId && attemptIds.has(r.attemptId))))
     for (const row of rows) if (row.kind === 'point') {
       const sourceRefs = row.sourceRefs.filter((r) => r.archiveId !== archiveId); const questionRefs = row.questionRefs.filter((r) => r.archiveId !== archiveId)
       if (sourceRefs.length !== row.sourceRefs.length || questionRefs.length !== row.questionRefs.length || row.archiveId === archiveId) {
-        const changed = { ...row, sourceRefs, questionRefs, revision: row.revision + 1, updatedAt: Date.now(), ...(row.archiveId === archiveId ? { status: 'retired' as const, title: '已删除学习资料', definition: '', aliases: [], questionLevels: {} } : {}) }
+        const removedKeys = new Set(row.questionRefs.filter((ref) => ref.archiveId === archiveId).map(questionRefKey))
+        const changed = { ...row, sourceRefs, questionRefs, ...(row.questionLevels ? { questionLevels: Object.fromEntries(Object.entries(row.questionLevels).filter(([key]) => !removedKeys.has(key))) } : {}), revision: row.revision + 1, updatedAt: Date.now(), ...(row.archiveId === archiveId ? { status: 'retired' as const, title: '已删除学习资料', definition: '', aliases: [], questionLevels: {} } : {}) }
         if (row.archiveId === archiveId) { delete changed.archiveId; delete changed.generatedNodeId }
         await db.learningRecords.put(changed)
       }

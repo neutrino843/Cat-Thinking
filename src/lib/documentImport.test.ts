@@ -115,7 +115,7 @@ describe('文档导入与内容提取', () => {
   it('空文档、超限文档及伪造 PDF 给出明确错误', async () => {
     await expect(prepareDocumentImport(sourceFile('empty.txt', ' \n '))).rejects.toThrow(/为空/)
     const huge = new File([new Uint8Array(MAX_SOURCE_BYTES + 1)], 'huge.txt', { type: 'text/plain' })
-    await expect(prepareDocumentImport(huge)).rejects.toThrow(/5MB/)
+    await expect(prepareDocumentImport(huge)).rejects.toThrow(/25MB/)
     await expect(prepareDocumentImport(sourceFile('paper.pdf', 'fake', 'application/pdf'))).rejects.toThrow(/签名无效/)
   })
 

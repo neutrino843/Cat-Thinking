@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
-import {
-  docxXmlToStructuredText,
-  extractDocx,
-  inspectDocxArchive,
-} from './docxExtractor'
+import { docxXmlToStructuredText, extractDocx } from './docxExtractor'
+import { unzipOoxml } from './ooxmlShared'
 
 const documentXml = `<?xml version="1.0" encoding="UTF-8"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -65,14 +62,14 @@ describe('DOCX 内建提取器', () => {
       .toThrow(/实体声明/)
   })
 
-  it('解压前拒绝路径穿越条目', () => {
+  it('解压前拒绝路径穿越条目', async () => {
     const bytes = docxBytes({ '../outside.xml': strToU8('blocked') })
-    expect(() => inspectDocxArchive(bytes)).toThrow(/不安全路径/)
+    await expect(unzipOoxml(bytes, 'DOCX', ['word/document.xml'])).rejects.toThrow(/不安全路径/)
   })
 
-  it('拒绝缺少正文的伪 DOCX', () => {
+  it('拒绝缺少正文的伪 DOCX', async () => {
     const bytes = zipSync({ '[Content_Types].xml': strToU8('<Types/>') })
-    expect(() => inspectDocxArchive(bytes)).toThrow(/word\/document\.xml/)
+    await expect(unzipOoxml(bytes, 'DOCX', ['word/document.xml'])).rejects.toThrow(/word\/document\.xml/)
   })
 
   it('从 DOCX File 生成结构化来源', async () => {

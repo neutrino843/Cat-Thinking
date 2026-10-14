@@ -192,6 +192,22 @@ describe('source and canonical edge cases', () => {
     }).success).toBe(false)
   })
 
+  it('requires pageCount for pptx sources and accepts valid pptx snapshots', () => {
+    const base = {
+      version: 1,
+      sourceId: 'source-1',
+      kind: 'pptx',
+      extractor: 'cat-pptx-ooxml-v1',
+      contentHash: hash('e'),
+      charCount: 10,
+      byteCount: 10,
+      selectedRange: { start: 0, end: 10 },
+    }
+    expect(sourceSnapshotSchema.safeParse({ ...base, pageCount: undefined }).success).toBe(false)
+    const result = sourceSnapshotSchema.safeParse({ ...base, pageCount: 3 })
+    expect(result.success).toBe(true)
+  })
+
   it('enforces UTF-8 upload byte limits independently from character count', () => {
     const text = '界'.repeat(Math.floor(ANALYSIS_LIMITS.maxUploadPartBytes / 3) + 1)
     expect(uploadSourcePartSchema.safeParse({

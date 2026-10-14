@@ -130,7 +130,7 @@ export interface SourceLocator {
 }
 
 /** Cat-Thinking 内建解析器支持的来源文档类型。 */
-export type SourceKind = 'text' | 'markdown' | 'pdf' | 'docx'
+export type SourceKind = 'text' | 'markdown' | 'pdf' | 'docx' | 'pptx'
 
 /**
  * 独立持久化的来源文档。原文不塞进 DocData，避免每次编辑节点时重复序列化大文本。

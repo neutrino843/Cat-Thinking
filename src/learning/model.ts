@@ -3,8 +3,9 @@ import type { DocMeta, SourceDocument } from '../types'
 
 /** Versioned local learning records. No provider secrets or resumable network tasks belong here. */
 export interface LearningBase { version: 1; id: string; courseId: string; revision: number; createdAt: number; updatedAt: number }
-export interface Course extends LearningBase { kind: 'course'; name: string; goal: string; timeZone: string; dailyMinutes: number; dailyQuestionLimit: number; examDate?: string; goalVersion: number; automaticReviews?: boolean }
-export interface CourseDocument extends LearningBase { kind: 'document'; docId: string; chapter: string }
+export interface CourseGoal { id: string; title: string; level: QuestionLevel; priority: 'normal' | 'important' | 'required'; pointIds: string[]; confirmed: boolean }
+export interface Course extends LearningBase { kind: 'course'; name: string; goal: string; timeZone: string; dailyMinutes: number; dailyQuestionLimit: number; examDate?: string; goalVersion: number; automaticReviews?: boolean; goals?: CourseGoal[]; example?: boolean }
+export interface CourseDocument extends LearningBase { kind: 'document'; docId: string; chapter: string; role?: 'syllabus' | 'slides' | 'textbook' | 'notes' }
 export interface ArchivedSourceRef { archiveId: string; sourceId: string; start: number; end: number }
 export interface QuestionRef { archiveId: string; artifactId: string; questionId: string; confirmed: boolean }
 export type QuestionLevel = 'recall' | 'explanation' | 'application'
@@ -18,14 +19,18 @@ export interface LearningArchive extends LearningBase {
   kind: 'archive'; originDocId: string; provenanceDocId: string; runId: string; title: string
   manifest: SourceManifestV1; sources: SourceDocument[]; artifacts: ArtifactEnvelopeV1[]; contentHash: string
 }
+export interface PracticeAssistance { hints: number; fullExplanation: boolean; sourceViewed: boolean; recorded: boolean }
 export interface PracticeAttempt extends LearningBase {
   kind: 'attempt'; question: QuestionRef; answer: string | number | boolean | string[]; submittedAt: number | null
   learningDate: string; answerRevealed: boolean; origin: 'practice' | 'legacy'; confidence?: number; sessionId?: string
+  assistance?: PracticeAssistance
+  recallText?: string
 }
-export interface PracticeDraft extends LearningBase { kind: 'draft'; question: QuestionRef; answer: string | number | boolean; answerRevealed: boolean; attemptId: string }
+export interface PracticeDraft extends LearningBase { kind: 'draft'; question: QuestionRef; answer: string | number | boolean | null; answerRevealed: boolean; attemptId: string; assistance?: PracticeAssistance; recallText?: string }
 export interface AssessmentEvent extends LearningBase {
   kind: 'assessment'; attemptId: string; outcome: 'success' | 'partial' | 'failure' | 'disputed' | 'skipped'
   difficulty: 'again' | 'hard' | 'good' | 'easy'; selfAssessmentComplete: boolean; reason?: string; rubricChecks?: boolean[]; sequence?: number
+  feedbackArchiveId?: string; origin?: 'self' | 'ai-review'
 }
 export interface ReviewSchedule extends LearningBase {
   kind: 'schedule'; question: QuestionRef; status: 'active' | 'paused' | 'remediation'; dueDate: string; stage: number
@@ -39,11 +44,14 @@ export interface KnowledgeMergeEvent extends LearningBase {
   afterRelationRevisions?: Record<string, number>
   undoDisabledReason?: string
 }
-export interface LearningSession extends LearningBase { kind: 'session'; title: string; pointIds: string[]; status: 'active' | 'completed' | 'ended'; steps: { pointId: string; action: 'read' | 'recall' | 'practice' | 'source' | 'explain'; status: 'pending' | 'completed' | 'skipped'; note: string }[]; endedAt?: number; purpose?: 'guided' | 'exam'; questions?: QuestionRef[] }
+export interface SessionCheckpoint { stepIndex: number; paused: boolean; hidden: boolean; goalVersion: number; pointRevisions: Record<string, number>; archiveHashes: Record<string, string>; questionKey?: string; position?: number; endedReason?: 'completed' | 'user' }
+export interface LearningSession extends LearningBase { kind: 'session'; title: string; pointIds: string[]; status: 'active' | 'completed' | 'ended'; steps: { pointId: string; action: 'read' | 'recall' | 'practice' | 'source' | 'explain'; status: 'pending' | 'completed' | 'skipped'; note: string }[]; endedAt?: number; purpose?: 'guided' | 'exam'; questions?: QuestionRef[]; checkpoint?: SessionCheckpoint; examConfig?: { durationMinutes: number; mode: 'simulation' | 'guided' }; planning?: { date: string; minutes: number } }
 export interface ApplicationTask extends LearningBase { kind: 'application'; pointIds: string[]; title: string; prompt: string; response: string; rubric: string[]; checks: boolean[]; status: 'pending' | 'completed' | 'skipped'; learningDate?: string }
 export interface QuestionIssue extends LearningBase { kind: 'issue'; question: QuestionRef; reason: 'answer' | 'ambiguous' | 'outside-source'; note: string; status: 'open' | 'resolved' }
 export interface NodeBinding extends LearningBase { kind: 'binding'; docId: string; archiveId: string; artifactId: string; mappings: { generatedNodeId: string; localNodeId: string; pointId: string; originalText: string; originalNote?: string }[]; status: 'active' | 'pending' | 'retired' }
-export type LearningEntity = Course | CourseDocument | KnowledgePoint | LearningArchive | PracticeAttempt | PracticeDraft | AssessmentEvent | ReviewSchedule | KnowledgeRelation | KnowledgeMergeEvent | LearningSession | ApplicationTask | QuestionIssue | NodeBinding
+export type SupportMode = 'explain' | 'compare' | 'hint' | 'feedback' | 'goals' | 'variation' | 'supplement'
+export interface LearningSupport extends LearningBase { kind: 'support'; mode: SupportMode; docId: string; pointIds: string[]; sourceRefs: ArchivedSourceRef[]; prompt: string; learnerAnswer?: string; hintLevel?: number; quizType?: 'mixed' | 'multiple-choice' | 'true-false' | 'short-answer'; difficulty?: 'easy' | 'medium' | 'hard'; status: 'prepared' | 'viewed' | 'accepted' | 'rejected'; generatedArchiveId?: string; questionRef?: QuestionRef; attemptId?: string; sessionId?: string; viewedAt?: number }
+export type LearningEntity = Course | CourseDocument | KnowledgePoint | LearningArchive | PracticeAttempt | PracticeDraft | AssessmentEvent | ReviewSchedule | KnowledgeRelation | KnowledgeMergeEvent | LearningSession | ApplicationTask | QuestionIssue | NodeBinding | LearningSupport
 export type LearningKind = LearningEntity['kind']
 export type EntityOf<K extends LearningKind> = Extract<LearningEntity, { kind: K }>
 export interface CourseSnapshot {
@@ -51,6 +59,7 @@ export interface CourseSnapshot {
   attempts: PracticeAttempt[]; assessments: AssessmentEvent[]; schedules: ReviewSchedule[]; relations: KnowledgeRelation[]
   drafts: PracticeDraft[]
   merges: KnowledgeMergeEvent[]; sessions: LearningSession[]; applicationTasks: ApplicationTask[]; issues: QuestionIssue[]; bindings: NodeBinding[]
+  supports?: LearningSupport[]
 }
 export const newLearningId = (): string => crypto.randomUUID()
 export function learningBase(courseId: string, id = newLearningId(), now = Date.now()): LearningBase {

@@ -50,6 +50,7 @@ export default function DocumentImportDialog({ draft, onClose, onConfirm }: Prop
     markdown: 'Markdown',
     pdf: 'PDF',
     docx: 'DOCX',
+    pptx: 'PPTX',
   }[draft.source.kind]
 
   return createPortal(
