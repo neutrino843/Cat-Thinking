@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "fixtureId": "foundations-zh-photosynthesis",
+  "sourceFile": "source.txt",
+  "expectationsFile": "expectations.json",
+  "license": "project-generated",
+  "redistributable": true,
+  "contentHash": "65858fa7fa0d4fcdf5bc074fa6019a94e8cc93d99a23b2dfcaa585e151c3e2cc"
+}

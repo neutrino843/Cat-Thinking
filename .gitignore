@@ -1,17 +1,27 @@
 node_modules/
 dist/
 coverage/
+coverage-postgres/
+coverage-provider-audit/
+coverage-local-artifacts/
+coverage-learning/
 *.log
+.env
+.env.*
+!.env.example
 .DS_Store
 
 # Playwright 运行产物
 test-results/
 playwright-report/
 playwright/.cache/
+.browser-test-runtime/
 
 # 阶段/过程文档：本地保留，不纳入版本库
 CODE_AUDIT_REPORT.md
 TEST_REPORT.md
 NODE_CONFIRMATION.md
 项目思维导图中期总结.md
+audit/
+.hallmark/
 .trae/

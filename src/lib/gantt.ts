@@ -37,20 +37,25 @@ function dfs(doc: DocData, id: string, depth: number, out: GanttRow[], y: { v: n
   for (const c of n.children) dfs(doc, c, depth + 1, out, y)
 }
 
-function hasTask(t: TaskData | undefined): boolean {
-  return !!(t && (t.milestone || t.start))
+type ScheduledTask = TaskData & { start: string }
+
+function hasTask(t: TaskData | undefined): t is ScheduledTask {
+  return typeof t?.start === 'string' && t.start.length > 0
 }
 
 export function computeGantt(doc: DocData, scale: GanttScale, today = todayISO()): GanttModel {
   const rows: GanttRow[] = []
   dfs(doc, doc.rootId, 0, rows, { v: HEADER_H })
 
-  const tasks = rows.filter((r) => hasTask(r.task)).map((r) => r.task!)
+  const tasks: ScheduledTask[] = []
+  for (const row of rows) {
+    if (hasTask(row.task)) tasks.push(row.task)
+  }
   let minS: string | null = null
   let maxE: string | null = null
   for (const t of tasks) {
-    const s = t.start ?? null
-    const e = t.milestone ? t.start! : (t.end ?? t.start!)
+    const s = t.start
+    const e = t.milestone ? t.start : (t.end ?? t.start)
     if (s && (!minS || diffDays(minS, s) < 0)) minS = s
     if (e && (!maxE || diffDays(maxE, e) > 0)) maxE = e
   }
@@ -84,8 +89,9 @@ export interface DepEdge {
 export function depEdges(doc: DocData): DepEdge[] {
   const out: DepEdge[] = []
   for (const n of Object.values(doc.nodes)) {
-    if (!hasTask(n.task)) continue
-    for (const d of n.task!.deps ?? []) {
+    const task = n.task
+    if (!hasTask(task)) continue
+    for (const d of task.deps ?? []) {
       const p = doc.nodes[d.from]?.task
       if (hasTask(p)) out.push({ from: d.from, to: n.id })
     }
@@ -102,16 +108,17 @@ export function depEdges(doc: DocData): DepEdge[] {
  * 含环时退化为 Kahn 拓扑能覆盖的节点子集（环上节点不参与）。
  */
 export function criticalPath(doc: DocData): Set<string> {
-  const tasks = new Map<string, TaskData>()
+  const tasks = new Map<string, ScheduledTask>()
   for (const [id, n] of Object.entries(doc.nodes)) {
-    if (hasTask(n.task)) tasks.set(id, n.task!)
+    if (hasTask(n.task)) tasks.set(id, n.task)
   }
   if (tasks.size === 0) return new Set<string>()
 
   const dur = (id: string) => {
-    const t = tasks.get(id)!
+    const t = tasks.get(id)
+    if (!t) throw new Error(`甘特任务索引不一致：${id}`)
     if (t.milestone) return 0
-    return Math.max(1, diffDays(t.start!, t.end ?? t.start!))
+    return Math.max(1, diffDays(t.start, t.end ?? t.start))
   }
 
   // 前驱/后继邻接（仅保留两端均为任务的依赖边）
@@ -124,8 +131,11 @@ export function criticalPath(doc: DocData): Set<string> {
   for (const [id, t] of tasks) {
     for (const d of t.deps ?? []) {
       if (tasks.has(d.from)) {
-        preds.get(id)!.push(d.from)
-        succs.get(d.from)!.push(id)
+        const nodePreds = preds.get(id)
+        const dependencySuccs = succs.get(d.from)
+        if (!nodePreds || !dependencySuccs) throw new Error('甘特依赖索引初始化失败')
+        nodePreds.push(d.from)
+        dependencySuccs.push(id)
       }
     }
   }
@@ -137,11 +147,15 @@ export function criticalPath(doc: DocData): Set<string> {
   for (const [id, d] of indeg) if (d === 0) queue.push(id)
   const topo: string[] = []
   while (queue.length) {
-    const cur = queue.shift()!
+    const cur = queue.shift()
+    if (cur === undefined) break
     topo.push(cur)
     for (const s of succs.get(cur) ?? []) {
-      indeg.set(s, indeg.get(s)! - 1)
-      if (indeg.get(s) === 0) queue.push(s)
+      const currentDegree = indeg.get(s)
+      if (currentDegree === undefined) throw new Error(`甘特入度索引缺少任务：${s}`)
+      const nextDegree = currentDegree - 1
+      indeg.set(s, nextDegree)
+      if (nextDegree === 0) queue.push(s)
     }
   }
 
@@ -205,7 +219,8 @@ export function wouldCreateCycle(nodes: DocData['nodes'], from: string, to: stri
   const stack = [to]
   const seen = new Set<string>()
   while (stack.length) {
-    const cur = stack.pop()!
+    const cur = stack.pop()
+    if (cur === undefined) break
     if (cur === from) return true
     if (seen.has(cur)) continue
     seen.add(cur)
@@ -217,7 +232,8 @@ export function wouldCreateCycle(nodes: DocData['nodes'], from: string, to: stri
 
 /** 条形几何（像素 x / 宽度 / y） */
 export function barGeom(task: TaskData, rowY: number, model: GanttModel) {
-  const s = task.start!
+  const s = task.start
+  if (!s) throw new TypeError('甘特条目必须包含开始日期')
   const x = diffDays(model.day0, s) * model.pxPerDay
   if (task.milestone) {
     return { x, y: rowY + 6, size: ROW_H - 12, w: model.pxPerDay, milestone: true as const }

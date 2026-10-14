@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "requestKey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "docId": "doc-foundations",
+  "manifest": {
+    "version": 1,
+    "sources": [
+      {
+        "version": 1,
+        "sourceId": "source-photosynthesis",
+        "kind": "pdf",
+        "extractor": "pdfjs@4.8.69",
+        "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "charCount": 1200,
+        "byteCount": 1800,
+        "pageCount": 2,
+        "selectedRange": {
+          "start": 0,
+          "end": 1200
+        }
+      }
+    ]
+  },
+  "artifacts": ["summary", "outline", "mindmap", "quiz", "knowledge"],
+  "options": {
+    "locale": "zh-CN",
+    "qualityProfile": "standard",
+    "summaryDetail": "standard",
+    "quizQuestionCount": 5,
+    "externalKnowledge": false
+  }
+}

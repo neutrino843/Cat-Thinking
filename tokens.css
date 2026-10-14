@@ -1,0 +1,78 @@
+/* Hallmark · macrostructure: functional workbench · tone: playful neo-brutalism · anchor hue: lemon
+ * Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V4 — browser verification is required before handoff.
+ */
+:root {
+  --color-paper: oklch(97% 0.018 87);
+  --color-paper-2: oklch(94% 0.025 87);
+  --color-paper-3: oklch(90% 0.032 87);
+  --color-ink: oklch(20% 0.012 80);
+  --color-ink-2: oklch(32% 0.014 80);
+  --color-muted: oklch(43% 0.018 80);
+  --color-neutral: oklch(35% 0.018 80);
+  --color-rule: var(--color-ink);
+  --color-rule-2: oklch(67% 0.025 87);
+  --color-accent: oklch(92% 0.18 105);
+  --color-accent-ink: var(--color-ink);
+  --color-support: oklch(88% 0.062 240);
+  --color-support-ink: var(--color-ink);
+  --color-focus: oklch(45% 0.19 265);
+  --color-error: oklch(44% 0.16 27);
+  --color-error-paper: oklch(94% 0.032 28);
+  --color-success: oklch(37% 0.1 150);
+  --color-success-paper: oklch(93% 0.04 150);
+  --color-overlay: oklch(15% 0.01 80 / 0.55);
+  --color-shadow: oklch(20% 0.012 80);
+  --color-disabled-paper: oklch(90% 0.01 87);
+  --font-display: system-ui, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
+  --font-body: system-ui, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
+  --font-outlier: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs: 0.75rem;
+  --space-sm: 1rem;
+  --space-md: 1.5rem;
+  --space-lg: 2rem;
+  --space-xl: 3rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+  --text-display: clamp(1.5rem, 2vw + 1rem, 2rem);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 100ms;
+  --dur-short: 150ms;
+  --rule-hair: 1px;
+  --rule-fine: 2px;
+  --rule-strong: 3px;
+  --radius-card: 2px;
+  --radius-input: 2px;
+  --radius-pill: 2px;
+  --shadow-card: 6px 6px 0 var(--color-shadow);
+  --shadow-control: 3px 3px 0 var(--color-shadow);
+  --control-height: 44px;
+}
+
+:root[data-theme='dark'] {
+  --color-paper: oklch(22% 0.012 80);
+  --color-paper-2: oklch(27% 0.014 80);
+  --color-paper-3: oklch(33% 0.014 80);
+  --color-ink: oklch(95% 0.018 87);
+  --color-ink-2: oklch(88% 0.025 87);
+  --color-muted: oklch(76% 0.02 87);
+  --color-neutral: oklch(84% 0.025 87);
+  --color-rule: oklch(78% 0.015 87);
+  --color-rule-2: oklch(50% 0.02 87);
+  --color-accent-ink: oklch(20% 0.012 80);
+  --color-support: oklch(39% 0.065 240);
+  --color-support-ink: var(--color-ink);
+  --color-focus: oklch(80% 0.11 245);
+  --color-error: oklch(80% 0.13 28);
+  --color-error-paper: oklch(29% 0.05 28);
+  --color-success: oklch(80% 0.12 150);
+  --color-success-paper: oklch(29% 0.04 150);
+  --color-disabled-paper: oklch(30% 0.012 80);
+}

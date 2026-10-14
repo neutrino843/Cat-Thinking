@@ -7,17 +7,32 @@ import globals from 'globals';
 export default tseslint.config(
   {
     ignores: [
-      'dist/**',
+      '**/dist/**',
+      '**/.browser-test-runtime/**',
       'node_modules/**',
       'playwright-report/**',
       'test-results/**',
       'coverage/**',
+      'coverage-postgres/**',
+      'coverage-provider-audit/**',
+      'coverage-local-artifacts/**',
     ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['src/**/*.{ts,tsx}', 'e2e/**/*.ts', 'vite.config.ts', 'vitest.config.ts', 'playwright.config.ts'],
+    files: [
+      'src/**/*.{ts,tsx}',
+      'e2e/**/*.ts',
+      'packages/**/*.ts',
+      'services/**/*.ts',
+      'evals/**/*.ts',
+      'vite.config.ts',
+      'vitest.config.ts',
+      'vitest.postgres.config.ts',
+      'playwright.config.ts',
+      'playwright.analysis.config.ts',
+    ],
     languageOptions: {
       globals: { ...globals.browser },
     },
@@ -39,10 +54,25 @@ export default tseslint.config(
   },
   {
     // 测试与 e2e：断言式非空断言是惯用法，放宽
-    files: ['**/*.test.ts', 'src/test/**', 'e2e/**'],
+    files: ['**/*.test.ts', 'src/test/**', 'e2e/**', 'evals/**'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',
+      'no-console': 'off',
+    },
+  },
+  {
+    files: ['services/**/*.ts'],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+    rules: {
       'no-console': 'off',
     },
   },

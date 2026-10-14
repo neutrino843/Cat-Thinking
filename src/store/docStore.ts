@@ -579,9 +579,10 @@ export const useDoc = create<DocState>((set, get) => {
     removeDep: (from, to) => {
       const s = get()
       const n = s.doc.nodes[to]
-      const t = n?.task
-      if (!t?.deps) return
-      upd({ ...s.doc.nodes, [to]: { ...n!, task: { ...t, deps: t.deps.filter((d) => d.from !== from) } } })
+      const deps = n?.task?.deps
+      if (!n?.task || !deps) return
+      const t = n.task
+      upd({ ...s.doc.nodes, [to]: { ...n, task: { ...t, deps: deps.filter((d) => d.from !== from) } } })
     },
 
     clearTask: (id) => {
@@ -613,17 +614,24 @@ export const useDoc = create<DocState>((set, get) => {
       for (const oldId of Object.keys(clip.nodes)) idMap.set(oldId, uid())
       const nodes = { ...s.doc.nodes }
       for (const [oldId, n] of Object.entries(clip.nodes)) {
-        nodes[idMap.get(oldId)!] = {
+        const id = idMap.get(oldId)
+        if (!id) throw new Error(`剪贴板节点 ${oldId} 缺少 ID 映射`)
+        nodes[id] = {
           ...n,
-          id: idMap.get(oldId)!,
-          parent: n.parent && idMap.has(n.parent) ? idMap.get(n.parent)! : null,
+          id,
+          parent: n.parent ? (idMap.get(n.parent) ?? null) : null,
           children: n.children.map((c) => idMap.get(c)).filter((c): c is string => !!c),
         }
       }
       const t = nodes[target]
-      const newRoots = clip.roots.map((r) => idMap.get(r)!)
+      const newRoots = clip.roots
+        .map((r) => idMap.get(r))
+        .filter((r): r is string => r !== undefined)
       nodes[target] = { ...t, children: [...t.children, ...newRoots], collapsed: false }
-      for (const r of newRoots) nodes[r] = { ...nodes[r], parent: target }
+      for (const r of newRoots) {
+        const root = nodes[r]
+        if (root) nodes[r] = { ...root, parent: target }
+      }
       upd(nodes, { selection: newRoots, editing: null })
     },
 

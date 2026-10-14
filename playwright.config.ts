@@ -9,6 +9,7 @@ import { defineConfig, devices } from '@playwright/test'
  */
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: ['**/analysis/**', '**/performance/**', '**/personal/**'],
   fullyParallel: false, // 共享 IndexedDB 名 'maosizhi'，串行更稳
   forbidExpectError: false,
   workers: 1,

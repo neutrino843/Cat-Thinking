@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "fixtureId": "foundations-zh-photosynthesis",
+  "language": "zh-CN",
+  "requiredConcepts": [
+    "光合作用",
+    "叶绿体",
+    "ATP",
+    "NADPH",
+    "二氧化碳"
+  ],
+  "requiredRelations": [
+    {
+      "from": "光反应",
+      "to": "碳反应",
+      "relation": "提供 ATP 和 NADPH"
+    }
+  ],
+  "answerableQuestions": [
+    {
+      "question": "绿色植物进行光合作用的主要场所是什么？",
+      "answer": "叶绿体"
+    }
+  ],
+  "forbiddenClaims": [
+    "光合作用主要在线粒体中进行",
+    "碳反应完全不依赖光反应"
+  ],
+  "requiredSourceFragments": [
+    "叶绿体是光合作用的主要场所",
+    "光反应产生 ATP 和 NADPH",
+    "碳反应利用 ATP 和 NADPH 固定二氧化碳"
+  ]
+}

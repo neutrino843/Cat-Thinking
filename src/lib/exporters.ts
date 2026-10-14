@@ -1,3 +1,4 @@
+import { ANALYSIS_LIMITS } from '@cat-thinking/analysis-contracts'
 import type { BoundaryBox, DocData, Relation, SourceDocument, Summary } from '../types'
 import { flushSync } from 'react-dom'
 import { computeLayout } from './layout'
@@ -10,6 +11,7 @@ import { sanitizeHtml } from './sanitizeHtml'
 import { jpegToPdf } from './pdf'
 import { getBlob, listSourcesByDoc } from '../store/db'
 import { getCachedBlobURL } from './blobUrl'
+import { parseRelationSourceReferences, requireRelationSources } from './relationSources'
 
 const LAST_BACKUP_KEY = 'msz.lastBackupAt'
 
@@ -319,7 +321,9 @@ export function validateDoc(d: unknown): DocData {
   {
     const stack: [string, number][] = [[o.rootId, 1]]
     while (stack.length) {
-      const [id, depth] = stack.pop()!
+      const entry = stack.pop()
+      if (!entry) break
+      const [id, depth] = entry
       if (depth > MAX_IMPORT_DEPTH) throw new Error(`节点树深度超过上限 ${MAX_IMPORT_DEPTH}`)
       for (const c of (nodeMap[id] as Record<string, unknown>).children as string[]) {
         stack.push([c, depth + 1])
@@ -344,7 +348,11 @@ export function validateDoc(d: unknown): DocData {
       if (!nodeMap[rk.to]) throw new Error(`relation.to 指向不存在的节点 ${rk.to}`)
       if (rk.label !== undefined && typeof rk.label !== 'string') throw new Error('relation.label 必须是字符串')
       if (rk.color !== undefined && typeof rk.color !== 'string') throw new Error('relation.color 必须是字符串')
-      rels.push(rk as unknown as Relation)
+      const sourceRefs = parseRelationSourceReferences(rk.sourceRefs)
+      rels.push({ id: rk.id, from: rk.from, to: rk.to,
+        ...(rk.label === undefined ? {} : { label: rk.label as string }),
+        ...(rk.color === undefined ? {} : { color: rk.color as string }),
+        ...(sourceRefs === undefined ? {} : { sourceRefs }) })
     }
     relations = rels
   }
@@ -425,6 +433,7 @@ export function parseImported(
   const blobs = (o._blobs as Record<string, { dataURL: string; type: string; name?: string }>) ?? {}
   const doc = validateDoc(d)
   const sources = validateImportedSources(o._sources, doc)
+  requireRelationSources(doc, sources)
   // _blobs 不进入文档本体
   delete (doc as unknown as Record<string, unknown>)._blobs
   delete (doc as unknown as Record<string, unknown>)._sources
@@ -451,6 +460,9 @@ function validateImportedSources(raw: unknown, doc: DocData): SourceDocument[] {
       throw new Error(`来源 ${source.id} 的文本无效或超过限制`)
     }
     const sourceText = source.text
+    if (source.contentHash !== undefined && (typeof source.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(source.contentHash))) {
+      throw new Error(`来源 ${source.id} 的内容 hash 无效`)
+    }
     if (!Array.isArray(source.anchors)) throw new Error(`来源 ${source.id} 的 anchors 必须是数组`)
     const anchors = source.anchors.map((anchor, anchorIndex) => {
       if (!anchor || typeof anchor !== 'object') throw new Error(`来源 ${source.id} 的锚点 ${anchorIndex + 1} 非法`)
@@ -475,6 +487,42 @@ function validateImportedSources(raw: unknown, doc: DocData): SourceDocument[] {
         ...(typeof value.page === 'number' ? { page: value.page } : {}),
       }
     })
+    let locators: SourceDocument['locators']
+    if (source.locators !== undefined) {
+      if (!Array.isArray(source.locators) || source.locators.length > ANALYSIS_LIMITS.maxSourceLocators) {
+        throw new Error(`Source ${source.id} locators are invalid or exceed the limit`)
+      }
+      locators = source.locators.map((locator, locatorIndex) => {
+        if (!locator || typeof locator !== 'object') {
+          throw new Error(`Source ${source.id} locator ${locatorIndex + 1} is invalid`)
+        }
+        const value = locator as Record<string, unknown>
+        if (
+          typeof value.start !== 'number'
+          || typeof value.end !== 'number'
+          || !Number.isInteger(value.start)
+          || !Number.isInteger(value.end)
+          || value.start < 0
+          || value.end <= value.start
+          || value.end > sourceText.length
+        ) throw new Error(`Source ${source.id} locator range is invalid`)
+        if (
+          !Array.isArray(value.titlePath)
+          || value.titlePath.length > 32
+          || value.titlePath.some((part) => typeof part !== 'string' || !part.trim() || part.trim().length > 500)
+        ) throw new Error(`Source ${source.id} locator title path is invalid`)
+        if (
+          value.page !== undefined
+          && (typeof value.page !== 'number' || !Number.isInteger(value.page) || value.page < 1 || value.page > 100_000)
+        ) throw new Error(`Source ${source.id} locator page is invalid`)
+        return {
+          start: value.start,
+          end: value.end,
+          titlePath: value.titlePath.map((part) => String(part).trim()),
+          ...(value.page === undefined ? {} : { page: value.page as number }),
+        }
+      })
+    }
     const importedAt = typeof source.importedAt === 'number' ? source.importedAt : Date.now()
     const lastModified = typeof source.lastModified === 'number' ? source.lastModified : importedAt
     return {
@@ -489,8 +537,10 @@ function validateImportedSources(raw: unknown, doc: DocData): SourceDocument[] {
       importedAt,
       extractor: typeof source.extractor === 'string' ? source.extractor : 'json-import-v1',
       text: sourceText,
+      ...(source.contentHash === undefined ? {} : { contentHash: source.contentHash as string }),
       charCount: sourceText.length,
       anchors,
+      ...(locators === undefined ? {} : { locators }),
     }
   })
 }

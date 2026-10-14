@@ -1,0 +1,121 @@
+import { z } from 'zod'
+import { ANALYSIS_CONTRACT_VERSION, ARTIFACT_KINDS, QUALITY_PROFILES } from './constants.js'
+import { byteCountSchema, identifierSchema } from './common.js'
+import { artifactKindSchema } from './artifacts.js'
+import { analysisErrorSchema } from './errors.js'
+import { analysisRequestSchema, analysisRunSchema } from './runs.js'
+
+export const engineCapabilitiesSchema = z
+  .object({
+    operatingMode: z.enum(['deployment', 'personal']).optional(),
+    pricingKnown: z.boolean().optional(),
+    activeProfileId: identifierSchema.optional(),
+    modelId: z.string().min(1).max(200).optional(),
+    maxSelectedCharacters: z.number().int().positive().safe().optional(),
+    service: z.literal('cat-analysis-engine'),
+    serviceVersion: z.string().trim().min(1).max(100),
+    acceptsRuns: z.boolean(),
+    degradedReasons: z.array(identifierSchema).max(20),
+    contractVersions: z.array(z.literal(ANALYSIS_CONTRACT_VERSION)).min(1),
+    qualityProfiles: z.array(z.enum(QUALITY_PROFILES)).min(1).max(QUALITY_PROFILES.length),
+    artifactKinds: z.array(z.enum(ARTIFACT_KINDS)).min(1).max(ARTIFACT_KINDS.length),
+    maxSourcesPerRun: z.number().int().positive(),
+    maxSourceCharacters: z.number().int().positive(),
+    maxUploadPartBytes: byteCountSchema,
+    supportsSse: z.boolean(),
+    supportsCancellation: z.boolean(),
+    supportsExternalKnowledge: z.boolean(),
+    retentionSeconds: z.number().int().nonnegative(),
+  })
+  .strict()
+
+export const analysisErrorResponseSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    traceId: identifierSchema,
+    error: analysisErrorSchema,
+  })
+  .strict()
+
+export const createAnalysisRunSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    request: analysisRequestSchema,
+  })
+  .strict()
+
+export const runCreatedSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    run: analysisRunSchema,
+    reused: z.boolean(),
+  })
+  .strict()
+
+export const startRunRequestSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    expectedRevision: z.number().int().positive(),
+  })
+  .strict()
+
+export const startRunResultSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    run: analysisRunSchema,
+  })
+  .strict()
+
+export const cancelRunRequestSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    expectedRevision: z.number().int().positive(),
+  })
+  .strict()
+
+export const cancelRunResultSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    runId: identifierSchema,
+    revision: z.number().int().positive(),
+    accepted: z.boolean(),
+  })
+  .strict()
+
+export const retryArtifactRequestSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    kind: artifactKindSchema,
+    expectedRevision: z.number().int().positive(),
+  })
+  .strict()
+
+export const retryArtifactAcceptedSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    runId: identifierSchema,
+    kind: artifactKindSchema,
+    revision: z.number().int().positive(),
+    accepted: z.boolean(),
+  })
+  .strict()
+
+export const deleteRunContentResultSchema = z
+  .object({
+    version: z.literal(ANALYSIS_CONTRACT_VERSION),
+    runId: identifierSchema,
+    deleted: z.boolean(),
+  })
+  .strict()
+
+export type EngineCapabilitiesV1 = z.infer<typeof engineCapabilitiesSchema>
+export type AnalysisErrorResponseV1 = z.infer<typeof analysisErrorResponseSchema>
+export type CreateAnalysisRunV1 = z.infer<typeof createAnalysisRunSchema>
+export type RunCreatedV1 = z.infer<typeof runCreatedSchema>
+export type StartRunRequestV1 = z.infer<typeof startRunRequestSchema>
+export type StartRunResultV1 = z.infer<typeof startRunResultSchema>
+export type CancelRunRequestV1 = z.infer<typeof cancelRunRequestSchema>
+export type CancelRunResultV1 = z.infer<typeof cancelRunResultSchema>
+export type RetryArtifactRequestV1 = z.infer<typeof retryArtifactRequestSchema>
+export type RetryArtifactAcceptedV1 = z.infer<typeof retryArtifactAcceptedSchema>
+export type DeleteRunContentResultV1 = z.infer<typeof deleteRunContentResultSchema>

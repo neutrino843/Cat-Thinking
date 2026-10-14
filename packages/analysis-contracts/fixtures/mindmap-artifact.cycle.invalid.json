@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "schemaVersion": 1,
+  "id": "artifact-map-cycle",
+  "runId": "run-1",
+  "docId": "doc-foundations",
+  "kind": "mindmap",
+  "sourceContentHashes": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "createdAt": 1791500000000,
+  "updatedAt": 1791500001000,
+  "payload": {
+    "title": "循环导图",
+    "nodes": [
+      {
+        "id": "node-a",
+        "parentId": "node-b",
+        "text": "节点 A",
+        "evidenceIds": [],
+        "citations": []
+      },
+      {
+        "id": "node-b",
+        "parentId": "node-a",
+        "text": "节点 B",
+        "evidenceIds": [],
+        "citations": []
+      }
+    ],
+    "relations": []
+  }
+}

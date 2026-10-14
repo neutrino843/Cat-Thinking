@@ -72,6 +72,19 @@ export interface Relation {
   label?: string
   /** 颜色 key：'' 用主题 ink；'b0'..'b5' 用分支色 */
   color?: string
+  /** Local source copies, never a generated node/remote source identifier. */
+  sourceRefs?: RelationSourceReference[]
+}
+
+export interface RelationSourceReference {
+  version: 1
+  sourceId: string
+  contentHash: string
+  /** UTF-16 offsets in the copied SourceDocument.text. */
+  start: number
+  end: number
+  page?: number
+  locator?: string
 }
 
 /** 概要：花括号框选一组兄弟节点 */
@@ -105,6 +118,17 @@ export interface SourceAnchor {
   page?: number
 }
 
+/**
+ * Source metadata used by analysis. Unlike SourceAnchor, it is independent of
+ * generated mind-map nodes and therefore survives draft-node truncation.
+ */
+export interface SourceLocator {
+  start: number
+  end: number
+  titlePath: string[]
+  page?: number
+}
+
 /** Cat-Thinking 内建解析器支持的来源文档类型。 */
 export type SourceKind = 'text' | 'markdown' | 'pdf' | 'docx'
 
@@ -124,8 +148,12 @@ export interface SourceDocument {
   importedAt: number
   extractor: string
   text: string
+  /** Optional verified immutable-copy identity; legacy imports compute their hash when analyzed. */
+  contentHash?: string
   charCount: number
   anchors: SourceAnchor[]
+  /** Added compatibly: legacy persisted sources can fall back to anchors. */
+  locators?: SourceLocator[]
 }
 
 export interface MindNodeData {

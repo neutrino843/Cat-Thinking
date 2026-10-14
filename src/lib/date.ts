@@ -50,8 +50,7 @@ export function monthKey(s: string): string {
 }
 
 export function clampRange(start?: string, end?: string): { start: string; end: string } | null {
-  if (!start && !end) return null
-  const s = start ?? end!
-  const e = end ?? start!
-  return diffDays(s, e) < 0 ? { start: e, end: s } : { start: s, end: e }
+  if (!start) return end ? { start: end, end } : null
+  if (!end) return { start, end: start }
+  return diffDays(start, end) < 0 ? { start: end, end: start } : { start, end }
 }
