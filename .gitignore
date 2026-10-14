@@ -4,6 +4,7 @@ coverage/
 coverage-postgres/
 coverage-provider-audit/
 coverage-local-artifacts/
+coverage-learning/
 *.log
 .env
 .env.*
@@ -21,4 +22,6 @@ CODE_AUDIT_REPORT.md
 TEST_REPORT.md
 NODE_CONFIRMATION.md
 项目思维导图中期总结.md
+audit/
+.hallmark/
 .trae/
