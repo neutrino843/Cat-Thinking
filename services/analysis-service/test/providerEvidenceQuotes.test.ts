@@ -93,12 +93,12 @@ describe('exact Evidence quotation adapter', () => {
     expect(f.provider.calls).toHaveLength(1)
   })
 
-  it('repairs an ambiguous repeated quote once using adjacent context, a distinct invocation and only the remaining output budget', async () => {
+  it('repairs an ambiguous repeated quote once using adjacent context and a full per-call budget', async () => {
     const text = 'first: fact. second: fact.'
     const f = await prepare(text, (_request, call) => response(call === 1 ? output('fact.') : output('fact.', 'second: ')))
     expect((await f.run()).outcome).toBe('completed')
     expect(f.provider.calls.map((call) => call.role)).toEqual(['evidence-map', 'repair'])
-    expect(f.provider.calls[1]?.maxOutputTokens).toBe(492)
+    expect(f.provider.calls[1]?.maxOutputTokens).toBe(512)
     expect(f.provider.calls[1]?.invocationId).not.toBe(f.provider.calls[0]?.invocationId)
     const repairInput = JSON.parse(f.provider.calls[1]!.userPrompt)
     expect(repairInput).toMatchObject({ task: 'evidence-map', validationFailure: 'quote_ambiguous' })
@@ -155,12 +155,12 @@ describe('exact Evidence quotation adapter', () => {
     expect(f.provider.calls).toHaveLength(2)
   })
 
-  it('keeps usage for a fully consumed invalid response and never allocates a repair beyond the cap', async () => {
+  it('keeps both usages and stops after one full-budget invalid repair', async () => {
     const f = await prepare('public fact', () => response('truncated synthetic output', 512))
     expect((await f.run()).outcome).toBe('failed')
-    expect(f.provider.calls).toHaveLength(1)
-    expect(await f.store.getRunLedgerUsage(tenantId, f.runId)).toMatchObject({ invocationCount: 1,
-      usage: { inputTokens: 30, outputTokens: 512 } })
+    expect(f.provider.calls.map(({ maxOutputTokens }) => maxOutputTokens)).toEqual([512, 512])
+    expect(await f.store.getRunLedgerUsage(tenantId, f.runId)).toMatchObject({ invocationCount: 2,
+      usage: { inputTokens: 60, outputTokens: 1024 } })
   })
 
   it('does not repair or repeat an invocation whose remote outcome is unknown', async () => {

@@ -18,7 +18,7 @@ import {
 import { createContractError } from '../errors.js'
 import { providerContractError } from '../providers/providerContractError.js'
 import { isMindMapHierarchyPromptVersion, isNodeGroundingPromptVersion } from './artifactPolicyVersions.js'
-import { ArtifactBudgetExceededError, planArtifactBudget } from './artifactBudget.js'
+import { ArtifactBudgetExceededError, maxArtifactTotalOutputTokens, planArtifactBudget } from './artifactBudget.js'
 import {
   ArtifactValidationError,
   createArtifactDescriptor,
@@ -308,8 +308,9 @@ export class ArtifactDagWorker {
           usage: usageSchema.parse(generated.output.usage),
         }
         const budget = planArtifactBudget(generated.kind, current.request.options)
-        if (output.usage.outputTokens > budget.maxOutputTokens) {
-          throw new ArtifactBudgetExceededError(output.usage.outputTokens, budget.maxOutputTokens)
+        const totalOutputLimit = maxArtifactTotalOutputTokens(budget, output.invocationCount)
+        if (output.usage.outputTokens > totalOutputLimit) {
+          throw new ArtifactBudgetExceededError(output.usage.outputTokens, totalOutputLimit)
         }
         artifact = validateGeneratedArtifact({
           artifact: output.artifact,

@@ -2,6 +2,16 @@
  * Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V4 — browser verification is required before handoff.
  */
 :root {
+  --color-study-paper: oklch(97.5% 0.014 86);
+  --color-study-surface: oklch(99% 0.009 86);
+  --color-study-rail: oklch(95% 0.019 86);
+  --color-study-action: oklch(38% 0.068 157);
+  --color-study-action-ink: oklch(98% 0.009 86);
+  --color-study-soft: oklch(93% 0.025 157);
+  --color-study-rule: oklch(86% 0.018 86);
+  --color-study-note: oklch(91% 0.042 85);
+  --font-study-display: 'Noto Serif SC', 'Source Han Serif SC', 'STZhongsong', 'SimSun', serif;
+  --radius-study: 12px;
   --color-paper: oklch(97% 0.018 87);
   --color-paper-2: oklch(94% 0.025 87);
   --color-paper-3: oklch(90% 0.032 87);
@@ -57,6 +67,14 @@
 }
 
 :root[data-theme='dark'] {
+  --color-study-paper: oklch(23% 0.016 155);
+  --color-study-surface: oklch(27% 0.016 155);
+  --color-study-rail: oklch(20% 0.016 155);
+  --color-study-action: oklch(78% 0.065 157);
+  --color-study-action-ink: oklch(20% 0.016 155);
+  --color-study-soft: oklch(31% 0.028 157);
+  --color-study-rule: oklch(40% 0.022 155);
+  --color-study-note: oklch(34% 0.042 85);
   --color-paper: oklch(22% 0.012 80);
   --color-paper-2: oklch(27% 0.014 80);
   --color-paper-3: oklch(33% 0.014 80);

@@ -23,7 +23,7 @@ export async function resetStore(page: Page) {
         req.onblocked = () => reject(new Error('deleteDatabase blocked'))
       }),
   )
-  await page.goto('/')
+  await page.goto('/#mindmap')
 }
 
 /** 等待 App 首屏 ready（loading 占位消失） */

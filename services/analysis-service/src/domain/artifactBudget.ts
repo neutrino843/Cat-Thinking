@@ -9,6 +9,13 @@ export interface ArtifactBudget {
   readonly maxArtifactBytes: number
 }
 
+/**
+ * 同一份产物最多允许的模型调用次数：首次生成 + 一次结构修复。
+ * 预算按「每次调用」计量，因此一次产物的合法累计输出上限为
+ * maxOutputTokens × ARTIFACT_MAX_ATTEMPTS。
+ */
+export const ARTIFACT_MAX_ATTEMPTS = 2
+
 export class ArtifactBudgetExceededError extends Error {
   constructor(
     readonly actualOutputTokens: number,
@@ -49,3 +56,14 @@ export const planArtifactBudget = (
     : fixedTokenBudgets[options.qualityProfile][kind],
   maxArtifactBytes: byteBudgets[options.qualityProfile],
 })
+
+/**
+ * 一次产物写入前的累计输出上限：maxOutputTokens 是「每次调用」的预算，
+ * 首次生成与一次结构修复各自独立计量，因此累计上限为该额度乘以允许的调用次数。
+ */
+export const maxArtifactTotalOutputTokens = (budget: ArtifactBudget, invocationCount = 1): number => {
+  if (!Number.isInteger(invocationCount) || invocationCount < 1 || invocationCount > ARTIFACT_MAX_ATTEMPTS) {
+    throw new RangeError('artifact invocation count must be 1 or 2')
+  }
+  return budget.maxOutputTokens * invocationCount
+}

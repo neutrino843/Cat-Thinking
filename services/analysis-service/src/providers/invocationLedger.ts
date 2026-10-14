@@ -117,6 +117,13 @@ export const cloneProviderInvocation = (
   invocation: StoredProviderInvocation,
 ): StoredProviderInvocation => Object.freeze({ ...invocation })
 
+/** Release unused forecasts only after a known, terminal provider outcome. */
+export const invocationTokenBudgetUsage = (invocation: StoredProviderInvocation): number =>
+  (invocation.status === 'succeeded' || invocation.status === 'failed')
+    && invocation.actualInputTokens !== undefined && invocation.actualOutputTokens !== undefined
+    ? invocation.actualInputTokens + invocation.actualOutputTokens
+    : invocation.estimatedInputTokens + invocation.reservedOutputTokens
+
 const assertNonNegativeSafeInteger = (value: number, label: string): void => {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new RangeError(`${label} must be a non-negative safe integer`)

@@ -12,22 +12,23 @@ import ReviewDashboard from './ReviewDashboard'
 import LearningDataPanel from './LearningDataPanel'
 import LearningRecords from './LearningRecords'
 
-export interface LearningTarget { courseId?: string; archiveId?: string; pointId?: string; localDocId?: string; localNodeId?: string }
-type View = 'today' | 'knowledge' | 'practice' | 'materials' | 'records' | 'exam' | 'application' | 'backup'
+export type LearningView = 'today' | 'knowledge' | 'practice' | 'materials' | 'records' | 'exam' | 'application' | 'backup'
+export interface LearningTarget { courseId?: string; archiveId?: string; pointId?: string; localDocId?: string; localNodeId?: string; view?: LearningView; questionKey?: string }
+type View = LearningView
 const VIEWS: { id: View; title: string }[] = [
   { id: 'today', title: '今日' }, { id: 'knowledge', title: '知识' }, { id: 'practice', title: '练习' },
   { id: 'materials', title: '资料' }, { id: 'records', title: '记录' }, { id: 'exam', title: '备考' },
   { id: 'application', title: '应用' }, { id: 'backup', title: '备份' },
 ]
 
-export default function LearningWorkspace({ initialTarget, onClose }: { initialTarget: LearningTarget; onClose: () => void }) {
+export default function LearningWorkspace({ initialTarget, onClose, inline = false }: { initialTarget: LearningTarget; onClose: () => void; inline?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const [courses, setCourses] = useState<Course[]>([])
   const [courseId, setCourseId] = useState(initialTarget.courseId ?? '')
   const [snapshot, setSnapshot] = useState<CourseSnapshot>()
-  const [view, setView] = useState<View>(initialTarget.archiveId || initialTarget.localNodeId ? 'knowledge' : 'today')
+  const [view, setView] = useState<View>(initialTarget.view ?? (initialTarget.archiveId || initialTarget.localNodeId ? 'knowledge' : 'today'))
   const [pointId, setPointId] = useState(initialTarget.pointId ?? '')
-  const [questionId, setQuestionId] = useState('')
+  const [questionId, setQuestionId] = useState(initialTarget.questionKey ?? '')
   const [examSessionId, setExamSessionId] = useState('')
   const [name, setName] = useState('')
   const [error, setError] = useState('')
@@ -36,7 +37,7 @@ export default function LearningWorkspace({ initialTarget, onClose }: { initialT
   const generation = useRef(0)
   const actionLock = useRef(false)
 
-  useEffect(() => { const element = dialog.current; element?.showModal(); return () => element?.close() }, [])
+  useEffect(() => { if (inline) return; const element = dialog.current; element?.showModal(); return () => element?.close() }, [inline])
   useEffect(() => {
     let live = true
     const subscription = liveQuery(async () => await listCourses()).subscribe({ next: (items) => { if (live) setCourses(items) }, error: (err: unknown) => { if (live) setError(safeLearningMessage(err)) } })
@@ -93,8 +94,8 @@ export default function LearningWorkspace({ initialTarget, onClose }: { initialT
   const chooseCourse = (id: string) => { generation.current++; setBusy(false); setSnapshot(undefined); setLoading(true); setCourseId(id); setPointId(''); setQuestionId(''); setError('') }
   const practice = (point = '', question = '', session = '') => { setPointId(point); setQuestionId(question); setExamSessionId(session); setView('practice') }
 
-  return <dialog ref={dialog} className="learning-workspace" data-learning-workspace aria-label="课程学习工作台" onCancel={onClose}>
-    <header className="learning-head"><div><p className="learning-eyebrow">猫思之 · 从资料继续学习</p><h2>课程学习工作台</h2></div><button className="tbtn" aria-label="关闭课程学习工作台" onClick={onClose}>返回编辑</button></header>
+  const content = <>
+    <header className="learning-head"><div><p className="learning-eyebrow">猫思之 · 从资料继续学习</p><h2>课程学习工作台</h2></div><button className="tbtn" aria-label={inline ? '返回首页' : '关闭课程学习工作台'} onClick={onClose}>{inline ? '返回首页' : '返回编辑'}</button></header>
     <div className="learning-course-bar"><label>当前课程 <select aria-label="当前课程" value={courseId} onChange={(e) => chooseCourse(e.target.value)} disabled={busy}>
       {!courses.length && <option value="">尚无课程</option>}{courses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
       <form onSubmit={(e) => { e.preventDefault(); void action(async () => { const created = await createCourse({ name: name.trim() }); setName(''); setLoading(true); setCourseId(created.id) }) }}>
@@ -115,5 +116,7 @@ export default function LearningWorkspace({ initialTarget, onClose }: { initialT
       </div>}
     </div>
     <footer className="learning-footer">学习资料与进度保存在当前浏览器。备份课程包可带走资料；重新生成需在 AI 分析里明确发起。</footer>
-  </dialog>
+  </>
+  return inline ? <section className="learning-workspace learning-workspace-inline" data-learning-workspace role="region" aria-label="课程学习工作台">{content}</section>
+    : <dialog ref={dialog} className="learning-workspace" data-learning-workspace aria-label="课程学习工作台" onCancel={onClose}>{content}</dialog>
 }

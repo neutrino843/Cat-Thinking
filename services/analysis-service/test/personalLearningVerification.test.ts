@@ -110,7 +110,7 @@ describe('separate bounded five-artifact learning verification', () => {
     for (const repair of f.calls.filter(({ role }) => role === 'repair')) {
       const task = JSON.parse(repair.userPrompt).task
       const generation = f.calls.find(({ role }) => role === `artifact-${task}`)!
-      expect(repair.maxOutputTokens).toBe(generation.maxOutputTokens - 10)
+      expect(repair.maxOutputTokens).toBe(generation.maxOutputTokens)
     }
     await expectOnlyOwnContentCleared(f, result)
   })

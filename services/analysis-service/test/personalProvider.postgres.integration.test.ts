@@ -11,6 +11,9 @@ import { assertDedicatedPostgresTestDatabase } from './fixtures/postgresTestSafe
 import { acquireSyntheticDatabaseLock } from './fixtures/syntheticDatabaseLock.js'
 import { createPersonalFixtureFetch, personalFixtureConfig, personalFixtureSettings } from './fixtures/personalProviderFixture.js'
 import { FIXTURE_TENANT, FIXTURE_TEXT, fixtureHash, fixtureRequest, prepareFixtureRun } from './fixtures/fakeAnalysisProvider.js'
+import { FakeAnalysisProvider } from './fixtures/fakeAnalysisProvider.js'
+import { QualityProfileReader } from '../src/operations/qualityProfileReader.js'
+import { verifyPersonalQualitySample } from '../src/operations/personalProviderVerification.js'
 
 const databaseUrl = process.env.ANALYSIS_TEST_DATABASE_URL
 if (databaseUrl) assertDedicatedPostgresTestDatabase(databaseUrl)
@@ -80,6 +83,25 @@ const finish = async (jobs: PostgresJobStore, id: string) => {
 }
 
 describe.skipIf(!databaseUrl)('PostgreSQL personal provider authorization and recovery', () => {
+  it('reads quality settings alongside the live owner without mutating settings or binding work to its dispatcher', async () => {
+    const f = await fixture(); await enable(f.runtime)
+    const state = await f.profiles.readState()
+    const reader = new QualityProfileReader(config().jobStore, cipher, f.jobs)
+    const fake = new FakeAnalysisProvider()
+    try {
+      expect(await reader.checkHealth()).toBe(true)
+      expect(await reader.readState()).toEqual(state)
+      expect('save' in reader).toBe(false)
+      const result = await verifyPersonalQualitySample({ store: f.jobs, profiles: reader, maxRunTokens: 50000,
+        createProvider: (snapshot) => ({ id: fake.id, modelId: fake.modelId, profileVersion: snapshot.id,
+          capabilities: fake.capabilities, isReady: () => true, generate: fake.generate.bind(fake) }) }, 'photosynthesis')
+      if (result.runId) ownedRuns.add(result.runId)
+      expect(result).toMatchObject({ outcome: 'passed', callsUsed: 6, profileStateUnchanged: true, cleanupComplete: true })
+      expect(await f.profiles.readState()).toEqual(state)
+      expect(await f.profiles.checkHealth()).toBe(true)
+      expect((await raw!.query('SELECT COUNT(*) AS count FROM cat_analysis_personal_run_profiles WHERE run_id=$1', [result.runId])).rows[0].count).toBe('0')
+    } finally { await reader.close() }
+  })
   it('revokes obsolete encrypted keys after a switch and protects the current secret from stale cleanup', async () => {
     const { runtime, profiles } = await fixture()
     const first = await runtime.save({ ...personalFixtureSettings(), expectedRevision: (await runtime.status()).revision })
@@ -109,6 +131,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL personal provider authorization and re
     expect(await Promise.all(Array.from({ length: 20 }, () => profiles.checkHealth()))).toEqual(Array(20).fill(true))
     const owner = await raw!.query<{ pid: number }>(`SELECT activity.pid FROM pg_stat_activity activity JOIN pg_locks lock ON lock.pid=activity.pid
       WHERE activity.application_name='cat-analysis-personal-profiles' AND lock.locktype='advisory' AND lock.granted
+        AND activity.datname=current_database() AND activity.usename=current_user
         AND lock.classid=0 AND lock.objid=1669082374`)
     expect(owner.rows).toHaveLength(1)
     await raw!.query('SELECT pg_terminate_backend($1)', [owner.rows[0]!.pid])

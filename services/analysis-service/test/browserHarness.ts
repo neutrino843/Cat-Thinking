@@ -11,7 +11,7 @@ import { AesGcmContentCipher } from '../src/infrastructure/contentCipher.js'
 import { createAnalysisProviderRuntime } from '../src/providers/analysisProviderRuntime.js'
 import { DEFAULT_PROVIDER_INVOCATION_POLICY } from '../src/providers/providerInvocationCoordinator.js'
 import { createStableInvocationId } from '../src/providers/invocationId.js'
-import { OUTLINE_HIERARCHY_PROMPT_VERSION } from '../src/providers/artifactPrompts.js'
+import { ARTIFACT_SOURCE_REFERENCE_VERSIONS } from '../src/providers/artifactPrompts.js'
 import { BrowserSyntheticProvider } from './fixtures/browserSyntheticProvider.js'
 import { ANALYSIS_SYNTHETIC } from './fixtures/browserSyntheticTexts.js'
 import { acquireSyntheticDatabaseLock } from './fixtures/syntheticDatabaseLock.js'
@@ -56,7 +56,7 @@ async function boot() {
       const nodeKey = 'artifact:outline'
       await store.reserveProviderInvocation({ tenantId, runId, nodeKey, runAttempt: 1, role: 'artifact-outline',
         invocationId: createStableInvocationId({ runId, nodeKey, runAttempt: 1, role: 'artifact-outline' }),
-        providerId: 'synthetic-browser-provider', modelId: 'synthetic-browser-model', profileVersion: 'synthetic-browser-v1', promptVersion: OUTLINE_HIERARCHY_PROMPT_VERSION,
+        providerId: 'synthetic-browser-provider', modelId: 'synthetic-browser-model', profileVersion: 'synthetic-browser-v1', promptVersion: ARTIFACT_SOURCE_REFERENCE_VERSIONS.outline,
         estimatedInputTokens: 20, reservedOutputTokens: 1800, estimatedCostMicros: 1, maxRunEstimatedTokens: 4_000_000,
         maxRunEstimatedCostMicros: 50_000_000, staleAfterMs: 60000, now: Date.now() - 61000 })
     }

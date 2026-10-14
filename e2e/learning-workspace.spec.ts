@@ -25,7 +25,7 @@ async function openWorkspace(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ version: 1, error: { code: 'service_unavailable', category: 'availability', retryable: false, message: 'Local held fixture' } }) }))
-  await page.goto('/')
+  await page.goto('/#mindmap')
   await expect(page.getByRole('button', { name: 'AI 分析', exact: true })).toBeVisible()
 })
 
@@ -138,7 +138,7 @@ test('mobile workbench, application tasks and existing exam inventory preserve s
   for (const label of ['自评 说明关键概念', '自评 结合原文或实际观察', '自评 标明仍需核对的问题']) await page.getByLabel(label).check()
   await page.getByRole('button', { name: '保存应用任务' }).click()
   await page.getByRole('button', { name: '备考', exact: true }).click()
-  await page.getByRole('button', { name: '用已有题库组卷' }).click()
+  await page.getByRole('button', { name: '用已有题库组卷', exact: true }).click()
   await expect(page.getByText('已有 3 题，缺 7 题；0 个范围知识点没有题目。不会自动补题。')).toBeVisible()
   await page.screenshot({ path: '../reports/LEARNING_V1_WORKSPACE_MOBILE_2026-10-14.png', fullPage: true })
 })
@@ -146,7 +146,7 @@ test('mobile workbench, application tasks and existing exam inventory preserve s
 test('guided recall notes, exam-specific reports and archive deletion remain explicit', async ({ page }) => {
   const ids = await seedCourse(page)
   await openWorkspace(page); await page.getByRole('button', { name: '知识', exact: true }).click()
-  await page.getByRole('button', { name: '开始引导学习' }).click()
+  await page.getByRole('button', { name: '开始引导学习', exact: true }).click()
   await page.getByRole('button', { name: '隐藏核心说明开始回忆' }).click()
   await expect(page.getByLabel('核心说明')).toBeHidden()
   await page.getByLabel('不看说明，我能回忆什么').fill('我的回忆记录')
@@ -155,9 +155,9 @@ test('guided recall notes, exam-specific reports and archive deletion remain exp
   await expect(page.getByLabel('核心说明')).toBeVisible()
   await page.getByRole('button', { name: '结束本次学习' }).click()
   await page.getByRole('button', { name: '备考', exact: true }).click()
-  await page.getByRole('button', { name: '用已有题库组卷' }).click()
+  await page.getByRole('button', { name: '用已有题库组卷', exact: true }).click()
   await page.getByRole('button', { name: '开始这组模拟练习' }).click()
-  await page.getByLabel('选择练习').selectOption({ label: '1. 选择合成规则' })
+  await page.getByLabel('选择练习').selectOption({ label: '1. 选择一个选项' })
   await page.getByRole('radio', { name: '正确项', exact: true }).check()
   await expect(page.getByRole('button', { name: '提交本题' })).toBeEnabled(); await page.getByRole('button', { name: '提交本题' }).click()
   await expect(page.getByText('本次回答与参考答案一致。')).toBeVisible()

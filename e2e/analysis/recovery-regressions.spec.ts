@@ -73,7 +73,7 @@ test('另一个标签删除终态关联后立即清除结果与已打开的引�
   await panel(page).getByRole('button', { name: '查看原文引用 1' }).first().click()
   await expect(panel(page).getByRole('region', { name: '原文引用' })).toBeVisible()
   const task = await binding(page)
-  const second = await context.newPage(); await second.goto('/'); await waitForApp(second)
+  const second = await context.newPage(); await second.goto('/#mindmap'); await waitForApp(second)
   await second.evaluate(async (docId) => {
     const repository = await import('/src/analysis/taskPersistence.ts')
     await repository.analysisTaskRepository.remove(docId)

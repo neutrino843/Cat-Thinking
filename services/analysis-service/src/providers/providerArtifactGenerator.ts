@@ -60,12 +60,13 @@ export class ProviderArtifactGenerator implements ArtifactGenerator {
       throw new ArtifactValidationError([{ code: 'identity_invalid', path: '', message: 'scheduled artifact context is invalid' }])
     }
     const prompt = this.prompts[input.kind]
+    const tokenBudget = Math.min(input.budget.maxOutputTokens, this.options.maxOutputTokens ?? input.budget.maxOutputTokens)
     const usesSourceReferences = prompt.version === ARTIFACT_SOURCE_REFERENCE_VERSIONS[input.kind]
     let catalog: ReturnType<typeof createArtifactReferenceCatalog> | undefined
     let original: string
     try {
       catalog = usesSourceReferences ? createArtifactReferenceCatalog(input.graph) : undefined
-      original = prompt.render(input)
+      original = prompt.render({ ...input, budget: { ...input.budget, maxOutputTokens: tokenBudget } })
     } catch (error) {
       if (!(error instanceof ArtifactReferenceDraftError)) throw error
       throw new ProviderGatewayError({ providerId: this.options.routes[input.kind].route.providerId,
@@ -75,7 +76,6 @@ export class ProviderArtifactGenerator implements ArtifactGenerator {
     const payloadSchema = usesSourceReferences ? artifactReferenceDraftOutputSchema(input.kind) : artifactOutputSchema(input.kind)
     const output = { name: usesSourceReferences ? `artifact_${input.kind}_source_refs_v1` : `artifact_${input.kind}_v1`,
       schema: strictOutputSchema(payloadSchema) }
-    const tokenBudget = Math.min(input.budget.maxOutputTokens, this.options.maxOutputTokens ?? input.budget.maxOutputTokens)
     const call = (repair: boolean, userPrompt: string, maxOutputTokens = tokenBudget) => {
       const config = repair ? this.options.repair : this.options.routes[input.kind]
       const system = repair ? this.repair?.system : prompt.system
@@ -96,6 +96,7 @@ export class ProviderArtifactGenerator implements ArtifactGenerator {
     let result = await call(false, original)
     let usage = result.response.usage
     let estimatedCostMicros = result.invocation.estimatedCostMicros
+    let invocationCount: 1 | 2 = 1
     const decode = () => {
       let payload: unknown
       if (usesSourceReferences && catalog) {
@@ -132,19 +133,22 @@ export class ProviderArtifactGenerator implements ArtifactGenerator {
     try {
       let artifact
       try { artifact = decode() } catch (error) {
-        const remainingTokens = tokenBudget - usage.outputTokens
-        if (!this.repair || signal.aborted || !this.repairable(error) || remainingTokens <= 0) throw error
+        // 修复调用需要重新生成整份产物，必须使用完整的单次输出预算，而不是首次
+        // 调用剩下的零头。按剩余量发起的修复会被截断（例如 1800 预算中首次用掉
+        // 1732，修复只剩 68 tokens），只会得到 finish_not_complete 死局。
+        if (!this.repair || signal.aborted || !this.repairable(error)) throw error
         result = await call(true, this.repair.render({
           task: input.kind, original, rejected: result.response.outputText,
           failure: error instanceof ArtifactValidationError
             ? JSON.stringify(error.issues.slice(0, 12).map(({ code, path, message }) => ({ code, path, message })))
             : error instanceof StructuredOutputDecodeError || error instanceof ArtifactReferenceDraftError ? error.code : 'artifact_invalid',
-        }), remainingTokens)
+        }))
         usage = { inputTokens: usage.inputTokens + result.response.usage.inputTokens, outputTokens: usage.outputTokens + result.response.usage.outputTokens }
         estimatedCostMicros += result.invocation.estimatedCostMicros
+        invocationCount = 2
         artifact = decode()
       }
-      return { artifact, route: this.options.routes[input.kind].route,
+      return { artifact, route: this.options.routes[input.kind].route, invocationCount,
         usage: { ...usage, estimatedCostMicros, currency: 'USD' } }
     } catch (error) {
       if (!(error instanceof ArtifactValidationError) && !(error instanceof StructuredOutputDecodeError)

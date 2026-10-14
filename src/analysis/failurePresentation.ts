@@ -2,6 +2,16 @@ import type { AnalysisErrorV1, AnalysisRunV1, RunUsageV1 } from '@cat-thinking/a
 
 const UNKNOWN_OUTCOMES = new Set(['invocation_outcome_unknown', 'invocation_already_succeeded', 'invocation_already_failed'])
 
+/** A downstream dependency failure must not hide the cause in its prerequisite. */
+export function primaryAnalysisError(run: AnalysisRunV1): AnalysisErrorV1 | undefined {
+  const failed = Object.values(run.artifactStates ?? {}).flatMap((state) => state?.error ? [state.error] : [])
+  if (run.error?.code === 'dependency_failed') {
+    const prerequisite = Object.entries(run.artifactStates ?? {}).find(([kind]) => kind === run.error?.details?.dependency)?.[1]?.error
+    return prerequisite ?? failed.find((error) => error.code !== 'dependency_failed') ?? run.error
+  }
+  return run.error ?? failed.find((error) => error.code !== 'dependency_failed') ?? failed[0]
+}
+
 /** Only fixed, locally owned messages are displayed; provider details remain data. */
 export function analysisFailureMessage(error: AnalysisErrorV1): string {
   if (typeof error.details?.reason === 'string' && UNKNOWN_OUTCOMES.has(error.details.reason)) {
@@ -40,7 +50,8 @@ export function analysisFailureMessage(error: AnalysisErrorV1): string {
   }
   if (error.code === 'schema_invalid' || providerCode === 'evidence_schema_invalid'
     || providerCode === 'evidence_invalid_json' || providerCode === 'evidence_contract_invalid'
-    || providerCode === 'output_truncated') {
+    || providerCode === 'output_truncated' || providerCode === 'finish_not_complete'
+    || providerCode === 'response_not_completed') {
     return '模型返回的内容不完整或格式未通过检查，本次分析已停止。可以缩小原文范围后重新分析。'
   }
   if (error.code === 'rate_limited') return '模型服务暂时限流，请稍后查看任务状态，避免连续点击生成。'
@@ -63,16 +74,22 @@ export function pendingArtifactLabel(runStatus: AnalysisRunV1['status']): string
 
 /** Export an allowlist, never the run, request, source or provider response. */
 export function createAnalysisDiagnostic(run: AnalysisRunV1, usage?: RunUsageV1) {
+  const error = primaryAnalysisError(run)
   const counts: Record<string, number> = {}
   for (const key of ['issueCount', 'rangeIssueCount', 'referenceIssueCount', 'quoteIssueCount', 'identityIssueCount', 'pageIssueCount']) {
-    const value = run.error?.details?.[key]
+    const value = error?.details?.[key]
     if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) counts[key] = value
   }
   return {
     version: 1,
     kind: 'cat-thinking-analysis-diagnostic',
     status: run.status,
-    error: run.error ? { code: run.error.code, category: run.error.category, stage: run.error.stage, counts } : undefined,
+    error: error ? { code: error.code, category: error.category, stage: error.stage, counts,
+      providerCode: ['finish_not_complete', 'response_not_completed', 'output_truncated', 'artifact_output_invalid',
+        'artifact_reference_not_found', 'artifact_reference_not_supported'].includes(String(error.details?.providerCode))
+        ? error.details?.providerCode : undefined } : undefined,
+    artifactErrors: Object.entries(run.artifactStates ?? {}).flatMap(([kind, state]) => state?.error
+      ? [{ kind, code: state.error.code, category: state.error.category, stage: state.error.stage }] : []),
     promptVersions: [...new Set(run.providerRoutes.map((route) => route.promptVersion))],
     knownUsage: usage ? { inputTokens: usage.usage.inputTokens, outputTokens: usage.usage.outputTokens,
       unresolvedCount: usage.unresolvedCount } : undefined,

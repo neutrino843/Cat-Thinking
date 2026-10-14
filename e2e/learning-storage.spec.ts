@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 // Dedicated fresh Chromium contexts: public synthetic content, no user profile or real provider calls.
 test.beforeEach(async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/#mindmap')
   await expect(page.getByRole('button', { name: 'AI 分析', exact: true })).toBeVisible()
   await page.evaluate(async () => {
     const { db } = await import('/src/store/db.ts')
@@ -66,6 +66,55 @@ test('actual IndexedDB rollback leaves no partial restored course when a source 
     return { before, after, rejected }
   })
   expect(result.rejected).toBe(true); expect(result.after).toEqual(result.before)
+})
+
+test('encrypted course restores into a genuinely empty browser context with sources, history and attachments', async ({ page, browser }) => {
+  const exported = await page.evaluate(async () => {
+    const { db, saveDocumentBundle } = await import('/src/store/db.ts')
+    const { localArtifactFixtures } = await import('/src/test/localArtifactFixtures.ts')
+    const { createCourse, createLearningArchive, appendAttempt } = await import('/src/learning/repository.ts')
+    const { learningBase } = await import('/src/learning/model.ts')
+    const { exportCoursePackage } = await import('/src/learning/coursePackage.ts')
+    const f = await localArtifactFixtures(); const course = await createCourse({ name: '干净环境恢复课程' })
+    f.doc.nodes[f.doc.rootId].attachments = [{ id: 'portable-attachment', blobId: 'portable-blob', name: '公开.txt', size: 12, mime: 'text/plain' }]
+    await saveDocumentBundle(f.doc, [f.source], new Map([['portable-blob', new Blob(['公开附件内容'], { type: 'text/plain' })]]))
+    await db.analysisTasks.add(f.task)
+    const archive = await createLearningArchive({ courseId: course.id, docId: f.doc.id, runId: f.quiz.runId, artifacts: [f.mindmap, f.quiz] })
+    const at = Date.UTC(2026, 9, 14, 0)
+    await appendAttempt({ ...learningBase(course.id, 'portable-attempt', at), kind: 'attempt',
+      question: { archiveId: archive.id, artifactId: f.quiz.id, questionId: 'choice', confirmed: true },
+      answer: 0, submittedAt: at, learningDate: '2026-10-14', answerRevealed: false, origin: 'practice' })
+    const blob = await exportCoursePackage(course.id, { password: 'public-transfer-password' })
+    return { bytes: Array.from(new Uint8Array(await blob.arrayBuffer())), originalCourseId: course.id, sourceText: f.source.text }
+  })
+  const isolated = await browser.newContext()
+  try {
+    const restoredPage = await isolated.newPage()
+    let generationCalls = 0
+    await restoredPage.route('**/api/**', (route) => {
+      if (route.request().method() === 'POST') generationCalls++
+      return route.abort()
+    })
+    // A module URL does not initialize the app or create a welcome document.
+    await restoredPage.goto('/src/main.tsx')
+    const result = await restoredPage.evaluate(async (bytes) => {
+      const { db } = await import('/src/store/db.ts')
+      const { previewCoursePackage, restoreCoursePackage } = await import('/src/learning/coursePackage.ts')
+      const { listCourses, loadCourseSnapshot } = await import('/src/learning/repository.ts')
+      const before = { courses: (await listCourses()).length, docs: await db.docs.count(), sources: await db.sources.count() }
+      const preview = await previewCoursePackage(new Blob([new Uint8Array(bytes)]), { password: 'public-transfer-password' })
+      const course = await restoreCoursePackage(preview); const snapshot = await loadCourseSnapshot(course.id)
+      const doc = JSON.parse((await db.docs.get(snapshot.docs[0].id)).payload)
+      const attachment = await db.blobs.get(doc.nodes[doc.rootId].attachments[0].blobId)
+      return { before, courseId: course.id, courses: (await listCourses()).length, sources: snapshot.archives[0].sources[0].text,
+        answer: snapshot.attempts[0].answer, historyLinked: snapshot.attempts[0].question.archiveId === snapshot.archives[0].id,
+        attachment: await attachment.blob.text(), taskCount: await db.analysisTasks.count() }
+    }, exported.bytes)
+    expect(result.before).toEqual({ courses: 0, docs: 0, sources: 0 })
+    expect(result.courseId).not.toBe(exported.originalCourseId)
+    expect(result).toMatchObject({ courses: 1, sources: exported.sourceText, answer: 0, historyLinked: true, attachment: '公开附件内容', taskCount: 0 })
+    expect(generationCalls).toBe(0)
+  } finally { await isolated.close() }
 })
 
 test('concurrent submissions, same-time assessment order, schedule conflicts and history fences use genuine IndexedDB', async ({ page }) => {

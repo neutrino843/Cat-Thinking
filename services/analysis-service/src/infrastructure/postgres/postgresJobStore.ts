@@ -1091,7 +1091,12 @@ export class PostgresJobStore implements JobStore {
 
       const totals = await client.query<{ tokens: string | number; cost: string | number; invocations: string | number }>(`
         SELECT
-          COALESCE(SUM(estimated_input_tokens + reserved_output_tokens), 0) AS tokens,
+          COALESCE(SUM(CASE
+            WHEN status IN ('succeeded', 'failed')
+              AND actual_input_tokens IS NOT NULL AND actual_output_tokens IS NOT NULL
+            THEN actual_input_tokens + actual_output_tokens
+            ELSE estimated_input_tokens + reserved_output_tokens
+          END), 0) AS tokens,
           COALESCE(SUM(estimated_cost_micros), 0) AS cost,
           COUNT(*) AS invocations
         FROM analysis_provider_invocations

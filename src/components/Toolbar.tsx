@@ -22,13 +22,14 @@ interface Props {
   setQuery: (q: string) => void
   onAnalysis: () => void
   onAISettings: () => void
+  onHome?: () => void
 }
 
 /** 不支持 File System Access API 时的降级说明（Firefox/Safari） */
 const FSA_UNSUPPORTED_MSG =
   '当前浏览器不支持直接读写 .msz 文件（需 Chrome/Edge 100+）。\n可使用侧栏「导入文件」与「导出 JSON」达到同样的备份迁移效果。'
 
-export default function Toolbar({ query, setQuery, onAnalysis, onAISettings }: Props) {
+export default function Toolbar({ query, setQuery, onAnalysis, onAISettings, onHome }: Props) {
   const doc = useDoc((s) => s.doc)
   const past = useDoc((s) => s.past.length)
   const future = useDoc((s) => s.future.length)
@@ -106,6 +107,7 @@ export default function Toolbar({ query, setQuery, onAnalysis, onAISettings }: P
         ☰
       </button>
       <div className="brand" title="猫思之 · 能回到原文的学习工作台" aria-hidden="true">CAT<span>THINKING</span></div>
+      {onHome && <button className="tbtn" onClick={onHome}>学习首页</button>}
       <button className="tbtn" data-learning-trigger onClick={() => window.dispatchEvent(new CustomEvent('msz:learning-open'))}>今日学习</button>
       <button className="tbtn primary" onClick={onAnalysis}>AI 分析</button>
       <button className="tbtn" data-ai-settings-trigger onClick={onAISettings}>AI 设置</button>

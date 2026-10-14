@@ -1,10 +1,4 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import Toolbar from './components/Toolbar'
-import Sidebar from './components/Sidebar'
-import Canvas from './components/Canvas'
-import Gantt from './components/Gantt'
-import Outline from './components/Outline'
-import Palette from './components/Palette'
 import PresentOverlay from './components/PresentOverlay'
 import BackupBanner from './components/BackupBanner'
 import { navigate, useDoc } from './store/docStore'
@@ -16,7 +10,17 @@ import { buildDoc, findTpl } from './data/templates'
 import { buildSlides } from './lib/presentation'
 import { quickSaveCurrent } from './lib/fileHandle'
 import { restoreTabIds } from './lib/tabs'
-import Tabs from './components/Tabs'
+import { openDocById } from './lib/tabs'
+import type { LearningTarget } from './components/learning/LearningWorkspace'
+
+const Toolbar = lazy(() => import('./components/Toolbar'))
+const Sidebar = lazy(() => import('./components/Sidebar'))
+const Canvas = lazy(() => import('./components/Canvas'))
+const Gantt = lazy(() => import('./components/Gantt'))
+const Outline = lazy(() => import('./components/Outline'))
+const Palette = lazy(() => import('./components/Palette'))
+const Tabs = lazy(() => import('./components/Tabs'))
+const LearningHome = lazy(() => import('./components/learning/LearningHome'))
 
 function AnalysisLoadState({ onClose, failed = false, settings = false }: { onClose: () => void; failed?: boolean; settings?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null)
@@ -46,6 +50,7 @@ const LearningWorkspace = lazy(() => import('./components/learning/LearningWorks
 let initPromise: Promise<void> | null = null
 
 export default function App() {
+  const [screen, setScreen] = useState<'home' | 'editor'>(() => window.location.hash === '#mindmap' ? 'editor' : 'home')
   const [ready, setReady] = useState(false)
   const [query, setQuery] = useState('')
   const dark = useSettings((s) => s.dark)
@@ -57,7 +62,16 @@ export default function App() {
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [aiSettingsOpen, setAISettingsOpen] = useState(false)
   const [learningOpen, setLearningOpen] = useState(false)
-  const [learningTarget, setLearningTarget] = useState<{ courseId?: string; archiveId?: string; pointId?: string; localDocId?: string; localNodeId?: string }>({})
+  const [learningTarget, setLearningTarget] = useState<LearningTarget>({})
+  useEffect(() => {
+    const route = () => setScreen(window.location.hash === '#mindmap' ? 'editor' : 'home')
+    window.addEventListener('hashchange', route)
+    return () => window.removeEventListener('hashchange', route)
+  }, [])
+  const openEditor = (id?: string) => {
+    void (async () => { if (id) await openDocById(id); setScreen('editor'); window.location.hash = 'mindmap' })()
+  }
+  const openHome = () => { setScreen('home'); window.location.hash = 'home' }
   const learningTrigger = useRef<HTMLElement | null>(null)
   useEffect(() => {
     const open = (event: Event) => {
@@ -65,6 +79,10 @@ export default function App() {
       const detail = (event as CustomEvent<typeof learningTarget>).detail
       setLearningTarget(detail && typeof detail === 'object' ? detail : {})
       setAnalysisOpen(false); setAISettingsOpen(false); setLearningOpen(true)
+      if (window.location.hash !== '#mindmap') {
+        setLearningOpen(false)
+        window.dispatchEvent(new CustomEvent('msz:home-learning-target', { detail: detail && typeof detail === 'object' ? detail : {} }))
+      }
     }
     window.addEventListener('msz:learning-open', open)
     return () => window.removeEventListener('msz:learning-open', open)
@@ -227,6 +245,7 @@ export default function App() {
       }
 
       const t = e.target as HTMLElement | null
+      if (screen !== 'editor') return
       if (t?.closest('[data-analysis-panel], [data-learning-workspace]')) return
       const mod = e.ctrlKey || e.metaKey
       const s = useDoc.getState()
@@ -346,13 +365,15 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [screen])
 
   if (!ready) return <div className="loading">纸张准备中…</div>
 
   return (
-    <div className={'app' + (presenting ? ' presenting' : '')}>
-      {!presenting && <Toolbar query={query} setQuery={setQuery} onAnalysis={() => { setAISettingsOpen(false); setAnalysisOpen(true) }} onAISettings={openAISettings} />}
+    <div className={'app' + (screen === 'home' && !presenting ? ' study-app' : '') + (presenting ? ' presenting' : '')}>
+      {screen === 'home' && !presenting ? <Suspense fallback={<div className="loading">正在打开学习首页…</div>}><LearningHome onEditor={openEditor} onAnalysis={() => { setAISettingsOpen(false); setAnalysisOpen(true) }} onSettings={openAISettings}/></Suspense>
+        : <Suspense fallback={<div className="loading">正在打开思维导图工具…</div>}>
+      {!presenting && <Toolbar query={query} setQuery={setQuery} onAnalysis={() => { setAISettingsOpen(false); setAnalysisOpen(true) }} onAISettings={openAISettings} onHome={openHome} />}
       {!presenting && <Tabs />}
       {!presenting && <BackupBanner />}
       <div className="main">
@@ -362,6 +383,7 @@ export default function App() {
       </div>
       {!presenting && <Palette />}
       {presenting && <PresentOverlay />}
+      </Suspense>}
       {!presenting && analysisOpen && (
         <Suspense fallback={<AnalysisLoadState onClose={() => setAnalysisOpen(false)} />}>
           <AnalysisResultsPanel key={docId} docId={docId} onClose={() => setAnalysisOpen(false)} onOpenSettings={openAISettings} />

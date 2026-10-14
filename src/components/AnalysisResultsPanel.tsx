@@ -12,7 +12,7 @@ import LearningGoalPicker from './analysis/LearningGoalPicker'
 import KnowledgePracticeBridge from './analysis/KnowledgePracticeBridge'
 import { useKnowledgePracticeNavigation } from './analysis/useKnowledgePracticeNavigation'
 import AnalysisArchiveAction from './analysis/AnalysisArchiveAction'
-import { analysisFailureMessage, createAnalysisDiagnostic, pendingArtifactLabel } from '../analysis/failurePresentation'
+import { analysisFailureMessage, createAnalysisDiagnostic, pendingArtifactLabel, primaryAnalysisError } from '../analysis/failurePresentation'
 
 const STATUS_LABELS: Record<string, string> = {
   receiving: '上传原文', queued: '排队中', planning: '规划分析', mapping: '提取证据', merging: '合并证据',
@@ -85,6 +85,7 @@ export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings }:
     }
   }
   const run = state.run
+  const failure = run ? primaryAnalysisError(run) : undefined
   const capabilities = state.capabilities
   const unsupportedKinds = capabilities ? artifactDependencyClosure(kinds).filter((kind) => !capabilities.artifactKinds.includes(kind)) : []
   const pricingUnknown = capabilities?.pricingKnown === false || run?.request.providerProfileId !== undefined
@@ -139,7 +140,7 @@ export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings }:
       {state.task && <section aria-label="分析任务">
         {run?.providerRoutes[0] && <p className="analysis-source-caption">本次分析使用模型：{run.providerRoutes[0].modelId}。切换 AI 设置不会自动重做已有结果。要使用新模型，可删除这次分析内容后重新生成。</p>}
         <p>任务：{run ? STATUS_LABELS[state.mirror?.connection === 'connected' ? state.mirror.status : run.status] ?? STATUS_LABELS[run.status] : state.task.runId ? '正在恢复任务状态' : '创建结果尚未确认'}{state.mirror?.connection === 'lost' ? ' · 连接中断' : ''}</p>
-        {run?.error && <p className="analysis-error" role="alert">{analysisFailureMessage(run.error)}</p>}
+        {failure && <p className="analysis-error" role="alert">{analysisFailureMessage(failure)}</p>}
         {run?.status === 'failed' && <p className="analysis-source-caption">任务已结束，后续内容不会继续生成。「恢复查看」会读取已保存状态。要重新分析，请删除本次分析内容后手动生成；已经产生的使用量仍保留。</p>}
         {run && <progress max={1} value={run.progress} aria-label="分析进度" />}
         <p className="analysis-source-caption">来源：{state.task.request.manifest.sources.map((snapshot) => {

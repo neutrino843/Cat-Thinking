@@ -280,7 +280,7 @@ test('测验与待复习清单保留三题型边界、题目及原文定位、�
   await expect(quiz.getByRole('button', { name: '提交练习' })).toBeEnabled()
   await quiz.getByRole('button', { name: '提交练习' }).click()
   await expect(quiz).toContainText('客观题：1 / 4 正确，2 题未答。简答题：1 / 1 已作答，0 题已自评。')
-  await expect(quiz.locator('.analysis-quiz-answer')).toHaveCount(5)
+  await expect(quiz.locator('fieldset > .analysis-quiz-answer')).toHaveCount(5)
   let review = quiz.getByRole('region', { name: '本次待复习内容' })
   await expect(review.getByRole('listitem')).toHaveCount(4)
   await expect(review).toContainText('第 2 题 · 与参考答案不一致')

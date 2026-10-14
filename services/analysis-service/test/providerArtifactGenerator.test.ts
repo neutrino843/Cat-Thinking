@@ -215,7 +215,7 @@ describe('Provider artifact adapters', () => {
     const issues = JSON.parse(repair.failure) as { code: string; path: string }[]
     expect(issues.filter(({ code }) => code === 'evidence_missing')).toHaveLength(3)
     expect(issues.filter(({ code }) => code === 'citation_unverified')).toHaveLength(3)
-    expect(f.provider.calls[2]!.maxOutputTokens).toBe(input.budget.maxOutputTokens - 10)
+    expect(f.provider.calls[2]!.maxOutputTokens).toBe(input.budget.maxOutputTokens)
     expect(await f.store.getArtifact(FIXTURE_TENANT, f.runId, kind)).toBeUndefined()
     expect(await f.store.getRunLedgerUsage(FIXTURE_TENANT, f.runId)).toMatchObject({ invocationCount: 3,
       unresolvedCount: 0, usage: { inputTokens: 60, outputTokens: 30 } })
@@ -326,7 +326,7 @@ describe('Provider artifact adapters', () => {
     const repair = JSON.parse(f.provider.calls[2]!.userPrompt)
     expect(repair.failure).toContain('hierarchy_invalid')
     expect(repair.failure).toContain('preserve its exact ID')
-    expect(f.provider.calls[2]!.maxOutputTokens).toBe(f.input.budget.maxOutputTokens - 10)
+    expect(f.provider.calls[2]!.maxOutputTokens).toBe(f.input.budget.maxOutputTokens)
   })
 
   it('keeps relation grounding validation after deterministic reparenting and retains failed usage', async () => {
@@ -363,7 +363,7 @@ describe('Provider artifact adapters', () => {
     expect(validateGeneratedArtifact(input)).toMatchObject({ id: 'legacy-artifact' })
     expect(() => validateGeneratedArtifact({ ...input, enforceOutlineHierarchy: true })).toThrow('artifact validation failed')
   })
-  it('caps generation and its repair remainder at the selected provider output limit', async () => {
+  it('caps both generation and repair at the selected provider per-call output limit', async () => {
     const f = await prepare('provider-output-limit')
     f.provider.capabilities.maxOutputTokens = 4096
     const runtime = createAnalysisProviderRuntime({ store: f.store, provider: f.provider, broker: f.service.broker,
@@ -371,7 +371,7 @@ describe('Provider artifact adapters', () => {
     f.provider.override = (request) => request.role === 'repair' ? f.provider.output(request) : 'synthetic-invalid-output'
     const result = await runtime.artifactGenerator.generate({ ...f.input, budget: { ...f.input.budget, maxOutputTokens: 5000 } }, new AbortController().signal)
     expect(result.artifact.kind).toBe('summary')
-    expect(f.provider.calls.slice(1).map((call) => call.maxOutputTokens)).toEqual([4096, 4086])
+    expect(f.provider.calls.slice(1).map((call) => call.maxOutputTokens)).toEqual([4096, 4096])
   })
   it.each([5, 10, 20, 100])('generates %i questions with all three types through the complete Quiz pipeline', async (questionCount) => {
     const store = new InMemoryJobStore()
@@ -423,11 +423,11 @@ describe('Provider artifact adapters', () => {
     const runtime = createAnalysisProviderRuntime({ store, provider, broker: service.broker, leaseMs: 1000, estimateCostMicros: () => 3 })
     expect((await runtime.evidence.runOnce(FIXTURE_TENANT, runId, 'worker', new AbortController().signal)).outcome).toBe('completed')
     expect(provider.calls.map((call) => call.role)).toEqual(['evidence-map', 'repair'])
-    expect(provider.calls[1]?.maxOutputTokens).toBe(provider.calls[0]!.maxOutputTokens - 10)
+    expect(provider.calls[1]?.maxOutputTokens).toBe(provider.calls[0]!.maxOutputTokens)
     expect((await store.getProviderInvocation(FIXTURE_TENANT, provider.calls[1]!.invocationId))?.promptVersion).toBe(EVIDENCE_SOURCE_REF_REPAIR_PROMPT_VERSION)
     expect((await store.getRunLedgerUsage(FIXTURE_TENANT, runId))?.usage.inputTokens).toBe(40)
   })
-  it('retains fully consumed Evidence usage and does not allocate a repair beyond its output cap', async () => {
+  it('retains both fully consumed Evidence usages and stops after one repair', async () => {
     const store = new InMemoryJobStore()
     const prepared = await prepareFixtureRun(store, 'evidence-output-cap', Date.now, ['summary'])
     const provider = new FakeAnalysisProvider()
@@ -438,9 +438,9 @@ describe('Provider artifact adapters', () => {
     const runtime = createAnalysisProviderRuntime({ store, provider, broker: prepared.service.broker, leaseMs: 1000, estimateCostMicros: () => 3 })
     expect(await runtime.evidence.runOnce(FIXTURE_TENANT, prepared.runId, 'cap-map', new AbortController().signal))
       .toMatchObject({ outcome: 'failed', run: { error: { retryable: false } } })
-    expect(provider.calls.map((call) => call.role)).toEqual(['evidence-map'])
-    expect(await store.getRunLedgerUsage(FIXTURE_TENANT, prepared.runId)).toMatchObject({ invocationCount: 1, unresolvedCount: 0,
-      usage: { inputTokens: 20, outputTokens: provider.calls[0]!.maxOutputTokens } })
+    expect(provider.calls.map((call) => call.role)).toEqual(['evidence-map', 'repair'])
+    expect(await store.getRunLedgerUsage(FIXTURE_TENANT, prepared.runId)).toMatchObject({ invocationCount: 2, unresolvedCount: 0,
+      usage: { inputTokens: 40, outputTokens: provider.calls[0]!.maxOutputTokens * 2 } })
   })
   it('persists five validated artifacts through DAG and ledger without repeat calls', async () => {
     const f = await prepare('five-artifacts')
@@ -455,6 +455,22 @@ describe('Provider artifact adapters', () => {
     await f.runtime.artifacts.runOnce(FIXTURE_TENANT, f.runId, 'restart-owner', new AbortController().signal)
     expect(f.provider.calls.length).toBe(6)
     expect(await f.store.getRunLedgerUsage('other-tenant', f.runId)).toBeUndefined()
+  })
+  it('commits a near-cap repaired Outline and unblocks MindMap without replaying the paid responses', async () => {
+    const f = await prepare('repaired-outline-dag')
+    vi.spyOn(f.provider, 'generate').mockImplementation(async (request) => {
+      f.provider.calls.push(request)
+      return { outputText: request.role === 'artifact-outline' ? 'invalid-json' : f.provider.output(request),
+        usage: { inputTokens: 20, outputTokens: request.role === 'artifact-outline' ? 1732 : request.role === 'repair' ? 1000 : 10 } }
+    })
+    expect((await f.runtime.artifacts.runOnce(FIXTURE_TENANT, f.runId, 'repair-owner', new AbortController().signal)).run.status).toBe('succeeded')
+    const repair = f.provider.calls.find((call) => call.role === 'repair')
+    expect(repair?.maxOutputTokens).toBe(1800)
+    expect(await f.store.getArtifact(FIXTURE_TENANT, f.runId, 'mindmap')).toBeDefined()
+    expect(await f.store.getRunLedgerUsage(FIXTURE_TENANT, f.runId)).toMatchObject({ invocationCount: 7,
+      usage: { inputTokens: 140, outputTokens: 2782 } })
+    await f.runtime.artifacts.runOnce(FIXTURE_TENANT, f.runId, 'repair-restart', new AbortController().signal)
+    expect(f.provider.calls).toHaveLength(7)
   })
   it('repairs malformed JSON with a separate auditable invocation and no raw output in ledger', async () => {
     const f = await prepare('repair-json')
@@ -481,14 +497,14 @@ describe('Provider artifact adapters', () => {
     expect(f.provider.calls.filter((call) => call.role === 'repair')).toHaveLength(1)
     expect(await f.store.getArtifact(FIXTURE_TENANT, f.runId, 'summary')).toBeUndefined()
   })
-  it('repairs a validator grounding failure and limits repair to the remaining token budget', async () => {
+  it('repairs a validator grounding failure with a full per-invocation budget', async () => {
     const f = await prepare('repair-grounding-success')
     const baseRequest = { ...f.provider.calls[0]!, role: 'artifact-summary' as const, userPrompt: JSON.stringify({ evidence: { claims: f.input.graph.claims } }) }
     const valid = f.provider.output(baseRequest)
     const bad = valid.replaceAll(f.input.graph.claims[0]!.id, 'unknown-evidence')
     f.provider.override = (request) => request.role === 'repair' ? valid : bad
     expect((await f.runtime.artifactGenerator.generate(f.input, new AbortController().signal)).artifact.kind).toBe('summary')
-    expect(f.provider.calls[2]?.maxOutputTokens).toBe(f.input.budget.maxOutputTokens - 10)
+    expect(f.provider.calls[2]?.maxOutputTokens).toBe(f.input.budget.maxOutputTokens)
   })
   it('rejects oversized output without repair and preserves known usage on Provider rejection', async () => {
     const f = await prepare('oversized-output')

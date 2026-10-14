@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { analysisErrorSchema, type AnalysisErrorV1, type AnalysisRunV1, type RunUsageV1 } from '@cat-thinking/analysis-contracts'
-import { analysisFailureMessage, createAnalysisDiagnostic, pendingArtifactLabel } from './failurePresentation'
+import { analysisFailureMessage, createAnalysisDiagnostic, pendingArtifactLabel, primaryAnalysisError } from './failurePresentation'
 
 const error = (patch: Partial<AnalysisErrorV1>) => analysisErrorSchema.parse({
   version: 1, code: 'internal_error', category: 'internal', retryable: false,
@@ -27,6 +27,23 @@ describe('failed analysis presentation', () => {
   })
   it('prioritizes unknown paid outcomes over ordinary failure guidance', () => {
     expect(analysisFailureMessage(error({ code: 'provider_unavailable', category: 'availability', details: { reason: 'invocation_outcome_unknown' } }))).toContain('不会自动重新调用')
+  })
+  it('shows Outline truncation as the cause of dependent MindMap failure, including saved old runs', () => {
+    const outlineError = error({ code: 'provider_rejected', category: 'provider', stage: 'outline',
+      details: { providerCode: 'finish_not_complete', modelReply: 'private-response' } })
+    const dependencyError = error({ code: 'dependency_failed', category: 'validation', details: { dependency: 'outline' } })
+    const run = { status: 'failed', error: dependencyError, providerRoutes: [], artifactStates: {
+      quiz: { status: 'failed', error: error({ code: 'artifact_invalid', stage: 'quiz' }) },
+      outline: { status: 'failed', error: outlineError }, mindmap: { status: 'failed', error: dependencyError },
+    } } as unknown as AnalysisRunV1
+    expect(primaryAnalysisError(run)).toBe(outlineError)
+    expect(analysisFailureMessage(primaryAnalysisError(run)!)).toContain('内容不完整')
+    expect(createAnalysisDiagnostic(run).error).toMatchObject({ stage: 'outline', providerCode: 'finish_not_complete' })
+    expect(createAnalysisDiagnostic(run).artifactErrors).toHaveLength(3)
+    expect(JSON.stringify(createAnalysisDiagnostic(run))).not.toContain('private-response')
+    expect(primaryAnalysisError({ ...run, error: outlineError })).toBe(outlineError)
+    expect(primaryAnalysisError({ ...run, error: undefined, artifactStates: { outline: run.artifactStates.outline } })).toBe(outlineError)
+    expect(primaryAnalysisError({ ...run, artifactStates: {} })).toBe(dependencyError)
   })
   it('explains Artifact reference failures with fixed wording and preserves usage boundaries', () => {
     for (const providerCode of ['artifact_reference_not_found', 'artifact_reference_not_supported']) {

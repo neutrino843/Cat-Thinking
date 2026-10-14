@@ -6,18 +6,19 @@ import { InMemoryJobStore } from '../src/infrastructure/memoryJobStore.js'
 import { planArtifactBudget } from '../src/domain/artifactBudget.js'
 import { createAnalysisProviderRuntime } from '../src/providers/analysisProviderRuntime.js'
 import { ProviderArtifactGenerator, type ArtifactAdapterRoute } from '../src/providers/providerArtifactGenerator.js'
-import { ProviderInvocationCoordinator } from '../src/providers/providerInvocationCoordinator.js'
+import { DEFAULT_PROVIDER_INVOCATION_POLICY, ProviderInvocationCoordinator, type ProviderInvocationPolicy } from '../src/providers/providerInvocationCoordinator.js'
 import { ProviderRouter } from '../src/providers/providerRouter.js'
 import { PromptRegistry } from '../src/providers/promptRegistry.js'
 import {
   artifactPrompt, artifactSourceReferencePrompt, artifactSourceReferenceRepairPrompt, repairPrompt,
   ARTIFACT_REFERENCE_DRAFT_VERSION, ARTIFACT_SOURCE_REFERENCE_REPAIR_VERSION, ARTIFACT_SOURCE_REFERENCE_VERSIONS,
+  LEARNING_COVERAGE_GUIDANCE, QUIZ_FAIR_SCORING_GUIDANCE,
 } from '../src/providers/artifactPrompts.js'
 import { createArtifactReferenceCatalog } from '../src/providers/artifactReferenceDraft.js'
 import { ProviderGatewayError } from '../src/providers/providerError.js'
 import { FakeAnalysisProvider, FIXTURE_TENANT, FIXTURE_TEXT, prepareFixtureRun } from './fixtures/fakeAnalysisProvider.js'
 
-const prepare = async (key: string, legacy = false) => {
+const prepare = async (key: string, legacy = false, policy: Partial<ProviderInvocationPolicy> = {}) => {
   const store = new InMemoryJobStore()
   const { service, runId } = await prepareFixtureRun(store, `source-refs-${key}`)
   const provider = new FakeAnalysisProvider()
@@ -35,6 +36,7 @@ const prepare = async (key: string, legacy = false) => {
   const route = (promptVersion: string) => ({ providerId: provider.id, modelId: provider.modelId,
     profileVersion: provider.profileVersion, promptVersion })
   const coordinator = new ProviderInvocationCoordinator({ ledger: store, estimateCostMicros: () => 3,
+    policy: { ...DEFAULT_PROVIDER_INVOCATION_POLICY, ...policy },
     router: new ProviderRouter([provider], definitions.map((definition) => ({
       id: `${definition.id}.${definition.version}`, ...route(definition.version), promptId: definition.id,
       roles: [definition.role], qualityProfiles: QUALITY_PROFILES, priority: 0,
@@ -126,7 +128,10 @@ describe('Artifact source reference adapters', () => {
     const rendered = artifactSourceReferencePrompt('mindmap').render(input)
     const data = JSON.parse(rendered)
     expect(data.referenceCatalog).toHaveLength(1)
-    expect(data.referenceCatalog[0]).toEqual({ refId: 'cite-1', citation: claim.citations[0] })
+    expect(data.referenceCatalog[0]).toEqual({ refId: 'cite-1', sourceId: claim.citations[0]!.provenance === 'source' ? claim.citations[0]!.sourceId : undefined, quote: claim.citations[0]!.provenance === 'source' ? claim.citations[0]!.quote : undefined })
+    expect(data.referenceCatalog[0]).not.toHaveProperty('start')
+    expect(data.referenceCatalog[0]).not.toHaveProperty('citation')
+    expect(data.outputGuidance.revision).toBe('coverage-and-fair-rubric-v2')
     expect(data.evidence.claims.map((entry: { citations: unknown[] }) => entry.citations)).toEqual([
       [{ refId: 'cite-1' }], [{ refId: 'cite-1' }],
     ])
@@ -139,6 +144,20 @@ describe('Artifact source reference adapters', () => {
     expect((rendered.match(/"quote"/gu) ?? [])).toHaveLength(1)
     expect(artifactSourceReferencePrompt('mindmap').system).toContain('untrusted data')
     expect(artifactSourceReferenceRepairPrompt.system).toContain('untrusted data')
+  })
+
+  it('delivers coverage and stem-aligned scoring policies through both quiz protocol families', async () => {
+    const f = await prepare('fair-scoring-policies')
+    const input = { ...f.input, kind: 'quiz' as const }
+    for (const prompt of [artifactPrompt('quiz'), artifactSourceReferencePrompt('quiz')]) {
+      expect(prompt.system).toContain(QUIZ_FAIR_SCORING_GUIDANCE)
+      expect(prompt.system).toContain('untrusted data')
+    }
+    const data = JSON.parse(artifactSourceReferencePrompt('quiz').render(input))
+    expect(data.outputGuidance.coverage).toBe(LEARNING_COVERAGE_GUIDANCE)
+    expect(data.outputGuidance.shortAnswers).toContain('Do not pad to a fixed count')
+    expect(data.budget).toEqual(input.budget)
+    expect(data.evidence).toEqual(createArtifactReferenceCatalog(input.graph).evidence)
   })
 
   it('accepts provider-encoded optional nulls while retaining strict unknown-key rejection', async () => {
@@ -154,7 +173,7 @@ describe('Artifact source reference adapters', () => {
     expect(other.provider.calls.slice(1)).toHaveLength(2)
   })
 
-  it('repairs one unknown reference in an independent invocation with the shared remaining output budget', async () => {
+  it('repairs one unknown reference in an independent invocation with a full per-call budget', async () => {
     const f = await prepare('repair-unknown-reference')
     f.provider.override = (request) => wrap(summary(f, request.role === 'repair' ? {} : { citations: [{ refId: 'cite-999' }] }))
     const result = await f.generator.generate({ ...f.input, budget: { ...f.input.budget, maxOutputTokens: 5000 } }, new AbortController().signal)
@@ -162,7 +181,8 @@ describe('Artifact source reference adapters', () => {
     const calls = f.provider.calls.slice(1)
     expect(calls.map(({ role }) => role)).toEqual(['artifact-summary', 'repair'])
     expect(calls[0]!.invocationId).not.toBe(calls[1]!.invocationId)
-    expect(calls[1]!.maxOutputTokens).toBe(4086)
+    expect(calls[1]!.maxOutputTokens).toBe(4096)
+    expect(result.invocationCount).toBe(2)
     expect(JSON.parse(calls[1]!.userPrompt).failure).toBe('reference_not_found')
     const repair = await f.store.getProviderInvocation(FIXTURE_TENANT, calls[1]!.invocationId)
     expect(repair).toMatchObject({ nodeKey: 'artifact:summary:repair', promptVersion: ARTIFACT_SOURCE_REFERENCE_REPAIR_VERSION })
@@ -182,6 +202,29 @@ describe('Artifact source reference adapters', () => {
     expect(await f.store.getArtifact(FIXTURE_TENANT, f.input.runId, 'summary')).toBeUndefined()
     expect(await f.store.getRunLedgerUsage(FIXTURE_TENANT, f.input.runId)).toMatchObject({ invocationCount: 3,
       unresolvedCount: 0, usage: { inputTokens: 60, outputTokens: 30 } })
+  })
+  it('reproduces the 1732/1800 truncation trap and gives the single repair enough room', async () => {
+    const f = await prepare('near-cap-repair')
+    vi.spyOn(f.provider, 'generate').mockImplementation(async (request) => {
+      f.provider.calls.push(request)
+      const repairing = request.role === 'repair'
+      return { outputText: wrap(summary(f, repairing ? {} : { citations: [{ refId: 'cite-999' }] })),
+        usage: { inputTokens: 20, outputTokens: repairing ? 1000 : 1732 } }
+    })
+    const result = await f.generator.generate({ ...f.input, budget: { ...f.input.budget, maxOutputTokens: 1800 } }, new AbortController().signal)
+    expect(f.provider.calls.slice(1).map(({ maxOutputTokens }) => maxOutputTokens)).toEqual([1800, 1800])
+    expect(result).toMatchObject({ invocationCount: 2, usage: { inputTokens: 40, outputTokens: 2732 } })
+    expect(await f.store.getRunLedgerUsage(FIXTURE_TENANT, f.input.runId)).toMatchObject({ invocationCount: 3,
+      usage: { inputTokens: 60, outputTokens: 2742 } })
+  })
+  it('refuses repair before dispatch when the run invocation budget is already consumed', async () => {
+    const f = await prepare('repair-run-budget', false, { maxRunInvocations: 2 })
+    f.provider.override = () => wrap(summary(f, { citations: [{ refId: 'cite-999' }] }))
+    await expect(f.generator.generate(f.input, new AbortController().signal))
+      .rejects.toMatchObject({ kind: 'budget_exceeded', safeCode: 'run_invocations_budget_exceeded' })
+    expect(f.provider.calls.map(({ role }) => role)).toEqual(['evidence-map', 'artifact-summary'])
+    expect(await f.store.getRunLedgerUsage(FIXTURE_TENANT, f.input.runId)).toMatchObject({ invocationCount: 2,
+      usage: { inputTokens: 40, outputTokens: 20 } })
   })
 
   it.each([
@@ -298,7 +341,7 @@ describe('Artifact source reference adapters', () => {
       unresolvedCount: 0, usage: { inputTokens: 40, outputTokens: 20 } })
   })
 
-  it('does not allocate repair tokens after consuming the full provider output cap', async () => {
+  it('allows exactly one full-budget repair after consuming the per-call output cap', async () => {
     const f = await prepare('output-budget-exhausted')
     vi.spyOn(f.provider, 'generate').mockImplementation(async (request) => {
       f.provider.calls.push(request)
@@ -306,9 +349,9 @@ describe('Artifact source reference adapters', () => {
     })
     await expect(f.generator.generate({ ...f.input, budget: { ...f.input.budget, maxOutputTokens: 5000 } }, new AbortController().signal))
       .rejects.toMatchObject({ safeCode: 'artifact_output_invalid', retryable: false })
-    expect(f.provider.calls.slice(1)).toHaveLength(1)
+    expect(f.provider.calls.slice(1).map(({ maxOutputTokens }) => maxOutputTokens)).toEqual([4096, 4096])
     expect(await f.store.getRunLedgerUsage(FIXTURE_TENANT, f.input.runId)).toMatchObject({
-      invocationCount: 2, unresolvedCount: 0, usage: { inputTokens: 40, outputTokens: 4106 },
+      invocationCount: 3, unresolvedCount: 0, usage: { inputTokens: 60, outputTokens: 8202 },
     })
   })
 

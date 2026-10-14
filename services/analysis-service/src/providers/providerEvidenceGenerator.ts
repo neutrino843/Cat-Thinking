@@ -207,10 +207,10 @@ export class ProviderEvidenceGenerator implements EvidenceGenerator {
     try {
       let card
       try { card = decode() } catch (error) {
-        const remainingTokens = this.maxOutputTokens - outputTokens
+        // 与产物生成同理：修复需要整份重写卡片，必须使用完整的单次输出预算。
         const failure = failureCode(error)
         if (!this.repair || !this.repairRoute || signal.aborted
-          || failure === undefined || failure === 'too_large' || remainingTokens <= 0) throw error
+          || failure === undefined || failure === 'too_large') throw error
         const repairKey = `${nodeKey}:repair`
         result = await this.coordinator.generate({
           tenantId: input.tenantId, runId: input.runId, nodeKey: repairKey, runAttempt: RUN_ATTEMPT,
@@ -218,8 +218,9 @@ export class ProviderEvidenceGenerator implements EvidenceGenerator {
           request: {
             invocationId: createStableInvocationId({ runId: input.runId, nodeKey: repairKey, runAttempt: RUN_ATTEMPT, role: 'repair' }),
             role: 'repair', qualityProfile: input.qualityProfile, systemPrompt: this.repair.system,
-            userPrompt: this.repair.render({ task: 'evidence-map', original, rejected: result.response.outputText, failure }),
-            output, maxOutputTokens: remainingTokens,
+            userPrompt: this.repair.render({ task: 'evidence-map', original, rejected: result.response.outputText, failure,
+              ...(error instanceof EvidenceValidationError ? { issues: error.issues.slice(0, 12).map(({ code, path, message }) => ({ code, path, message })) } : {}) }),
+            output, maxOutputTokens: this.maxOutputTokens,
           },
         }, signal)
         inputTokens += result.response.usage.inputTokens

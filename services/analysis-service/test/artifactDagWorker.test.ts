@@ -12,7 +12,7 @@ import {
 } from '@cat-thinking/analysis-contracts'
 import { describe, expect, it } from 'vitest'
 import { ArtifactDagWorker } from '../src/domain/artifactDagWorker.js'
-import { planArtifactBudget } from '../src/domain/artifactBudget.js'
+import { maxArtifactTotalOutputTokens, planArtifactBudget } from '../src/domain/artifactBudget.js'
 import type {
   ArtifactGenerationInput,
   ArtifactGenerationOutput,
@@ -544,6 +544,12 @@ describe('artifact validation boundary', () => {
 })
 
 describe('artifact DAG worker', () => {
+  it('keeps single-call limits by default and rejects invalid invocation counts', () => {
+    const budget = { maxOutputTokens: 1800, maxArtifactBytes: 750000 }
+    expect(maxArtifactTotalOutputTokens(budget)).toBe(1800)
+    expect(maxArtifactTotalOutputTokens(budget, 2)).toBe(3600)
+    for (const count of [0, 3, 1.5, NaN]) expect(() => maxArtifactTotalOutputTokens(budget, count)).toThrow(RangeError)
+  })
   it('validates worker options and handles inactive, completed, busy, aborted, and evidence-missing runs', async () => {
     const prepared = await prepareGeneratingRun(['summary'])
     const generator = new FixtureArtifactGenerator()
@@ -929,7 +935,7 @@ describe('artifact DAG worker', () => {
     })
   })
 
-  it('rejects provider output that exceeds the planned token budget', async () => {
+  it.each([1, 2] as const)('rejects provider output exceeding the budget for %i actual invocation(s)', async (invocationCount) => {
     const { store, service, runId } = await prepareGeneratingRun(['summary'])
     const generator: ArtifactGenerator = {
       async generate(input) {
@@ -943,10 +949,11 @@ describe('artifact DAG worker', () => {
           },
           usage: {
             inputTokens: 1,
-            outputTokens: input.budget.maxOutputTokens + 1,
+            outputTokens: input.budget.maxOutputTokens * invocationCount + 1,
             estimatedCostMicros: 1,
             currency: 'USD',
           },
+          invocationCount,
         }
       },
     }
@@ -961,5 +968,16 @@ describe('artifact DAG worker', () => {
       status: 'failed',
       artifactStates: { summary: { error: { code: 'budget_exceeded', category: 'budget' } } },
     })
+  })
+  it('commits repaired output whose summed usage exceeds one call but stays within two calls', async () => {
+    const { store, service, runId } = await prepareGeneratingRun(['summary'])
+    const generator: ArtifactGenerator = { async generate(input) {
+      return { artifact: artifactFor(input), invocationCount: 2,
+        route: { providerId: 'fixture-provider', modelId: 'fixture-model', profileVersion: 'fixture-profile-v1', promptVersion: 'artifact-summary-v1' },
+        usage: { inputTokens: 20, outputTokens: input.budget.maxOutputTokens * 2, estimatedCostMicros: 1, currency: 'USD' } }
+    } }
+    const result = await workerFor(store, service, generator).runOnce(tenantId, runId, 'repaired-budget-worker', new AbortController().signal)
+    expect(result.run).toMatchObject({ status: 'succeeded', artifactStates: { summary: { status: 'succeeded' } } })
+    expect(await store.getArtifact(tenantId, runId, 'summary')).toBeDefined()
   })
 })

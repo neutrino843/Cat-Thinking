@@ -11,6 +11,8 @@
     "node": "^20.0.0 || ^22.0.0 || >=24.0.0"
   },
   "scripts": {
+    "quality:plan": "npm run build:service && node scripts/quality-regression.mjs --plan",
+    "quality:live": "npm run build:service && node scripts/quality-regression.mjs --run",
     "desktop:package": "npm run build && npm run build:service && node scripts/desktop/package.mjs",
     "desktop:test": "vitest run services/analysis-service/test/desktopPackage.test.ts",
     "start:local": "node scripts/local-postgres.mjs personal-app",

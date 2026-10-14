@@ -1397,7 +1397,7 @@ integration('PostgreSQL durable job store', () => {
 
     const staleId = reserved.invocation.invocationId === 'provider-call-a' ? 'provider-call-b' : 'provider-call-a'
     const staleNode = staleId === 'provider-call-a' ? 'provider-node-a' : 'provider-node-b'
-    expect(await firstStore.reserveProviderInvocation(reservation(staleId, staleNode, 31_000, 1_000)))
+    expect(await firstStore.reserveProviderInvocation(reservation(staleId, staleNode, 31_000, 420)))
       .toMatchObject({ outcome: 'reserved', invocation: { status: 'running' } })
     expect(await secondStore.reserveProviderInvocation(reservation(staleId, staleNode, 32_000, 1_000)))
       .toMatchObject({ outcome: 'existing', invocation: { status: 'outcome_unknown' } })

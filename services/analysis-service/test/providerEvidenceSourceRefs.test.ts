@@ -157,13 +157,13 @@ describe('Evidence source-reference adapter and version isolation', () => {
       usage: { inputTokens: 30, outputTokens: 20 } })
   })
 
-  it('repairs an unknown excerpt ID with its own v2 repair invocation and remaining output budget', async () => {
+  it('repairs an unknown excerpt ID with its own v2 repair invocation and full per-call output budget', async () => {
     const f = await prepare('First public fact. Second public fact.', (request, call) => response(refOutput(
       call === 1 ? 'excerpt-not-provided' : inputEnvelope(request).excerpts[1]!.excerptId)))
     expect((await f.run()).outcome).toBe('completed')
     expect(f.provider.calls.map((call) => call.role)).toEqual(['evidence-map', 'repair'])
     expect(f.provider.calls[1]?.invocationId).not.toBe(f.provider.calls[0]?.invocationId)
-    expect(f.provider.calls[1]?.maxOutputTokens).toBe(4076)
+    expect(f.provider.calls[1]?.maxOutputTokens).toBe(4096)
     expect(JSON.parse(f.provider.calls[1]!.userPrompt)).toMatchObject({ task: 'evidence-map', validationFailure: 'excerpt_not_found' })
     const repair = await f.store.getProviderInvocation(tenantId, f.provider.calls[1]!.invocationId)
     expect(repair).toMatchObject({ role: 'repair', promptVersion: EVIDENCE_SOURCE_REF_REPAIR_PROMPT_VERSION, status: 'succeeded' })
@@ -190,12 +190,12 @@ describe('Evidence source-reference adapter and version isolation', () => {
     expect(await f.store.listEvidenceCards(tenantId, f.runId)).toEqual([])
   })
 
-  it('does not allocate a repair after the Evidence output budget is exhausted', async () => {
+  it('accounts both full-budget Evidence responses and stops after one invalid repair', async () => {
     const f = await prepare('public fact', () => response('incomplete JSON', 4096))
     expect((await f.run()).outcome).toBe('failed')
-    expect(f.provider.calls).toHaveLength(1)
-    expect(await f.store.getRunLedgerUsage(tenantId, f.runId)).toMatchObject({ invocationCount: 1,
-      usage: { inputTokens: 30, outputTokens: 4096 } })
+    expect(f.provider.calls.map(({ maxOutputTokens }) => maxOutputTokens)).toEqual([4096, 4096])
+    expect(await f.store.getRunLedgerUsage(tenantId, f.runId)).toMatchObject({ invocationCount: 2,
+      usage: { inputTokens: 60, outputTokens: 8192 } })
   })
 
   it('rejects over-capacity custom chunks before any invocation or usage reservation', async () => {

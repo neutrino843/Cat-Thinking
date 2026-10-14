@@ -60,6 +60,11 @@ export class BrowserSyntheticProvider implements ModelProvider {
     await wait(scenario.includes('fixture slow') || scenario.includes('fixture unknown') ? 4_000 : 250, signal)
     // Compact IDs are local to a prompt: cite-1 in a different document is not the same source.
     const sourceIdentity = JSON.stringify(data.referenceCatalog ?? claim.citations)
+    if (request.role === 'artifact-outline' && scenario.includes('fixture truncated outline')) {
+      throw new ProviderGatewayError({ providerId: this.id, kind: 'rejected', retryable: false,
+        acceptance: 'accepted', safeCode: 'finish_not_complete',
+        usage: { inputTokens: 20, outputTokens: request.maxOutputTokens } })
+    }
     if (request.role === 'artifact-outline' && scenario.includes('fixture partial') && !this.failedPartial.has(sourceIdentity)) {
       this.failedPartial.add(sourceIdentity)
       throw new ProviderGatewayError({ providerId: this.id, kind: 'unavailable', retryable: true, acceptance: 'not_accepted', safeCode: 'synthetic_partial_failure' })

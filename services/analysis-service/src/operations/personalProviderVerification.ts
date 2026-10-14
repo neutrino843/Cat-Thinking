@@ -22,6 +22,7 @@ import { createAnalysisProviderRuntime } from '../providers/analysisProviderRunt
 import type { ModelProvider, ModelResponse } from '../providers/modelProvider.js'
 import { createPersonalModelProvider, PERSONAL_PROVIDER_LIMITS } from '../providers/personalModelProvider.js'
 import { ProviderGatewayError } from '../providers/providerError.js'
+import { qualitySample } from './qualityCorpus.js'
 
 /** Original public teaching text. Never substitute a user's document for this sample. */
 export const PERSONAL_VERIFICATION_SAMPLE = [
@@ -82,11 +83,13 @@ export interface PersonalProviderVerificationResult {
 export interface PersonalProviderVerificationOptions {
   /** Already initialized stores; the caller owns their lifecycle and profile ownership lock. */
   readonly store: JobStore
-  readonly profiles: PersonalProfileStore
+  readonly profiles: Pick<PersonalProfileStore, 'readState' | 'getSnapshot' | 'checkHealth' | 'createRun'>
   readonly signal?: AbortSignal
   readonly deadlineMs?: number
   /** Remaining authorization for this batch; never expand beyond three attempts. */
   readonly requestLimit?: 1 | 2 | 3
+  /** Estimated total token reservation cap, including independent repair calls. */
+  readonly maxRunTokens?: number
   /** Trusted test injection only. The default uses the existing DNS-pinned Provider transport. */
   readonly createProvider?: (snapshot: PersonalProviderSnapshot) => ModelProvider
 }
@@ -116,6 +119,8 @@ interface VerificationConfiguration {
   readonly maximumDeadlineMs: number
   readonly kinds: readonly ArtifactKind[]
   readonly learning: boolean
+  readonly title?: string
+  readonly qualityProfile?: 'standard' | 'high-quality'
 }
 
 const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex')
@@ -164,6 +169,17 @@ export const verifyPersonalLearningPipeline = async (options: PersonalLearningVe
   return { ...receipt, kind: 'personal-learning-pipeline-verification', limit: options.requestLimit ?? 8 }
 }
 
+/** Only fixed public corpus IDs are accepted. No arbitrary customer source can enter this operation. */
+export const verifyPersonalQualitySample = async (options: PersonalLearningVerificationOptions, sampleId: string, requestedKinds: readonly ArtifactKind[] = ARTIFACT_KINDS): Promise<PersonalLearningVerificationResult> => {
+  const sample = qualitySample(sampleId)
+  if (!requestedKinds.length || new Set(requestedKinds).size !== requestedKinds.length || requestedKinds.some((kind) => !ARTIFACT_KINDS.includes(kind))) throw new RangeError('invalid quality artifact selection')
+  const kinds = requestedKinds.includes('mindmap') && !requestedKinds.includes('outline') ? [...requestedKinds, 'outline' as const] : requestedKinds
+  const receipt = await verifyBoundedPersonalSample(options, { sample: sample.text, title: sample.title,
+    maximumRequests: 8, maximumDeadlineMs: PERSONAL_LEARNING_VERIFICATION_LIMITS.deadlineMs,
+    kinds, learning: true, qualityProfile: 'high-quality' })
+  return { ...receipt, kind: 'personal-learning-pipeline-verification', limit: options.requestLimit ?? 8 }
+}
+
 const verifyBoundedPersonalSample = async (
   options: Omit<PersonalProviderVerificationOptions, 'requestLimit'> & Readonly<{ requestLimit?: number }>,
   configuration: VerificationConfiguration,
@@ -173,6 +189,10 @@ const verifyBoundedPersonalSample = async (
     throw new RangeError(`personal verification request limit must be between 1 and ${configuration.maximumRequests}`)
   }
   const deadlineMs = options.deadlineMs ?? configuration.maximumDeadlineMs
+  const maxRunTokens = options.maxRunTokens ?? PERSONAL_PROVIDER_LIMITS.maxRunTokens
+  if (!Number.isSafeInteger(maxRunTokens) || maxRunTokens < 1 || maxRunTokens > PERSONAL_PROVIDER_LIMITS.maxRunTokens) {
+    throw new RangeError('invalid personal verification token cap')
+  }
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > configuration.maximumDeadlineMs) {
     throw new RangeError(`personal verification deadline must be between 1 and ${configuration.maximumDeadlineMs} milliseconds`)
   }
@@ -268,19 +288,19 @@ const verifyBoundedPersonalSample = async (
       },
     })
     service = new RunService({ store: scopedStore, retentionSeconds: 3600, providerProfileMode: 'personal', canAdmit: canInvoke,
-      maxRunEstimatedTokens: PERSONAL_PROVIDER_LIMITS.maxRunTokens, maxRunEstimatedCostMicros: 0 })
+      maxRunEstimatedTokens: maxRunTokens, maxRunEstimatedCostMicros: 0 })
     const runtime = createAnalysisProviderRuntime({ store: scopedStore, provider: boundedProvider, broker: service.broker,
       expectedPersonalProfileId: snapshot.id, leaseMs: 1000, estimateCostMicros: () => 0, canInvoke,
       policy: { maxAttempts: 1, retryBaseDelayMs: 250, retryMaxDelayMs: 1000, circuitFailureThreshold: 3, circuitOpenMs: 30000,
-        staleAfterMs: 600000, maxRunEstimatedTokens: PERSONAL_PROVIDER_LIMITS.maxRunTokens, maxRunEstimatedCostMicros: 0,
+        staleAfterMs: 600000, maxRunEstimatedTokens: maxRunTokens, maxRunEstimatedCostMicros: 0,
         maxRunInvocations: requestLimit } })
     const created = await service.createRun(tenantId, {
       version: 1, requestKey: sha256(`${operationId}:${sampleHash}`), docId: `sample-${operationId}`, providerProfileId: snapshot.id,
       manifest: { version: 1, sources: [{ version: 1, sourceId, kind: 'text', extractor: 'public-verification-v1',
         contentHash: sampleHash, charCount: configuration.sample.length,
         byteCount: new TextEncoder().encode(configuration.sample).byteLength,
-        locators: [{ start: 0, end: configuration.sample.length, titlePath: ['公开教学样例：光合作用'] }] }] },
-      artifacts: [...configuration.kinds], options: { locale: 'zh-CN', qualityProfile: 'standard', summaryDetail: 'brief',
+        locators: [{ start: 0, end: configuration.sample.length, titlePath: [configuration.title ?? '公开教学样例：光合作用'] }] }] },
+      artifacts: [...configuration.kinds], options: { locale: 'zh-CN', qualityProfile: configuration.qualityProfile ?? 'standard', summaryDetail: 'brief',
         quizQuestionCount: configuration.learning ? 5 : 1, externalKnowledge: false },
     })
     runId = created.run.id

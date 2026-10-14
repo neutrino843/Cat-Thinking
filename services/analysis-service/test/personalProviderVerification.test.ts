@@ -99,7 +99,7 @@ describe('bounded personal public-sample verification', () => {
     expect(result).toMatchObject({ outcome: 'partial', callsUsed: 3, limit: 3, invocationCount: 3, unresolvedCount: 0,
       profileStateUnchanged: true, failures: [{ stage: 'outline', code: 'budget_exceeded', retryable: false }] })
     expect(f.calls.map((call) => call.role)).toEqual(['evidence-map', 'repair', 'artifact-summary'])
-    expect(f.calls[1]!.maxOutputTokens).toBe(f.calls[0]!.maxOutputTokens - 10)
+    expect(f.calls[1]!.maxOutputTokens).toBe(f.calls[0]!.maxOutputTokens)
     expect(result.artifacts.summary).toBeDefined()
     expect(result.artifacts.outline).toBeUndefined()
     expect(await f.profiles.readState()).toEqual(f.state)

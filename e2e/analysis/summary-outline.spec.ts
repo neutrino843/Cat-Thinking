@@ -207,7 +207,7 @@ test('只生成摘要并限制范围，删除后可显式发起新的分析', as
 test('两个标签页的并发点击只创建一个任务，伪造身份不能跨租户取结果', async ({ page, context, request }) => {
   await importAndOpen(page, ANALYSIS_SYNTHETIC.slow)
   const second = await context.newPage()
-  await second.goto('/'); await waitForApp(second)
+  await second.goto('/#mindmap'); await waitForApp(second)
   await second.getByRole('tab', { name: /合成学习文档/ }).click()
   await expect(second.locator('input.doc-title')).toHaveValue('合成学习文档')
   await second.getByRole('button', { name: 'AI 分析', exact: true }).click()
@@ -245,7 +245,7 @@ test('切换文档后不显示前一篇的结果，离线状态禁用创建', as
   await expect(panel(page).getByRole('button', { name: '生成摘要与大纲' })).toBeEnabled()
 })
 
-test('IndexedDB v7 文档、来源和历史兼容升级到 v10，任务只保存元数据', async ({ page }) => {
+test('IndexedDB v7 文档、来源和历史兼容升级到 v11，任务只保存元数据', async ({ page }) => {
   await importAndOpen(page)
   await panel(page).getByRole('button', { name: '关闭 AI 分析' }).click()
   const existing = await page.evaluate(async () => {
@@ -277,7 +277,7 @@ test('IndexedDB v7 文档、来源和历史兼容升级到 v10，任务只保存
       await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error) })
     } finally { database.close() }
   }, existing)
-  await page.goto('/'); await waitForApp(page)
+  await page.goto('/#mindmap'); await waitForApp(page)
   await page.getByRole('button', { name: 'AI 分析', exact: true }).click()
   await expect(panel(page)).toContainText('合成学习文档.txt')
   await panel(page).getByRole('button', { name: '生成摘要与大纲' }).click()
@@ -289,7 +289,7 @@ test('IndexedDB v7 文档、来源和历史兼容升级到 v10，任务只保存
     try { return { version: database.version, docs: await read('docs'), sources: await read('sources'), history: await read('docVersions'), tasks: await read('analysisTasks') } }
     finally { database.close() }
   })
-  expect(recovered.version).toBe(100)
+  expect(recovered.version).toBe(110)
   expect(recovered.docs).toEqual(existing.docs)
   expect(recovered.sources).toEqual(existing.sources)
   // Opening a document can append a legitimate version snapshot. Existing

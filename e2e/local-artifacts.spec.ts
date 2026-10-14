@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 // These tests use genuine Chromium IndexedDB. Every Playwright context is isolated.
 test.beforeEach(async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/#mindmap')
   await expect(page.getByRole('button', { name: 'AI 分析', exact: true })).toBeVisible()
   await page.evaluate(async () => {
     const { db } = await import('/src/store/db.ts')

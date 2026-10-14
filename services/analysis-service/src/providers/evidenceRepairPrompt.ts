@@ -9,6 +9,7 @@ export interface EvidenceRepairVariables {
   readonly original: string
   readonly rejected: string
   readonly failure: string
+  readonly issues?: readonly { code: string; path: string; message: string }[]
 }
 
 export const evidenceRepairPrompt: PromptDefinition<EvidenceRepairVariables> = Object.freeze({
@@ -29,6 +30,7 @@ export const evidenceRepairPrompt: PromptDefinition<EvidenceRepairVariables> = O
     originalInput: variables.original,
     rejectedOutput: variables.rejected,
     validationFailure: variables.failure,
+    ...(variables.issues?.length ? { validationIssues: variables.issues } : {}),
   }),
 })
 
@@ -41,6 +43,7 @@ export const evidenceSourceRefRepairPrompt: PromptDefinition<EvidenceRepairVaria
     'Every citation must contain only excerptId copied exactly from an excerpt in the original input.',
     'Do not copy source text into citations or supply offsets, quote, prefix or suffix. Never invent excerpt IDs.',
     'Remove unsupported items and correct duplicate ids and missing conceptIds/evidenceIds.',
+    'Use validationIssues paths to locate the invalid links. conceptIds may reference only ids of returned terms, never excerpt ids, claim ids or concept names. Learning-objective evidenceIds may reference only returned claims or terms. If a link is not justified, remove that link; empty conceptIds and empty optional terms/objectives arrays are allowed.',
     'Prefer fewer concise supported claims and terms to a truncated response; never extend beyond the provided source.',
   ].join(' '),
   render: evidenceRepairPrompt.render,

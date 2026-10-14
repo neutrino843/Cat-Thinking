@@ -84,7 +84,7 @@ test('普通用户连接、手填模型、刷新恢复都不把密钥写入浏�
   page.on('request', (request) => {
     if (new URL(request.url()).pathname.startsWith('/api/analysis/v1/runs') && request.method() !== 'GET') analysisMutations.push(request.method())
   })
-  await page.goto('/')
+  await page.goto('/#mindmap')
   const title = await page.getByLabel('文档标题').inputValue()
   await openSettings(page)
   await expect(panel(page).getByRole('button', { name: 'GPT-6.1 Sol', exact: true })).toBeVisible()
@@ -109,7 +109,7 @@ test('普通用户连接、手填模型、刷新恢复都不把密钥写入浏�
 
 test('自定义完整 API 地址可先读取模型再保存，读取不产生生成任务', async ({ page, context }) => {
   const fixture = await settingsFixture(context)
-  await page.goto('/'); await openSettings(page)
+  await page.goto('/#mindmap'); await openSettings(page)
   await panel(page).getByLabel('AI 服务', { exact: true }).selectOption('custom')
   await panel(page).getByLabel('API 服务地址').fill('https://example.com/v1/chat/completions')
   await panel(page).getByLabel('API 密钥', { exact: true }).fill(fakeKey)
@@ -141,7 +141,7 @@ test('自定义完整 API 地址可先读取模型再保存，读取不产生生
 
 test('暂停和忘记密钥使用当前配置版本，文档保持原样', async ({ page, context }) => {
   const fixture = await settingsFixture(context)
-  await page.goto('/')
+  await page.goto('/#mindmap')
   const title = await page.getByLabel('文档标题').inputValue()
   await openSettings(page)
   await panel(page).getByLabel('API 密钥', { exact: true }).fill(fakeKey)
@@ -163,7 +163,7 @@ test('暂停和忘记密钥使用当前配置版本，文档保持原样', async
 test('两处配置冲突不会覆盖更新或自动重新发起连接', async ({ page, context }) => {
   const fixture = await settingsFixture(context)
   const second = await context.newPage()
-  await page.goto('/'); await second.goto('/')
+  await page.goto('/#mindmap'); await second.goto('/')
   await openSettings(page); await openSettings(second)
   await panel(page).getByLabel('API 密钥', { exact: true }).fill(fakeKey)
   await panel(page).getByRole('button', { name: '只保存，暂不分析' }).click()
@@ -181,7 +181,7 @@ test('两处配置冲突不会覆盖更新或自动重新发起连接', async ({
 
 test('未启动服务给出可执行说明，不展示服务端错误中的密钥', async ({ page, context }) => {
   const fixture = await settingsFixture(context); fixture.fail(true)
-  await page.goto('/')
+  await page.goto('/#mindmap')
   await page.getByRole('button', { name: 'AI 设置', exact: true }).click()
   await expect(panel(page).getByRole('alert')).toContainText('启动猫思之')
   await expect(panel(page)).not.toContainText(fakeKey)
@@ -193,7 +193,7 @@ test('未启动服务给出可执行说明，不展示服务端错误中的密�
 
 test('不提供模型列表的服务需要用户明确选择手填模型连接', async ({ page, context }) => {
   const fixture = await settingsFixture(context); fixture.unsupported()
-  await page.goto('/'); await openSettings(page)
+  await page.goto('/#mindmap'); await openSettings(page)
   await panel(page).getByLabel('API 密钥', { exact: true }).fill(fakeKey)
   await panel(page).getByLabel('AI 模型', { exact: true }).fill('public-manual-model')
   await panel(page).getByRole('button', { name: '保存并连接', exact: true }).click()
@@ -207,7 +207,7 @@ test('不提供模型列表的服务需要用户明确选择手填模型连接',
 
 test('统一管理模式只展示状态，不能编辑密钥或绕过发布限制', async ({ page, context }) => {
   await context.route('**/api/analysis/v1/personal/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...initialStatus, available: false }) }))
-  await page.goto('/')
+  await page.goto('/#mindmap')
   await page.getByRole('button', { name: 'AI 设置', exact: true }).click()
   await expect(panel(page)).toContainText('由管理员管理连接')
   await expect(panel(page).getByLabel('API 密钥', { exact: true })).toHaveCount(0)
@@ -216,7 +216,7 @@ test('统一管理模式只展示状态，不能编辑密钥或绕过发布限�
 
 test('设置面板约束键盘焦点，Escape 返回当前文档并清除尚未保存的密钥', async ({ page, context }) => {
   await settingsFixture(context)
-  await page.goto('/'); await openSettings(page)
+  await page.goto('/#mindmap'); await openSettings(page)
   const title = await page.getByLabel('文档标题').inputValue()
   await panel(page).getByLabel('API 密钥', { exact: true }).fill(fakeKey)
   for (let index = 0; index < 20; index++) {
@@ -236,7 +236,7 @@ test('从分析面板打开连接设置后返回当前文档，并恢复常驻�
   await settingsFixture(context)
   await context.route('**/api/analysis/v1/capabilities', (route) => route.fulfill({ status: 503,
     contentType: 'application/json', body: JSON.stringify({ error: 'public synthetic unavailable fixture' }) }))
-  await page.goto('/')
+  await page.goto('/#mindmap')
   const title = await page.getByLabel('文档标题').inputValue()
   await page.getByRole('button', { name: 'AI 分析', exact: true }).click()
   const analysis = page.getByRole('dialog', { name: 'AI 学习分析' })
@@ -251,7 +251,7 @@ test('从分析面板打开连接设置后返回当前文档，并恢复常驻�
 
 test('旧过滤控件、文档标签与设置输入在两种主题中采用同一键盘焦点色', async ({ page, context }, testInfo) => {
   await settingsFixture(context)
-  await page.goto('/')
+  await page.goto('/#mindmap')
   await expect(page.getByRole('button', { name: 'AI 设置', exact: true })).toBeVisible()
   const checkFocus = async (control: Locator) => {
     await control.focus()
@@ -290,7 +290,7 @@ test('新野兽工作台与设置在四种窄屏宽度没有页面横向溢出',
   await settingsFixture(context)
   for (const width of [320, 375, 414, 768]) {
     await page.setViewportSize({ width, height: 900 })
-    await page.goto('/')
+    await page.goto('/#mindmap')
     const fileMenu = page.locator('details.tmenu', { hasText: '文件 ▾' })
     await fileMenu.locator('summary').click()
     const openFile = fileMenu.getByRole('button', { name: '打开 .msz 文件…', exact: true })

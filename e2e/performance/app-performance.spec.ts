@@ -22,7 +22,7 @@ test('production 首屏、AI 按需打开与文档刷新恢复保留身份且没
     .map((entry) => ({ file: new URL(entry.name).pathname, decodedBodyBytes: (entry as PerformanceResourceTiming).decodedBodySize, transferBytes: (entry as PerformanceResourceTiming).transferSize })))
   const timings: Record<string, number> = {}
   let start = performance.now()
-  await page.goto('/')
+  await page.goto('/#mindmap')
   await expect(page.locator('.loading')).toBeHidden()
   await expect(page.locator('header.toolbar')).toBeVisible()
   timings.firstScreenMs = Math.round(performance.now() - start)

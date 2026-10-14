@@ -27,6 +27,8 @@ export interface ArtifactGenerationOutput {
   readonly artifact: ArtifactEnvelopeV1
   readonly route: ProviderRouteV1
   readonly usage: UsageV1
+  /** Successful model responses included in usage: generation, optionally one repair. */
+  readonly invocationCount?: 1 | 2
 }
 
 export interface ArtifactGenerator {

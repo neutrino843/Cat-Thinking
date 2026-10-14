@@ -46,6 +46,7 @@ import {
   assertProviderInvocationCompletion,
   assertProviderInvocationReservation,
   cloneProviderInvocation,
+  invocationTokenBudgetUsage,
   providerInvocationIdentityMatches,
   type CompleteProviderInvocationInput,
   type CompleteProviderInvocationResult,
@@ -585,7 +586,7 @@ export class InMemoryJobStore implements JobStore {
     for (const candidate of this.providerInvocations.values()) {
       if (candidate.tenantId !== input.tenantId || candidate.runId !== input.runId) continue
       invocationCount += 1
-      reservedTokens += candidate.estimatedInputTokens + candidate.reservedOutputTokens
+      reservedTokens += invocationTokenBudgetUsage(candidate)
       reservedCost += candidate.estimatedCostMicros
     }
     const requestedTokens = input.estimatedInputTokens + input.reservedOutputTokens
