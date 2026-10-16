@@ -31,7 +31,14 @@ export const analysisOptionsSchema = z
       hintLevel: z.number().int().min(1).max(3).optional(),
       quizType: z.enum(['mixed', 'multiple-choice', 'true-false', 'short-answer']).optional(),
       difficulty: z.enum(['easy', 'medium', 'hard']).optional(),
-    }).strict().optional(),
+    }).strict().superRefine((support, context) => {
+      if (support.mode === 'hint' && support.hintLevel === undefined) context.addIssue({ code: 'custom', path: ['hintLevel'], message: 'hint support requires hintLevel' })
+      if (support.mode !== 'hint' && support.hintLevel !== undefined) context.addIssue({ code: 'custom', path: ['hintLevel'], message: 'hintLevel only applies to hint support' })
+      if (support.mode === 'feedback' && !support.learnerAnswer?.trim()) context.addIssue({ code: 'custom', path: ['learnerAnswer'], message: 'feedback support requires learnerAnswer' })
+      if (support.mode !== 'feedback' && support.mode !== 'hint' && support.learnerAnswer !== undefined) context.addIssue({ code: 'custom', path: ['learnerAnswer'], message: 'learnerAnswer only applies to hint or feedback support' })
+      if (support.mode === 'variation' && (!support.quizType || !support.difficulty)) context.addIssue({ code: 'custom', path: ['quizType'], message: 'variation support requires quizType and difficulty' })
+      if (support.mode !== 'variation' && (support.quizType !== undefined || support.difficulty !== undefined)) context.addIssue({ code: 'custom', path: ['quizType'], message: 'quizType and difficulty only apply to variation support' })
+    }).optional(),
   })
   .strict()
 

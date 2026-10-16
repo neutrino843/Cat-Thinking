@@ -3,9 +3,10 @@ import { createSourceSnapshot, sha256Hex } from '../analysis/fingerprint'
 import type { SourceDocument } from '../types'
 import { LearningError, type ArchivedSourceRef, type LearningArchive, type LearningEntity, type QuestionRef } from './model'
 
-const baseKeys = ['version', 'id', 'courseId', 'revision', 'createdAt', 'updatedAt', 'kind']
+const baseKeys = ['originId', 'version', 'id', 'courseId', 'revision', 'createdAt', 'updatedAt', 'kind']
 const fields: Record<LearningEntity['kind'], string[]> = {
-  course: ['name', 'goal', 'timeZone', 'dailyMinutes', 'dailyQuestionLimit', 'examDate', 'goalVersion', 'automaticReviews', 'goals', 'example'],
+  journey: ['mode', 'title', 'status', 'step', 'note', 'position', 'scroll', 'dueDate', 'finishedAt', 'source', 'questionRef', 'archiveHash', 'attemptId', 'retryAttemptId', 'parentSessionId', 'originSessionId', 'blockedReason', 'planning'],
+  course: ['firstStudyAt', 'name', 'goal', 'timeZone', 'dailyMinutes', 'dailyQuestionLimit', 'examDate', 'goalVersion', 'automaticReviews', 'goals', 'example'],
   document: ['docId', 'chapter', 'role'], point: ['title', 'definition', 'chapter', 'parentId', 'aliases', 'notes', 'sourceRefs', 'questionRefs', 'status', 'docId', 'nodeId', 'questionLevels', 'goalIncluded', 'archiveId', 'generatedNodeId'],
   archive: ['originDocId', 'provenanceDocId', 'runId', 'title', 'manifest', 'sources', 'artifacts', 'contentHash'],
   attempt: ['question', 'answer', 'submittedAt', 'learningDate', 'answerRevealed', 'origin', 'confidence', 'sessionId', 'assistance', 'recallText'],
@@ -69,9 +70,23 @@ export function parseSourceDocument(v: unknown): SourceDocument {
 export function parseLearningEntity(v: unknown): LearningEntity {
   if (!isRecord(v) || typeof v.kind !== 'string' || !Object.hasOwn(fields, v.kind)) invalid()
   const kind = v.kind as LearningEntity['kind']; const r = strictObject(v, [...baseKeys, ...fields[kind]])
-  if (r.version !== 1) invalid(); id(r.id); id(r.courseId); number(r.revision, 1); number(r.createdAt); number(r.updatedAt)
+  if (r.version !== 1) invalid(); id(r.id); if (r.originId !== undefined) id(r.originId); id(r.courseId); number(r.revision, 1); number(r.createdAt); number(r.updatedAt)
   switch (kind) {
+    case 'journey': {
+      one(r.mode, ['reading', 'remediation']); text(r.title, 500); if (!(r.title as string).trim()) invalid()
+      one(r.status, ['active', 'paused', 'completed']); number(r.step, 0, 3); text(r.note, 10000); number(r.position, 0, 8_000_000); number(r.scroll, 0, 10_000_000)
+      if (r.dueDate !== undefined) date(r.dueDate); if (r.finishedAt !== undefined) number(r.finishedAt)
+      if (r.source !== undefined) { const s = strictObject(r.source, ['docId', 'sourceId', 'sourceHash']); id(s.docId); id(s.sourceId); if (typeof s.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(s.sourceHash)) invalid() }
+      if (r.questionRef !== undefined) parseQuestionRef(r.questionRef)
+      for (const key of ['attemptId', 'retryAttemptId', 'parentSessionId', 'originSessionId']) if (r[key] !== undefined) id(r[key])
+      if (r.archiveHash !== undefined && (typeof r.archiveHash !== 'string' || !/^[a-f0-9]{64}$/.test(r.archiveHash))) invalid()
+      if (r.blockedReason !== undefined) text(r.blockedReason, 2000)
+      if (r.mode === 'remediation' && (!r.questionRef || !r.attemptId || !r.archiveHash) || r.mode === 'reading' && (r.questionRef || r.attemptId || r.retryAttemptId)) invalid()
+      if (r.planning !== undefined) { const p = strictObject(r.planning, ['date', 'minutes']); date(p.date); number(p.minutes, 0, 1440) }
+      break
+    }
     case 'course':
+      if (r.firstStudyAt !== undefined) number(r.firstStudyAt)
       if (r.id !== r.courseId) invalid(); text(r.name, 200); if (!(r.name as string).trim()) invalid(); text(r.goal); text(r.timeZone, 100)
       try { new Intl.DateTimeFormat('en', { timeZone: r.timeZone as string }).format() } catch { invalid() }
       number(r.dailyMinutes, 1, 1440); number(r.dailyQuestionLimit, 1, 1000); number(r.goalVersion, 1); if (r.examDate !== undefined) date(r.examDate); if (r.automaticReviews !== undefined) bool(r.automaticReviews)

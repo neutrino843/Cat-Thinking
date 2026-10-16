@@ -1,3 +1,4 @@
+import { parseExperience, saveExperience, useExperience, type ExperiencePreferences } from './experiencePreferences'
 import { canonicalizeJson } from '@cat-thinking/analysis-contracts'
 import { db, BLOB_QUOTA_BYTES, type StoredBlob } from '../store/db'
 import type { DocData, SourceDocument } from '../types'
@@ -6,6 +7,7 @@ import { verifyRelationSourceHashes } from '../lib/relationSources'
 import { sha256Hex } from '../analysis/fingerprint'
 import { isRecord, parseLearningEntity, parseSourceDocument, validateLearningArchive } from './archiveValidation'
 import { LearningError, newLearningId, type Course, type LearningEntity, type LearningArchive } from './model'
+import { sameQuestion } from './workspaceView'
 import { prerequisiteCycle, questionRefKey } from './knowledgeGraph'
 
 export const COURSE_PACKAGE_LIMITS = Object.freeze({ maxFileBytes: 192 * 1024 * 1024, maxPayloadBytes: 128 * 1024 * 1024, maxBlobBytes: 64 * 1024 * 1024, maxRecords: 50_000, maxDocuments: 1000, maxNodes: 50_000 })
@@ -14,7 +16,7 @@ const ITERATIONS = 250_000
 const AAD = new TextEncoder().encode(`${FORMAT}:1`)
 interface PortableBlob { id: string; docId: string; nodeId?: string; mime: string; data: string; hash: string; createdAt: number }
 interface PortableDocument { doc: DocData; sources: SourceDocument[]; blobs: PortableBlob[]; versions: { id: string; docId: string; title: string; createdAt: number; doc: DocData }[] }
-export interface CoursePackagePayload { format: typeof FORMAT; version: 1; exportedAt: number; course: Course; records: LearningEntity[]; documents: PortableDocument[]; missingDocumentIds: string[]; contentHash: string }
+export interface CoursePackagePayload { experience?: ExperiencePreferences; format: typeof FORMAT; version: 1; exportedAt: number; course: Course; records: LearningEntity[]; documents: PortableDocument[]; missingDocumentIds: string[]; contentHash: string }
 export interface CoursePackagePreview { courseName: string; exportedAt: number; counts: { documents: number; sources: number; blobs: number; archives: number; attempts: number; schedules: number; records: number }; warnings: string[]; payload: CoursePackagePayload }
 function invalid(message = '课程包结构、版本或引用无效。'): never { throw new LearningError('invalid', message) }
 function keys(v: unknown, allowed: string[]): Record<string, unknown> { if (!isRecord(v) || Object.keys(v).some((k) => !allowed.includes(k))) invalid(); return v }
@@ -48,10 +50,11 @@ function inspectDocument(raw: unknown): DocData {
   return JSON.parse(JSON.stringify(validateDoc(structuredClone(top)))) as DocData
 }
 function entityReferences(record: LearningEntity): { questionRefs: { archiveId: string; artifactId: string; questionId: string }[]; sourceRefs: { archiveId: string; sourceId: string; end: number }[] } {
-  return { questionRefs: 'question' in record ? [record.question] : record.kind === 'point' ? record.questionRefs : record.kind === 'session' ? record.questions ?? [] : record.kind === 'support' && record.questionRef ? [record.questionRef] : [], sourceRefs: record.kind === 'point' || record.kind === 'relation' || record.kind === 'support' ? record.sourceRefs ?? [] : [] }
+  return { questionRefs: 'question' in record ? [record.question] : record.kind === 'point' ? record.questionRefs : record.kind === 'session' ? record.questions ?? [] : (record.kind === 'support' || record.kind === 'journey') && record.questionRef ? [record.questionRef] : [], sourceRefs: record.kind === 'point' || record.kind === 'relation' || record.kind === 'support' ? record.sourceRefs ?? [] : [] }
 }
 export async function validateCoursePackagePayload(raw: unknown): Promise<CoursePackagePayload> {
-  const input = keys(raw, ['format', 'version', 'exportedAt', 'course', 'records', 'documents', 'missingDocumentIds', 'contentHash'])
+  const input = keys(raw, ['experience', 'format', 'version', 'exportedAt', 'course', 'records', 'documents', 'missingDocumentIds', 'contentHash'])
+  if (input.experience !== undefined && canonicalizeJson(input.experience) !== canonicalizeJson(parseExperience(input.experience))) invalid('学习偏好格式无效。')
   if (input.format !== FORMAT || input.version !== 1 || typeof input.exportedAt !== 'number' || !Number.isSafeInteger(input.exportedAt) || input.exportedAt < 0 || typeof input.contentHash !== 'string') invalid()
   if (new TextEncoder().encode(canonicalizeJson(input)).length > COURSE_PACKAGE_LIMITS.maxPayloadBytes) invalid('课程包超过 128 MB 的校验上限。')
   const course = parseLearningEntity(input.course); if (course.kind !== 'course') invalid()
@@ -94,6 +97,20 @@ export async function validateCoursePackagePayload(raw: unknown): Promise<Course
     const refs = entityReferences(record)
     for (const ref of refs.questionRefs) { const archive = archiveMap.get(ref.archiveId); const artifact = archive?.artifacts.find((a) => a.id === ref.artifactId && a.kind === 'quiz'); if (!artifact || artifact.kind !== 'quiz' || !artifact.payload.questions.some((q) => q.id === ref.questionId)) invalid('课程包题目身份不一致。') }
     for (const ref of refs.sourceRefs) { const source = archiveMap.get(ref.archiveId)?.sources.find((s) => s.id === ref.sourceId); if (!source || ref.end > source.text.length) invalid('课程包原文引用越界或缺失。') }
+    if (record.kind === 'journey') {
+      for (const id of [record.attemptId, record.retryAttemptId]) if (id) {
+        const attempt = ids.get(id)
+        if (attempt?.kind !== 'attempt' || !record.questionRef || !sameQuestion(attempt.question, record.questionRef)) invalid('学习流程的题目与回答身份不一致。')
+        if (id === record.retryAttemptId && (id === record.attemptId || attempt.submittedAt === null || attempt.createdAt < record.createdAt)) invalid('补学重试时间或身份无效。')
+      }
+      if (record.mode === 'reading' && record.source) {
+        const binding = record.source
+        const source = documents.flatMap((item) => item.sources).find((item) => item.id === binding.sourceId)
+        if (source && source.docId !== record.source.docId) invalid('阅读原文不属于指定文档。')
+      }
+      for (const id of [record.parentSessionId, record.originSessionId]) if (id && ids.get(id)?.kind !== 'session') invalid('学习流程来路已缺失。')
+      if (record.questionRef && record.archiveHash !== archiveMap.get(record.questionRef.archiveId)?.contentHash) invalid('补学原题版本不一致。')
+    }
     if (record.kind === 'attempt' || record.kind === 'draft' && record.answer !== null) {
       const artifact = archiveMap.get(record.question.archiveId)?.artifacts.find((a) => a.id === record.question.artifactId && a.kind === 'quiz')
       const question = artifact?.kind === 'quiz' ? artifact.payload.questions.find((q) => q.id === record.question.questionId) : undefined
@@ -157,7 +174,7 @@ export async function exportCoursePackage(courseId: string, options: { password?
     if (await db.learningCourseTombstones.get(courseId)) invalid('课程已删除。')
     const course = await db.learningRecords.get(courseId); if (!course || course.kind !== 'course') invalid('课程不存在。')
     const records = (await db.learningRecords.where('courseId').equals(courseId).toArray()).filter((r) => r.id !== courseId)
-    const docIds = new Set(records.flatMap((r) => r.kind === 'document' || r.kind === 'binding' || r.kind === 'support' ? [r.docId] : []))
+    const docIds = new Set(records.flatMap((r) => r.kind === 'document' || r.kind === 'binding' || r.kind === 'support' ? [r.docId] : r.kind === 'journey' && r.source ? [r.source.docId] : []))
     const documents = []; const missingDocumentIds: string[] = []
     for (const docId of docIds) {
       const row = await db.docs.get(docId); if (!row) { missingDocumentIds.push(docId); continue }
@@ -171,7 +188,7 @@ export async function exportCoursePackage(courseId: string, options: { password?
     for (const row of item.blobs) { const bytes = new Uint8Array(await row.blob.arrayBuffer()); blobs.push({ id: row.id, docId: row.docId, ...(row.nodeId ? { nodeId: row.nodeId } : {}), mime: row.blob.type, data: bytesToBase64(bytes), hash: await hashBytes(bytes), createdAt: row.createdAt }) }
     documents.push({ doc: item.doc, sources: item.sources, blobs, versions: item.versions.map((v) => ({ id: v.id, docId: v.docId, title: v.title, createdAt: v.createdAt, doc: JSON.parse(v.payload) as DocData })) })
   }
-  const payload: CoursePackagePayload = JSON.parse(JSON.stringify({ format: FORMAT, version: 1, exportedAt: Date.now(), course: captured.course, records: captured.records, documents, missingDocumentIds: captured.missingDocumentIds, contentHash: '' })) as CoursePackagePayload
+  const payload: CoursePackagePayload = JSON.parse(JSON.stringify({ format: FORMAT, version: 1, exportedAt: Date.now(), experience: useExperience.getState().preferences, course: captured.course, records: captured.records, documents, missingDocumentIds: captured.missingDocumentIds, contentHash: '' })) as CoursePackagePayload
   payload.contentHash = await sha256Hex(canonicalizeJson(payloadForHash(payload))); await validateCoursePackagePayload(payload)
   if (!options.password) return new Blob([JSON.stringify(payload)], { type: 'application/vnd.maosizhi.course+json' })
   const salt = crypto.getRandomValues(new Uint8Array(16)); const iv = crypto.getRandomValues(new Uint8Array(12)); const key = await passwordKey(options.password, salt)
@@ -204,8 +221,13 @@ export async function previewCoursePackage(file: Blob, options: { password?: str
   return { courseName: payload.course.name, exportedAt: payload.exportedAt, counts: { documents: payload.documents.length, sources: payload.documents.reduce((n, d) => n + d.sources.length, 0), blobs: payload.documents.reduce((n, d) => n + d.blobs.length, 0), archives: payload.records.filter((r) => r.kind === 'archive').length, attempts: payload.records.filter((r) => r.kind === 'attempt').length, schedules: payload.records.filter((r) => r.kind === 'schedule').length, records: payload.records.length }, warnings, payload }
 }
 /** New local identities, preserved historical provenance. No analysis task/run is reinstated. */
-export async function restoreCoursePackage(preview: CoursePackagePreview, options: { name?: string } = {}): Promise<Course> {
+export async function restoreCoursePackage(preview: CoursePackagePreview, options: { name?: string; restoreExperience?: boolean } = {}): Promise<Course> {
   const payload = await validateCoursePackagePayload(preview.payload)
+  const disabledReading = new Set<string>()
+  for (const record of payload.records) if (record.kind === 'journey' && record.mode === 'reading') {
+    const source = payload.documents.find((item) => item.doc.id === record.source?.docId)?.sources.find((item) => item.id === record.source?.sourceId)
+    if (!source || await sha256Hex(source.text) !== record.source?.sourceHash || record.position > source.text.length || !payload.records.some((item) => item.kind === 'document' && item.docId === record.source?.docId)) disabledReading.add(record.id)
+  }
   const courseId = newLearningId(); const idMap = new Map(payload.records.map((r) => [r.id, newLearningId()])); idMap.set(payload.course.id, courseId)
   // Removed self-relations still exist in undo snapshots and need fresh local identities too.
   for (const record of payload.records) if (record.kind === 'merge') for (const id of [...record.beforeRelations?.map((r) => r.id) ?? [], ...Object.keys(record.afterRelationRevisions ?? {})]) if (!idMap.has(id)) idMap.set(id, newLearningId())
@@ -252,6 +274,15 @@ export async function restoreCoursePackage(preview: CoursePackagePreview, option
     if (r.kind === 'assessment') { r.attemptId = localId(r.attemptId); if (r.feedbackArchiveId) r.feedbackArchiveId = localId(r.feedbackArchiveId) }
     if (r.kind === 'attempt' && r.sessionId) r.sessionId = localId(r.sessionId)
     if (r.kind === 'draft') r.attemptId = localId(r.attemptId) === r.attemptId ? newLearningId() : localId(r.attemptId)
+    if (r.kind === 'journey') {
+      if (r.questionRef) r.questionRef.archiveId = localId(r.questionRef.archiveId)
+      for (const key of ['attemptId', 'retryAttemptId', 'parentSessionId', 'originSessionId'] as const) { const value = r[key]; if (value) r[key] = localId(value) }
+      if (r.source) {
+        const old = r.source; const docId = docMap.get(old.docId); const sourceId = sourceMaps.get(old.docId)?.get(old.sourceId)
+        if (docId && sourceId && !disabledReading.has(input.id)) r.source = { ...old, docId, sourceId }
+        else { delete r.source; r.blockedReason = '阅读原文未包含在课程包中，笔记保留，请重新选择资料。'; r.status = 'paused'; delete r.dueDate }
+      }
+    }
     if (r.kind === 'support') { r.docId = docMap.get(r.docId) ?? r.docId; r.pointIds = r.pointIds.map(localId); r.sourceRefs.forEach((ref) => ref.archiveId = localId(ref.archiveId)); if (r.questionRef) r.questionRef.archiveId = localId(r.questionRef.archiveId); if (r.attemptId) r.attemptId = localId(r.attemptId); if (r.sessionId) r.sessionId = localId(r.sessionId); if (r.generatedArchiveId) r.generatedArchiveId = localId(r.generatedArchiveId) }
     if (r.kind === 'schedule' && r.lastAttemptId) r.lastAttemptId = localId(r.lastAttemptId)
     if (r.kind === 'relation' || r.kind === 'merge') { r.fromPointId = localId(r.fromPointId); r.toPointId = localId(r.toPointId) }
@@ -295,5 +326,6 @@ export async function restoreCoursePackage(preview: CoursePackagePreview, option
     }
     if (blobs.length) await db.blobs.bulkAdd(blobs)
   })
+  if (options.restoreExperience && payload.experience) saveExperience(payload.experience)
   return course
 }

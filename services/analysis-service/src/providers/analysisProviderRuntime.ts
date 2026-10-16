@@ -75,6 +75,7 @@ export const createAnalysisProviderRuntime = (options: {
       repair: { promptId: repair.id, route: route(reference ? ARTIFACT_SOURCE_REFERENCE_REPAIR_VERSION : REPAIR_PROMPT_VERSION) },
       now: options.now, maxOutputTokens: provider.capabilities.maxOutputTokens })
     const worker = new ArtifactDagWorker({ ...options, generator,
+      concurrency: options.expectedPersonalProfileId === undefined ? undefined : 2,
       canProcessRun: (run) => canProcessRun(run) && persistedArtifactProtocol(run, options.artifactProtocol) === protocol })
     return { coordinator, generator, worker }
   }
@@ -123,6 +124,7 @@ export const createAnalysisProviderRuntime = (options: {
   const evidenceWorkers = new Map([evidenceGenerator, sourceRefEvidenceGenerator, quoteEvidenceGenerator, legacyEvidenceGenerator].map((generator) => [
     generator.route.promptVersion,
     new EvidencePipelineWorker({ ...options, generator,
+      maxConcurrency: options.expectedPersonalProfileId === undefined ? undefined : 2,
       canProcessRun: (run) => canProcessRun(run) && persistedArtifactProtocol(run, options.artifactProtocol) !== undefined
         && persistedEvidenceVersion(run) === generator.route.promptVersion }),
   ]))

@@ -21,12 +21,12 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 /** Mounted with key=docId. Results cannot leak across document tabs. */
-export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings }: { docId: string; onClose: () => void; onOpenSettings?: () => void }) {
+export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings, learningPreparation = false }: { docId: string; onClose: () => void; onOpenSettings?: () => void; learningPreparation?: boolean }) {
   const [controller] = useState(() => new AnalysisTaskController(docId, new HttpAnalysisEngineClient(), analysisTaskRepository))
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
   const [selected, setSelected] = useState<string[]>()
   const [rangeInputs, setRangeInputs] = useState<Record<string, { start: string; end: string }>>({})
-  const [kinds, setKinds] = useState<ArtifactKind[]>(['summary', 'outline'])
+  const [kinds, setKinds] = useState<ArtifactKind[]>(learningPreparation ? ['mindmap', 'quiz'] : ['summary', 'outline'])
   const [quizQuestionCount, setQuizQuestionCount] = useState<number>(5)
   const [citationView, setCitationView] = useState<CitationView>()
   const [citationError, setCitationError] = useState('')
@@ -147,14 +147,15 @@ export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings }:
           const source = state.sources.find((s) => s.id === snapshot.sourceId)
           return `${source?.name ?? snapshot.sourceId}（${snapshot.selectedRange ? `${snapshot.selectedRange.start}–${snapshot.selectedRange.end}` : '全文'}）`
         }).join('、')}</p>
-        {state.usage && <p className="analysis-usage">已知使用量：输入 {state.usage.usage.inputTokens} / 输出 {state.usage.usage.outputTokens} tokens · {pricingUnknown ? '费用以服务商账单为准。' : <>费用估算 {(state.usage.usage.estimatedCostMicros / 1_000_000).toFixed(6)} {state.usage.usage.currency}（非实际账单）。</>}{state.usage.unresolvedCount > 0 && <> {state.usage.unresolvedCount} 次调用结果未确认。不会自动再次调用，以免重复消耗额度。</>}</p>}
+        {state.usage && <p className="analysis-usage">{state.usage.unresolvedCount > 0 ? '已确认部分用量（不含未确认调用）' : '已知使用量'}：输入 {state.usage.usage.inputTokens} / 输出 {state.usage.usage.outputTokens} tokens · {pricingUnknown ? '费用以服务商账单为准。' : <>费用估算 {(state.usage.usage.estimatedCostMicros / 1_000_000).toFixed(6)} {state.usage.usage.currency}（非实际账单）。</>}{state.usage.unresolvedCount > 0 && <> {state.usage.unresolvedCount} 次调用结果未确认。不会自动再次调用，以免重复消耗额度。</>}</p>}
         {state.usageError && <p role="alert">使用量暂未读到：{state.usageError} 请恢复查看。</p>}
+        {(!run || run.status === 'receiving') && <p>本次打开只读取已有任务。继续提交会上传尚未完成的原文并开始生成，请确认后再操作。</p>}
         <div className="analysis-actions">
-          <button className="tbtn" disabled={blocked} onClick={() => void controller.resume()}>恢复查看</button>
+          <button className="tbtn" disabled={blocked} onClick={() => void controller.resume()}>{!run || run.status === 'receiving' ? '继续提交并生成（使用模型额度）' : '恢复查看'}</button>
           {run && !isAnalysisTerminal(run) && <button className="tbtn" disabled={blocked || capabilities?.supportsCancellation === false} onClick={() => void controller.cancel()}>取消任务</button>}
           <button className="tbtn" disabled={blocked} onClick={() => setDeleteConfirm(true)}>删除分析内容</button>
           <button className="tbtn" disabled={blocked} onClick={() => void controller.forgetExpired()}>清除过期关联</button>
-          {run?.error && <button className="tbtn" onClick={downloadDiagnostic}>下载诊断信息</button>}
+          {run && <button className="tbtn" onClick={downloadDiagnostic}>下载诊断信息</button>}
         </div>
         {deleteConfirm && <div className="analysis-notice" role="group" aria-label="确认删除分析内容"><p>{state.task.runId ? '删除服务端原文副本、证据和结果，并清除本地任务关联；导入文档仍保留。' : '持久放弃这次尚未确认的创建，阻止迟到请求创建任务，确认后清除本地关联。'}</p><button className="tbtn" disabled={blocked} onClick={() => { citationGeneration.current++; setCitationView(undefined); setCitationError(''); setDeleteConfirm(false); void controller.deleteContent() }}>确认删除</button><button className="tbtn" onClick={() => setDeleteConfirm(false)}>保留内容</button></div>}
       </section>}

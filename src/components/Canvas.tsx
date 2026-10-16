@@ -466,6 +466,12 @@ export default function Canvas({ query }: { query: string }) {
   useEffect(() => {
     viewRef.current = view
   }, [view])
+  useEffect(() => {
+    const capture = (event: Event) => { const read = (event as CustomEvent<(value: View) => void>).detail; if (typeof read === 'function') read({ ...viewRef.current }) }
+    const restore = (event: Event) => { const value = (event as CustomEvent<View>).detail; if (value && [value.tx, value.ty, value.k].every(Number.isFinite) && value.k >= .15 && value.k <= 3) setView(value) }
+    window.addEventListener('msz:capture-learning-viewport', capture); window.addEventListener('msz:restore-learning-viewport', restore)
+    return () => { window.removeEventListener('msz:capture-learning-viewport', capture); window.removeEventListener('msz:restore-learning-viewport', restore) }
+  }, [])
   const hoverRef = useRef<string | null>(null)
   const [hover, setHover] = useState<string | null>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
@@ -482,14 +488,17 @@ export default function Canvas({ query }: { query: string }) {
     return () => ro.disconnect()
   }, [])
 
-  /* 组件存活标记：拖拽进行中若切视图/卸载，命令式 window 监听据此自我清理（修 F-8） */
+  /* 组件存活标记：拖拽进行中若切视图/卸载，命令式 window 监听据此自我清理（修 F-8）。
+     setup 必须显式复位为 true：React StrictMode（dev）下 effect 会
+     setup→cleanup→setup，若只在 cleanup 置 false，标记会永久为 false，
+     导致拖拽监听第一次 pointermove 就自我移除（画布平移/节点拖动失效）。 */
   const aliveRef = useRef(true)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
       aliveRef.current = false
-    },
-    [],
-  )
+    }
+  }, [])
 
   const matches = useMemo(() => {
     const set = new Set<string>()
@@ -733,7 +742,10 @@ export default function Canvas({ query }: { query: string }) {
   const startPan = useCallback((e: React.PointerEvent) => {
     if (useSettings.getState().presenting) return
     const target = e.target as Element
-    if (!target.hasAttribute('data-bg') && e.button !== 1) return
+    // data-bg 网格矩形之外的 SVG 空白（背景矩形只有 10 万世界单位，极端平移后会露出）
+    // 同样允许起拖；节点/折叠徽标已在各自处理器 stopPropagation，不会到达这里。
+    const onBackground = target.hasAttribute('data-bg') || target.tagName.toLowerCase() === 'svg'
+    if (!onBackground && e.button !== 1) return
     if (e.button !== 0 && e.button !== 1) return
     e.preventDefault()
     const sx = e.clientX

@@ -149,6 +149,29 @@ const worker = (
 })
 
 describe('evidence pipeline worker', () => {
+  it('caps in-flight map calls while completing every original chunk', async () => {
+    const store = new InMemoryJobStore()
+    const { service, runId } = await prepareRun(store, 'tenant-limited')
+    const fixture = new FixtureGenerator()
+    let active = 0
+    let peak = 0
+    const generator: EvidenceGenerator = { route: fixture.route, async map(input, signal) {
+      active++
+      peak = Math.max(peak, active)
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5))
+        return await fixture.map(input, signal)
+      } finally { active-- }
+    } }
+    const result = await worker(store, generator, service.broker, { maxConcurrency: 2 }).runOnce('tenant-limited', runId, 'worker', new AbortController().signal)
+    expect(result.outcome).toBe('completed')
+    expect(peak).toBe(2)
+    expect(fixture.calls.length).toBeGreaterThan(2)
+    expect(result.run.coverage.chunksCompleted).toBe(fixture.calls.length)
+    expect(new Set(fixture.calls.map((call) => call.chunk.chunkId)).size).toBe(fixture.calls.length)
+    expect(() => worker(store, generator, service.broker, { maxConcurrency: 0 })).toThrow(RangeError)
+  })
+
   it('keeps identical text at distinct offsets separate and bounds merged citations in long repeated input', async () => {
     const store = new InMemoryJobStore()
     const synthetic = 'Repeated synthetic evidence. '.repeat(140)

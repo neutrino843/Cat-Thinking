@@ -18,7 +18,7 @@ function buildCmds(): Cmd[] {
   const s = () => useSettings.getState()
   return [
     { id: 'learning-open', label: '打开今日学习与课程工作台', run: () => window.dispatchEvent(new CustomEvent('msz:learning-open')) },
-    { id: 'tutorial-open', label: '打开最新版使用教程', run: requestLatestTutorial },
+    { id: 'tutorial-open', label: '打开最新版使用教程', run: () => requestLatestTutorial('editor') },
     {
       id: 'child',
       label: '新建子节点',

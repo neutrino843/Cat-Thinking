@@ -117,4 +117,25 @@ describe('explicit current tutorial', () => {
       expect(isUnmodifiedLatestTutorial(useDoc.getState().doc)).toBe(true)
     } finally { vi.unstubAllGlobals() }
   })
+
+  it('to:home prepares the tutorial and dispatches msz:open-home, returning the tutorial doc', async () => {
+    const homeEvents: string[] = []
+    const onHome = () => homeEvents.push('home')
+    window.addEventListener('msz:open-home', onHome)
+    try {
+      const doc = await openLatestTutorial({ to: 'home' })
+      expect(isUnmodifiedLatestTutorial(doc)).toBe(true)
+      expect(homeEvents).toEqual(['home'])
+      expect(useDoc.getState().doc.id).toBe(doc.id)
+    } finally { window.removeEventListener('msz:open-home', onHome) }
+  })
+
+  it('to:editor (default) opens the tutorial into the active doc and returns it', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
+    try {
+      const doc = await openLatestTutorial({ to: 'editor' })
+      expect(isUnmodifiedLatestTutorial(doc)).toBe(true)
+      expect(useDoc.getState().doc.id).toBe(doc.id)
+    } finally { vi.unstubAllGlobals() }
+  })
 })

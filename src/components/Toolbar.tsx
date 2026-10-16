@@ -111,7 +111,7 @@ export default function Toolbar({ query, setQuery, onAnalysis, onAISettings, onH
       <button className="tbtn" data-learning-trigger onClick={() => window.dispatchEvent(new CustomEvent('msz:learning-open'))}>今日学习</button>
       <button className="tbtn primary" onClick={onAnalysis}>AI 分析</button>
       <button className="tbtn" data-ai-settings-trigger onClick={onAISettings}>AI 设置</button>
-      <button className="tbtn" onClick={requestLatestTutorial} title="打开最新版教程，保留已有文档">使用教程</button>
+      <button className="tbtn" onClick={() => requestLatestTutorial('editor')} title="打开最新版教程，保留已有文档">使用教程</button>
       <input
         className="doc-title"
         value={doc.title}

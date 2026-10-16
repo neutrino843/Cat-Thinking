@@ -7,7 +7,7 @@ import { advanceSession, bindSession, createGuidedSession, resumableSessions, se
 import { buildPersonalPlan, parsePersonalCapacity } from './personalPlan'
 import { loadPersonalCapacity, savePersonalCapacity } from './preferences'
 import { courseGoalCoverage } from './goalCoverage'
-import { prepareLearningSupport, supportGeneration, supportSources } from './learningSupport'
+import { defaultSupportScope, nextHintLevel, prepareLearningSupport, supportGeneration, supportSources } from './learningSupport'
 import { appendAssessment, appendAttempt, createCourse, deleteLearningArchive, deletePracticeHistory, loadCourseSnapshot, saveEntity, updateCourse } from './repository'
 import { learningBase, type CourseSnapshot, type LearningSession, type SupportMode } from './model'
 import { exportCoursePackage, previewCoursePackage, restoreCoursePackage } from './coursePackage'
@@ -160,9 +160,22 @@ describe('V2 scoped AI support, history and portable sessions', () => {
     const data = await setup(); const ref = data.points[0].sourceRefs[0]
     const support = await prepareLearningSupport(data, { mode: 'hint', pointIds: [data.points[0].id], sourceRefs: [{ ...ref, start: 0, end: 10 }], prompt: '帮助理解，不要直接作答', hintLevel: 1 })
     const sources = await storage.db.sources.where('docId').equals(support.docId).toArray(); expect(sources[0].text).toBe(data.archives[0].sources[0].text.slice(0, 10)); expect(sources[0].id).not.toBe(ref.sourceId)
-    for (const mode of ['explain', 'compare', 'hint', 'feedback', 'goals', 'variation', 'supplement'] as SupportMode[]) expect(supportGeneration({ ...support, mode, learnerAnswer: '我的解释', quizType: 'short-answer', difficulty: 'hard', hintLevel: 3 }).options.learningSupport?.mode).toBe(mode)
+    for (const mode of ['explain', 'compare', 'hint', 'feedback', 'goals', 'variation', 'supplement'] as SupportMode[]) {
+      const request = supportGeneration({ ...support, mode, learnerAnswer: '我的解释', quizType: 'short-answer', difficulty: 'hard', hintLevel: 3 }).options.learningSupport
+      expect(request?.mode).toBe(mode)
+      expect(request?.hintLevel).toBe(mode === 'hint' ? 3 : undefined)
+      expect(request?.learnerAnswer).toBe(mode === 'hint' || mode === 'feedback' ? '我的解释' : undefined)
+      expect(request?.quizType).toBe(mode === 'variation' ? 'short-answer' : undefined)
+    }
     expect(supportGeneration({ ...support, mode: 'variation' }).kinds).toEqual(['quiz']); expect(supportGeneration({ ...support, mode: 'goals' }).kinds).toEqual(['outline'])
     expect(supportSources(data, data.points.map((point) => point.id))).toHaveLength(1); expect(supportSources(data, [])).toHaveLength(1)
+    expect(nextHintLevel([{ ...support, status: 'viewed' }, { ...support, id: 'hint-two', status: 'accepted', hintLevel: 2 }], support.pointIds)).toBe(3)
+    expect(nextHintLevel([{ ...support, status: 'prepared' }], support.pointIds)).toBe(1)
+    const large = structuredClone(data); large.archives[0].sources[0].text = '字'.repeat(30_000)
+    const scope = defaultSupportScope(large, [{ ...ref, end: 30_000 }]); expect(scope.characters).toBe(24_000); expect(scope.ranges[0]).toEqual({ start: ref.start, end: ref.start + 24_000 })
+    const reloaded = await loadCourseSnapshot(data.course.id); const before = await storage.db.docs.count()
+    const duplicate = await prepareLearningSupport(reloaded, { mode: 'hint', pointIds: [data.points[0].id], sourceRefs: [{ ...ref, start: 0, end: 10 }], prompt: '帮助理解，不要直接作答', hintLevel: 1 })
+    expect(duplicate.id).toBe(support.id); expect(await storage.db.docs.count()).toBe(before)
   })
   it('rejects invalid or excessive scopes and rolls back a failed support registration', async () => {
     const data = await setup(); const input = { mode: 'explain' as const, pointIds: [data.points[0].id], sourceRefs: data.points[0].sourceRefs, prompt: '解释' }
@@ -171,6 +184,10 @@ describe('V2 scoped AI support, history and portable sessions', () => {
     for (const ref of [{ ...input.sourceRefs[0], start: -1 }, { ...input.sourceRefs[0], end: 99999 }, { ...input.sourceRefs[0], sourceId: 'missing' }]) await expect(prepareLearningSupport(data, { ...input, sourceRefs: [ref] })).rejects.toThrow(/范围/)
     const large = structuredClone(data); large.archives[0].sources[0].text = '字'.repeat(24001)
     await expect(prepareLearningSupport(large, { ...input, sourceRefs: [{ ...input.sourceRefs[0], end: 24001 }] })).rejects.toThrow(/24,000/)
+    await expect(prepareLearningSupport(data, { ...input, mode: 'hint' })).rejects.toThrow(/提示层级/)
+    await expect(prepareLearningSupport(data, { ...input, mode: 'feedback' })).rejects.toThrow(/自己的解释/)
+    await expect(prepareLearningSupport(data, { ...input, hintLevel: 1 })).rejects.toThrow(/提示层级/)
+    await expect(prepareLearningSupport(data, { ...input, mode: 'variation', quizType: 'mixed' })).rejects.toThrow(/难度/)
     const before = await storage.db.docs.count(); store.failWritesTo('learningRecords'); await expect(prepareLearningSupport(data, input)).rejects.toThrow(); expect(await storage.db.docs.count()).toBe(before)
   })
   it('restores goals, checkpoints, guided attempts and support identities without model jobs', async () => {

@@ -8,6 +8,17 @@ const error = (patch: Partial<AnalysisErrorV1>) => analysisErrorSchema.parse({
 })
 
 describe('failed analysis presentation', () => {
+  it('explains the recorded timeout even when its contract code is provider_unavailable', () => {
+    const message = analysisFailureMessage(error({ code: 'provider_unavailable', details: {
+      reason: 'invocation_outcome_unknown', providerCode: 'request_timeout', rawResponse: 'private-secret',
+    } }))
+    expect(message).toContain('等待模型响应超时')
+    expect(message).toContain('本次任务已停止')
+    expect(message).toContain('实际用量尚未确认')
+    expect(message).toContain('不会自动重发')
+    expect(message).not.toContain('private-secret')
+  })
+
   it('explains the real mapping citation failure without blaming a valid source range', () => {
     const message = analysisFailureMessage(error({ code: 'citation_invalid', category: 'validation', stage: 'mapping', details: { issueCount: 58 } }))
     expect(message).toContain('模型返回的引文')

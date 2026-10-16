@@ -37,6 +37,27 @@ async function changeSource(page: Page, remove = false) {
 }
 test.afterEach(async ({ request }) => { await control(request, true) })
 
+test('进度流提前结束时自动查询完成状态，刷新与恢复不增加调用', async ({ page, request }) => {
+  await importAndOpen(page)
+  await page.route('**/api/analysis/v1/runs/*/events', (route) => route.fulfill({
+    status: 200, contentType: 'text/event-stream', body: ': disconnected stream\n\n',
+  }))
+  await panel(page).getByRole('button', { name: '生成摘要与大纲' }).click()
+  await expect(panel(page)).toContainText('任务：分析完成', { timeout: 20_000 })
+  await expect(panel(page).getByRole('region', { name: '摘要结果' })).toContainText('合成摘要：')
+  await expect(panel(page).getByRole('region', { name: '大纲结果' })).toContainText('能量转换')
+  await expect(panel(page).locator('.analysis-error')).toHaveCount(0)
+  const task = await binding(page)
+  const readUsage = async () => (await (await request.get(`/api/analysis/v1/runs/${task?.runId}/usage`)).json()).invocationCount
+  expect(await readUsage()).toBe(3)
+  await panel(page).getByRole('button', { name: '恢复查看' }).click()
+  await page.reload(); await waitForApp(page)
+  await page.getByRole('button', { name: 'AI 分析', exact: true }).click()
+  await expect(panel(page)).toContainText('任务：分析完成')
+  expect(await readUsage()).toBe(3)
+})
+
+
 test('加载中的原生模态保持键盘隔离，关闭后迟到模块不会重新打开', async ({ page }) => {
   await resetStore(page); await waitForApp(page)
   const nodes = await page.locator('svg g[role=button]').count()

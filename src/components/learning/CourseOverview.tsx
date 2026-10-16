@@ -13,7 +13,7 @@ import LearningSupportPanel from './LearningSupportPanel'
 import { prepareFreshAnalysis } from '../../learning/freshAnalysis'
 
 export type LearningAction = (operation: () => Promise<unknown>) => Promise<void>
-export default function CourseOverview({ snapshot, action, busy, onDeleted }: { snapshot: CourseSnapshot; action: LearningAction; busy: boolean; onDeleted: () => void }) {
+export default function CourseOverview({ snapshot, action, busy, onDeleted, onPrepare }: { snapshot: CourseSnapshot; action: LearningAction; busy: boolean; onDeleted: () => void; onPrepare?: (docId: string, archiveId?: string) => void }) {
   const course = snapshot.course
   const now = useLearningClock()
   const [goal, setGoal] = useState(course.goal)
@@ -54,14 +54,14 @@ export default function CourseOverview({ snapshot, action, busy, onDeleted }: { 
     <ul className="learning-list">{snapshot.documents.map((record) => { const doc = snapshot.docs.find((item) => item.id === record.docId); return <li key={record.id}>
       <strong>{doc?.title ?? '原文档已删除'}</strong><span>{record.chapter || '暂存区'}</span><div className="learning-actions">
         <label>资料角色<select value={record.role ?? 'notes'} disabled={busy} onChange={(event) => void action(() => saveEntity({ ...record, role: event.target.value as 'syllabus' | 'slides' | 'textbook' | 'notes' }, record.revision))}><option value="syllabus">教学大纲</option><option value="slides">教师课件</option><option value="textbook">教材</option><option value="notes">个人笔记</option></select></label>
-        <button className="tbtn" disabled={!doc || busy} onClick={() => void openDocById(record.docId)}>打开编辑文档</button>
+        <button className="tbtn primary" disabled={busy} onClick={() => onPrepare?.(record.docId)}>从这份资料继续学习</button><button className="tbtn" disabled={!doc || busy} onClick={() => void openDocById(record.docId)}>打开编辑文档</button>
         <button className="tbtn" disabled={busy} onClick={() => void action(() => detachDocument(course.id, record.docId))}>移出课程</button>
         {doc && <button className="tbtn" onClick={async () => { await openDocById(record.docId); window.dispatchEvent(new Event('msz:learning-close-for-analysis')) }}>打开 AI 分析</button>}
         {doc && <button className="tbtn" disabled={busy} onClick={() => void action(async () => { const fresh = await prepareFreshAnalysis(course.id, record.docId, record.chapter); await openDocById(fresh.id); window.dispatchEvent(new Event('msz:learning-close-for-analysis')) })}>新分析，保留旧记录</button>}
       </div></li> })}</ul>
     {!snapshot.documents.length && <p>尚无资料。可以先返回编辑器导入文档，再加入课程。</p>}
     <h4>已保存学习资料</h4><p>无题目或需要补充范围时，先打开课程文档的 AI 分析，重新选择来源与内容后明确发起新分析；已有归档保留。查看覆盖、排期和练习均不发起生成。</p>
-    <ul className="learning-list">{snapshot.archives.map((a) => <li key={a.id}><strong>{a.title}</strong><span>{a.sources.length} 份来源 · {a.artifacts.map((r) => ({ summary: '摘要', outline: '大纲', mindmap: '导图', quiz: '测验', knowledge: '知识整理' })[r.kind]).join('、')}</span><small>保存于 {new Date(a.createdAt).toLocaleString('zh-CN')}。按保存时的原文版本回查。</small>
+    <ul className="learning-list">{snapshot.archives.map((a) => <li key={a.id}><strong>{a.title}</strong><span>{a.sources.length} 份来源 · {a.artifacts.map((r) => ({ summary: '摘要', outline: '大纲', mindmap: '导图', quiz: '测验', knowledge: '知识整理' })[r.kind]).join('、')}</span><button className="tbtn" disabled={busy} onClick={() => onPrepare?.(a.originDocId, a.id)}>核对并继续这份结果</button><small>保存于 {new Date(a.createdAt).toLocaleString('zh-CN')}。按保存时的原文版本回查。</small>
       <ArchiveDetails archive={a} /><button className="tbtn" disabled={busy} onClick={() => setDeleteArchiveId(a.id)}>删除这份学习归档</button>
       {deleteArchiveId === a.id && <div className="learning-danger"><p>将删除这份归档的原文副本、生成内容，以及它关联的 {snapshot.attempts.filter((r) => r.question.archiveId === a.id).length} 次作答、草稿、疑问和复习安排。来源知识点会停用并清除生成内容；个人补充保留。原编辑文档与其他归档保留。</p><button className="tbtn" disabled={busy} onClick={() => void action(async () => { await deleteLearningArchive(course.id, a.id, a.revision); setDeleteArchiveId('') })}>确认删除这份归档及关联记录</button><button className="tbtn" onClick={() => setDeleteArchiveId('')}>取消</button></div>}
     </li>)}</ul>

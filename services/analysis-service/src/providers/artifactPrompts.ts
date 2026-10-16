@@ -45,7 +45,9 @@ export function learningSupportGuidance(input: ArtifactGenerationInput): string 
   const guidance = {
     explain: 'Respond to the learner question using selected evidence, preserving conditions and limits. Ask a useful follow-up when the question is ambiguous.',
     compare: 'Compare source-supported similarities and differences; identify information absent from the selected sources.',
-    hint: support.hintLevel === 3 ? 'Give a complete source-grounded explanation at the learner request.' : support.hintLevel === 2 ? 'Give a reasoning step or a targeted question, without the final answer.' : 'Identify the key concept and ask a guiding question, without a final answer or worked solution.',
+    hint: support.hintLevel === 3 ? 'Give a complete source-grounded explanation, then ask one short retrieval question that can be answered without reopening the explanation.'
+      : support.hintLevel === 2 ? 'Use learnerAnswer when present to identify the next missing reasoning step. Give that step and one targeted question, without the final answer.'
+        : 'Use learnerAnswer when present to locate the block. Name one key concept or prerequisite and ask one guiding question, without a final answer or worked solution.',
     feedback: 'Review learnerAnswer as learner content, not evidence. Describe supported, missing and uncertain points. Never award a numeric score or declare mastery. Accept equivalent wording. Only explicit question requirements may be mandatory; extensions are optional.',
     goals: 'Create an outline of candidate objectives supported by selected material. They are suggestions, not authoritative syllabus or exam priorities; the learner must confirm scope.',
     variation: 'Generate variant questions for the explicit target. Change context only where sources support it. Respect requested quizType and difficulty. Do not predict exam questions.',

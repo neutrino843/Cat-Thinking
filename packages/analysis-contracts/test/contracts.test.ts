@@ -4,6 +4,7 @@ import invalidCycleFixture from '../fixtures/mindmap-artifact.cycle.invalid.json
 import invalidQuizFixture from '../fixtures/quiz-artifact.invalid.json'
 import validSummaryFixture from '../fixtures/summary-artifact.valid.json'
 import {
+  analysisOptionsSchema,
   analysisRequestSchema,
   artifactEnvelopeSchema,
   artifactReadyEventSchema,
@@ -111,6 +112,38 @@ describe('analysis contract fixtures', () => {
 
     expect(valid.success).toBe(true)
     expect(invalid.success).toBe(false)
+  })
+})
+
+describe('learning support option field combinations', () => {
+  const options = validRequestFixture.options
+  const parse = (learningSupport: unknown) => analysisOptionsSchema.safeParse({ ...options, learningSupport })
+
+  it('accepts mode-consistent field combinations', () => {
+    expect(parse({ mode: 'hint', question: '问题', hintLevel: 1 }).success).toBe(true)
+    expect(parse({ mode: 'hint', question: '问题', hintLevel: 3, learnerAnswer: '我已想到的' }).success).toBe(true)
+    expect(parse({ mode: 'feedback', question: '问题', learnerAnswer: '我的解释' }).success).toBe(true)
+    expect(parse({ mode: 'variation', question: '问题', quizType: 'mixed', difficulty: 'medium' }).success).toBe(true)
+    for (const mode of ['explain', 'compare', 'goals', 'supplement']) expect(parse({ mode, question: '问题' }).success).toBe(true)
+  })
+
+  it('rejects missing required fields per mode', () => {
+    expect(parse({ mode: 'hint', question: '问题' }).success).toBe(false)
+    expect(parse({ mode: 'feedback', question: '问题' }).success).toBe(false)
+    expect(parse({ mode: 'feedback', question: '问题', learnerAnswer: '   ' }).success).toBe(false)
+    expect(parse({ mode: 'variation', question: '问题' }).success).toBe(false)
+    expect(parse({ mode: 'variation', question: '问题', quizType: 'mixed' }).success).toBe(false)
+    expect(parse({ mode: 'variation', question: '问题', difficulty: 'easy' }).success).toBe(false)
+  })
+
+  it('rejects mode-exclusive fields on other modes', () => {
+    expect(parse({ mode: 'explain', question: '问题', hintLevel: 1 }).success).toBe(false)
+    expect(parse({ mode: 'variation', question: '问题', quizType: 'mixed', difficulty: 'easy', hintLevel: 2 }).success).toBe(false)
+    expect(parse({ mode: 'explain', question: '问题', learnerAnswer: '答案' }).success).toBe(false)
+    expect(parse({ mode: 'goals', question: '问题', learnerAnswer: '答案' }).success).toBe(false)
+    expect(parse({ mode: 'explain', question: '问题', quizType: 'mixed' }).success).toBe(false)
+    expect(parse({ mode: 'explain', question: '问题', difficulty: 'hard' }).success).toBe(false)
+    expect(parse({ mode: 'feedback', question: '问题', learnerAnswer: '我的解释', quizType: 'mixed' }).success).toBe(false)
   })
 })
 

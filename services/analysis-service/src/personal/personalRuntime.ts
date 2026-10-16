@@ -216,7 +216,7 @@ export class PersonalAnalysisRuntime {
     })
     this.dispatcher = new PersistentDispatcher({ store: this.runStore, evidence: boundWorker(runtime.evidence), artifacts: boundWorker(runtime.artifacts),
       cleanupExpired: () => this.runService.cleanupExpired(this.options.config.cleanupBatchSize),
-      leaseMs: this.options.config.leaseMs, pollMs: this.options.config.ssePollMs, maxRunMs: 15 * 60_000, concurrency: 1,
+      leaseMs: this.options.config.leaseMs, pollMs: this.options.config.ssePollMs, maxRunMs: 30 * 60_000, concurrency: 1,
       canDispatch: () => this.canInvoke(snapshot.id), onError: this.options.onError })
     await this.dispatcher.start()
   }

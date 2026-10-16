@@ -4,10 +4,11 @@ import { learningBase, newLearningId } from '../../learning/model'
 import { saveEntity, commitGraphChanges } from '../../learning/repository'
 import { findKnowledgeCandidates, buildLearningPath, addConfirmedPrerequisite, mergeKnowledgePoints, undoKnowledgeMerge, resolveKnowledgePointId, questionRefKey } from '../../learning/knowledgeGraph'
 import { buildKnowledgeCoverage } from '../../learning/coverageView'
-import { sourceExcerpt, sameQuestion, archivedQuestions } from '../../learning/workspaceView'
+import { sourceExcerpt, sameQuestion, archivedQuestions, visibleQuestions } from '../../learning/workspaceView'
+import { useExperience } from '../../learning/experiencePreferences'
+import { StudyModeChoice } from './ExperienceSettings'
 import type { LearningAction } from './CourseOverview'
-import SessionLearning from './SessionLearning'
-import { createGuidedSession } from '../../learning/session'
+import { createFocusedSession as createGuidedSession, sessionStepIndex, STEP_LABELS } from '../../learning/session'
 import LearningSupportPanel from './LearningSupportPanel'
 
 const COVERAGE = { 'no-questions': '尚无题目', 'recall-only': '目前只有记忆练习', 'has-explanation': '有解释练习', 'has-application': '有应用任务' }
@@ -62,9 +63,10 @@ function ApplicationEditor({ task, action, busy }: { task: ApplicationTask; acti
     <button className="tbtn" disabled={busy}>保存应用任务</button><p>自评完成不表示迁移能力已达标；实验与重要结论仍需要实际执行或他人核对。</p></form>
 }
 
-export default function KnowledgeWorkspace({ snapshot, selectedPointId, selectedSessionId, onSelectPoint, onPractice, action, busy, applicationOnly = false }: {
-  snapshot: CourseSnapshot; selectedPointId: string; selectedSessionId?: string; onSelectPoint: (id: string) => void; onPractice: (pointId: string) => void; action: LearningAction; busy: boolean; applicationOnly?: boolean
+export default function KnowledgeWorkspace({ snapshot, selectedPointId, selectedSessionId, onSelectPoint, onPractice, action, busy, applicationOnly = false, onStartImmersive }: {
+  snapshot: CourseSnapshot; selectedPointId: string; selectedSessionId?: string; onSelectPoint: (id: string) => void; onPractice: (pointId: string) => void; action: LearningAction; busy: boolean; applicationOnly?: boolean; onStartImmersive: (sessionId: string) => void
 }) {
+  const studyMode = useExperience((state) => state.preferences.study)
   const [newTitle, setNewTitle] = useState('')
   const [query, setQuery] = useState('')
   const [prerequisite, setPrerequisite] = useState('')
@@ -94,11 +96,27 @@ export default function KnowledgeWorkspace({ snapshot, selectedPointId, selected
       {!snapshot.points.length && <p>还没有知识点。可以手工创建，或从 AI 分析保存学习资料。</p>}</aside>
       {point && <div className="learning-detail">
         <h4>{point.title}</h4><p>{point.status === 'pending' ? '资料关联待你确认。' : '知识点身份已确认。'} {COVERAGE[observations.get(point.id)?.coverageStatus ?? 'no-questions']}</p>
-        {!applicationOnly && <><div className="learning-actions"><button className="tbtn primary" onClick={() => onPractice(point.id)}>练这个知识点</button>
-          <button className="tbtn" disabled={busy || !!session || point.status !== 'active'} onClick={() => void action(() => saveEntity(createGuidedSession(snapshot, [point]), null))}>开始引导学习</button></div>
-          {session && <SessionLearning key={session.id} session={session} snapshot={snapshot} action={action} busy={busy} />}
+        {!applicationOnly && <><StudyModeChoice/><div className="learning-actions"><button className="tbtn primary" onClick={() => onPractice(point.id)}>练这个知识点</button>
+          <button className="tbtn" disabled={busy || !!session || point.status !== 'active'} onClick={() => void action(async () => {
+            if (studyMode === 'practice' && visibleQuestions(snapshot, point.id).length) { onPractice(point.id); return }
+            const candidate = createGuidedSession(snapshot, [point])
+            if (!visibleQuestions(snapshot, point.id).length) candidate.steps = candidate.steps.filter((step) => step.action !== 'practice')
+            const created = await saveEntity(candidate, null)
+            onStartImmersive(created.id)
+          })}>{studyMode === 'practice' ? '开始本轮学习' : '开始引导学习'}</button></div>
+          {studyMode === 'practice' && !visibleQuestions(snapshot, point.id).length && <p role="status">当前知识点没有可用题目，可以先阅读或回忆，再到资料中做原文入门练习。不会自动生成或收费。</p>}
+          {session && (() => {
+            const sessionIndex = sessionStepIndex(session)
+            const sessionStep = session.steps[sessionIndex]
+            return <section className="learning-section learning-session-summary" data-session-summary>
+              <h4>学习进行中 · {session.title}</h4>
+              <p>第 {sessionIndex + 1} / {session.steps.length} 步 · {STEP_LABELS[sessionStep.action]}{session.checkpoint?.paused ? ' · 已暂停' : ''}</p>
+              <p>沉浸式学习一次只聚焦一个步骤，文字与会话进度自动保存在本机。</p>
+              <div className="learning-actions"><button type="button" className="tbtn primary" onClick={() => onStartImmersive(session.id)}>进入沉浸式学习</button></div>
+            </section>
+          })()}
           <div hidden={!!session || hiddenPointId === point.id}><PointEditor key={point.id} point={point} snapshot={snapshot} action={action} busy={busy} /></div>
-          <details className="learning-section"><summary>原文依据 {point.sourceRefs.length}</summary>{point.sourceRefs.map((ref, index) => { const archive = snapshot.archives.find((a) => a.id === ref.archiveId); const source = archive && sourceExcerpt(archive, ref.sourceId, ref.start, ref.end); return <div key={index}><strong>{source?.name ?? '原文不可用'}</strong><small>{source?.location}</small><blockquote>{source?.quote}</blockquote></div> })}{!point.sourceRefs.length && <p>这是个人整理，尚无已保存原文依据。</p>}</details>
+          <details className="learning-section"><summary>原文依据 {point.sourceRefs.length}</summary>{point.sourceRefs.map((ref, index) => { const archive = snapshot.archives.find((a) => a.id === ref.archiveId); const source = archive && sourceExcerpt(archive, ref.sourceId, ref.start, ref.end); return <div key={index}><strong>{source?.name ?? '原文不可用'}</strong><small>{source?.location}</small><blockquote>{source?.quote}</blockquote></div> })}{!point.sourceRefs.length && <p>这是个人整理，尚无已保存原文依据。{point.docId && <button className="tbtn" onClick={() => window.dispatchEvent(new CustomEvent('msz:learning-open', { detail: { courseId: snapshot.course.id, documentId: point.docId, view: 'prepare' } }))}>回到这份阅读资料</button>}</p>}</details>
           {observations.get(point.id)?.reasons.map((reason) => <p key={reason}>{reason}</p>)}
           <section className="learning-section"><h4>这个知识点的学习证据</h4><p>资料：{({ valid: '有效', changed: '版本变化', pending: '待确认', missing: '缺少依据' })[observations.get(point.id)?.sourceStatus ?? 'missing']} · 练习：{COVERAGE[observations.get(point.id)?.coverageStatus ?? 'no-questions']} · 观察：{OBSERVATION[observations.get(point.id)?.observation ?? 'unpracticed']}</p><details><summary>查看真实作答依据</summary><ul>{observations.get(point.id)?.evidence.map((evidence) => <li key={evidence.attemptId}>{evidence.learningDate ?? '日期未记录'} · {evidence.questionType === 'short-answer' ? '简答自评' : '客观比较'} · {({ success: '本次符合参考', partial: '部分完成', failure: '需要补学', unanswered: '尚未作答', disputed: '题目待核对', skipped: '已跳过', 'assessment-pending': '等待自评' })[evidence.outcome]} · {evidence.answerRevealed ? '使用过原文、提示或答案辅助' : '未记录答案辅助'}<button className="tbtn" onClick={() => onPractice(point.id)}>回到关联练习</button></li>)}</ul>{!observations.get(point.id)?.evidence.length && <p>尚无作答证据；缺题与不会分别处理。</p>}</details></section>
           <LearningSupportPanel key={point.id} snapshot={snapshot} pointIds={[point.id]} action={action} busy={busy} sessionId={session?.id} />

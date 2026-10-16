@@ -17,7 +17,14 @@ async function setup() {
 describe('source-grounded learning support uses durable analysis contracts', () => {
   it('keeps old options unchanged and rejects oversized or ambiguous new fields', async () => {
     const f = await setup(); expect(analysisOptionsSchema.parse(f.input.options)).toEqual(f.input.options)
-    for (const support of [{ mode: 'hint', question: '问题', hintLevel: 0 }, { mode: 'hint', question: '问题', hintLevel: 4 }, { mode: 'feedback', question: '问题', learnerAnswer: '字'.repeat(10001) }, { mode: 'explain', question: '字'.repeat(3001) }, { mode: 'explain', question: '问题', unknown: true }]) expect(analysisOptionsSchema.safeParse({ ...f.input.options, learningSupport: support }).success).toBe(false)
+    for (const support of [{ mode: 'hint', question: '问题' }, { mode: 'hint', question: '问题', hintLevel: 0 }, { mode: 'hint', question: '问题', hintLevel: 4 },
+      { mode: 'feedback', question: '问题' }, { mode: 'feedback', question: '问题', learnerAnswer: '字'.repeat(10001) },
+      { mode: 'variation', question: '问题', quizType: 'mixed' }, { mode: 'explain', question: '问题', hintLevel: 1 },
+      { mode: 'explain', question: '问题', learnerAnswer: '答案' }, { mode: 'explain', question: '字'.repeat(3001) }, { mode: 'explain', question: '问题', unknown: true }]) {
+      expect(analysisOptionsSchema.safeParse({ ...f.input.options, learningSupport: support }).success).toBe(false)
+    }
+    for (const support of [{ mode: 'hint', question: '问题', hintLevel: 1 }, { mode: 'feedback', question: '问题', learnerAnswer: '我的解释' },
+      { mode: 'variation', question: '问题', quizType: 'mixed', difficulty: 'medium' }]) expect(analysisOptionsSchema.safeParse({ ...f.input.options, learningSupport: support }).success).toBe(true)
   })
   it('uses enum guidance rather than learner text as system instructions in both protocols', async () => {
     expect(artifactPrompt('summary').system).toContain('application-owned learningSupportGuidance')

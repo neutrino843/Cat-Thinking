@@ -43,7 +43,7 @@ export const createPersonalModelProvider = (
     // provide broader compatibility without a paid trial-and-fallback call.
     temperaturePolicy: 'omit',
     chatThinkingMode,
-    requestTimeoutMs: 120_000,
+    requestTimeoutMs: 300_000,
     maxInputCharacters: PERSONAL_PROVIDER_LIMITS.maxInputCharacters,
     maxOutputTokens: PERSONAL_PROVIDER_LIMITS.maxOutputTokens,
     maxResponseBytes: 2_000_000,

@@ -27,6 +27,37 @@ const servers: Server[] = []
 afterEach(async () => { for (const server of servers.splice(0)) await new Promise<void>((resolve) => server.close(() => resolve())) })
 
 describe('friendly provider compatibility', () => {
+  it('allows a slow accepted personal response beyond two minutes without sending a second request', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchImplementation = vi.fn(async (_input: unknown, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(chatResult()), 180_000)
+        init?.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(init.signal?.reason) }, { once: true })
+      }))
+      const provider = createPersonalModelProvider(settings, 'slow-personal', fetchImplementation)
+      const response = provider.generate(request, new AbortController().signal)
+      const assertion = expect(response).resolves.toMatchObject({ usage: { inputTokens: 20, outputTokens: 8 } })
+      await vi.advanceTimersByTimeAsync(180_000)
+      await assertion
+      expect(fetchImplementation).toHaveBeenCalledOnce()
+    } finally { vi.useRealTimers() }
+  })
+  it('still stops a stalled personal request at five minutes and preserves the unknown outcome', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchImplementation = vi.fn(async (_input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+      }))
+      const provider = createPersonalModelProvider(settings, 'stalled-personal', fetchImplementation)
+      const assertion = expect(provider.generate(request, new AbortController().signal)).rejects.toMatchObject({
+        safeCode: 'request_timeout', acceptance: 'unknown', retryable: false,
+      })
+      await vi.advanceTimersByTimeAsync(300_000)
+      await assertion
+      expect(fetchImplementation).toHaveBeenCalledOnce()
+    } finally { vi.useRealTimers() }
+  })
+
   it('uses dated official presets without fabricated account availability or prices', () => {
     expect(PROVIDER_CATALOG.map((entry) => entry.id)).toEqual(['openai', 'deepseek', 'qwen', 'moonshot', 'zhipu', 'siliconflow', 'gemini', 'ollama', 'custom'])
     expect(getProviderPreset('deepseek')?.models[0]?.id).toBe('deepseek-flash')

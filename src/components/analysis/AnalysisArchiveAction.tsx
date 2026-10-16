@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ArtifactEnvelopeV1 } from '@cat-thinking/analysis-contracts'
-import { createCourse, createLearningArchive, listCourses } from '../../learning/repository'
+import { createCourse, createLearningArchive, listCourses, listEntities } from '../../learning/repository'
 import type { Course, LearningArchive } from '../../learning/model'
 import { loadQuizPractice } from '../../analysis/quizPractice'
 
@@ -19,10 +19,10 @@ export default function AnalysisArchiveAction({ docId, runId, artifacts, disable
   useLayoutEffect(() => { const epoch = generation; epoch.current++; return () => { epoch.current++ } }, [bindingKey])
   useEffect(() => {
     let active = true
-    void listCourses().then((items) => { if (active) { setCourses(items); setCourseId(items[0]?.id ?? ''); setLoading(false) } })
+    void listCourses().then(async (items) => { const memberships = await Promise.all(items.map(async (item) => ({ id: item.id, docs: await listEntities(item.id, 'document') }))); const owner = memberships.find((item) => item.docs.some((record) => record.docId === docId)); if (active) { setCourses(items); setCourseId(owner?.id ?? items[0]?.id ?? ''); setLoading(false) } })
       .catch(() => { if (active) { setError('课程读取失败，请先打开今日学习重新载入。'); setLoading(false) } })
     return () => { active = false }
-  }, [])
+  }, [docId])
   const save = async () => {
     if (disabled || loading || writing.current || !artifacts.length || !courseId && !newName.trim()) return
     const token = generation.current
@@ -56,7 +56,7 @@ export default function AnalysisArchiveAction({ docId, runId, artifacts, disable
     </div>}
     {error && <p role="alert">{error}</p>}
     {saved && <p role="status">学习资料已归档。<button className="tbtn" onClick={() => {
-      onClose(); window.dispatchEvent(new CustomEvent('msz:learning-open', { detail: { courseId: saved.courseId, archiveId: saved.id } }))
+      onClose(); window.dispatchEvent(new CustomEvent('msz:learning-open', { detail: { courseId: saved.courseId, archiveId: saved.id, documentId: docId, view: 'prepare' } }))
     }}>进入课程继续学习</button></p>}
   </section>
 }

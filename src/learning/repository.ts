@@ -49,6 +49,12 @@ async function requireQuestion(courseId: string, ref: QuestionRef): Promise<void
 async function requireReferences(entity: LearningEntity): Promise<void> {
   if (entity.kind !== 'course') await requireCourse(entity.courseId)
   if (entity.kind === 'course') for (const goal of entity.goals ?? []) for (const pointId of goal.pointIds) await requirePoint(entity.courseId, pointId)
+  if (entity.kind === 'journey') {
+    if (entity.questionRef) await requireQuestion(entity.courseId, entity.questionRef)
+    if (entity.attemptId) { const attempt = await getEntity(entity.attemptId, 'attempt'); if (!attempt || attempt.courseId !== entity.courseId || !entity.questionRef || (attempt.question.archiveId !== entity.questionRef.archiveId || attempt.question.artifactId !== entity.questionRef.artifactId || attempt.question.questionId !== entity.questionRef.questionId)) throw new LearningError('invalid', '补学原回答与题目不一致。') }
+    if (entity.retryAttemptId) { const attempt = await getEntity(entity.retryAttemptId, 'attempt'); if (!attempt || attempt.courseId !== entity.courseId || !entity.questionRef || attempt.question.archiveId !== entity.questionRef.archiveId || attempt.question.artifactId !== entity.questionRef.artifactId || attempt.question.questionId !== entity.questionRef.questionId || attempt.id === entity.attemptId) throw new LearningError('invalid', '补学重试回答不属于原题。') }
+    for (const id of [entity.parentSessionId, entity.originSessionId]) if (id && (await getEntity(id, 'session'))?.courseId !== entity.courseId) throw new LearningError('invalid', '补学来路不属于当前课程。')
+  }
   if (entity.kind === 'support') {
     if (!await db.docs.get(entity.docId)) throw new LearningError('missing', '辅助资料快照已不存在。')
     for (const id of entity.pointIds) await requirePoint(entity.courseId, id)
@@ -171,9 +177,14 @@ export async function loadCourseSnapshot(courseId: string): Promise<CourseSnapsh
     const rows = <K extends LearningKind>(kind: K) => records.filter((r): r is EntityOf<K> => r.kind === kind)
     const documents = rows('document'); const docs = []
     for (const membership of documents) { const doc = await db.docs.get(membership.docId); if (doc) docs.push({ id: doc.id, title: doc.title, createdAt: doc.createdAt, updatedAt: doc.updatedAt }) }
-    return { course, documents, docs, points: rows('point'), archives: rows('archive'), attempts: rows('attempt').sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), drafts: rows('draft'), assessments: rows('assessment').sort((a, b) => a.attemptId === b.attemptId && a.sequence !== undefined && b.sequence !== undefined ? a.sequence - b.sequence : a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)), schedules: rows('schedule'), relations: rows('relation'), merges: rows('merge'), sessions: rows('session'), applicationTasks: rows('application'), issues: rows('issue'), bindings: rows('binding'), supports: rows('support') }
+    return { course, documents, docs, points: rows('point'), archives: rows('archive'), attempts: rows('attempt').sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), drafts: rows('draft'), assessments: rows('assessment').sort((a, b) => a.attemptId === b.attemptId && a.sequence !== undefined && b.sequence !== undefined ? a.sequence - b.sequence : a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)), schedules: rows('schedule'), relations: rows('relation'), merges: rows('merge'), sessions: rows('session'), applicationTasks: rows('application'), issues: rows('issue'), bindings: rows('binding'), supports: rows('support'), journeys: rows('journey') }
   })
-  await Promise.all(snapshot.archives.map(validateLearningArchive)); return snapshot
+  await Promise.all(snapshot.archives.map(validateLearningArchive))
+  await Promise.all(snapshot.journeys.filter((item) => item.mode === 'reading').map(async (item) => {
+    const source = item.source && await db.sources.get(item.source.sourceId)
+    if (!source || source.docId !== item.source?.docId || !snapshot.docs.some((doc) => doc.id === item.source?.docId) || !snapshot.documents.some((doc) => doc.docId === item.source?.docId) || await sha256Hex(source.text) !== item.source?.sourceHash) item.blockedReason = '阅读原文缺失、版本变化或已移出课程；笔记保留，请回资料检查。'
+  }))
+  return snapshot
 }
 export async function loadLearningArchive(id: string): Promise<LearningArchive | undefined> { const row = await getEntity(id, 'archive'); return row ? validateLearningArchive(row) : undefined }
 export function listArchiveQuestions(archive: LearningArchive) {
@@ -371,8 +382,8 @@ async function deleteDraftInside(deletion: LearningDeletion): Promise<void> {
 export async function deleteEntity(kind: LearningKind, id: string, expectedRevision: number): Promise<void> {
   await db.transaction('rw', [db.learningRecords, db.learningCourseTombstones, db.learningEntityTombstones], () => deleteDraftInside({ kind, id, expectedRevision }))
 }
-export async function savePracticeBundle(attempt: PracticeAttempt, assessment?: AssessmentEvent, schedule?: ReviewSchedule, expectedScheduleRevision: number | null = null, draftDeletion?: LearningDeletion): Promise<LearningEntity[]> {
-  return saveLearningBatch([{ entity: attempt, expectedRevision: null }, ...(assessment ? [{ entity: assessment, expectedRevision: null }] : []), ...(schedule ? [{ entity: schedule, expectedRevision: expectedScheduleRevision }] : [])], draftDeletion ? [draftDeletion] : [])
+export async function savePracticeBundle(attempt: PracticeAttempt, assessment?: AssessmentEvent, schedule?: ReviewSchedule, expectedScheduleRevision: number | null = null, draftDeletion?: LearningDeletion, additional: LearningChange[] = []): Promise<LearningEntity[]> {
+  return saveLearningBatch([{ entity: attempt, expectedRevision: null }, ...(assessment ? [{ entity: assessment, expectedRevision: null }] : []), ...(schedule ? [{ entity: schedule, expectedRevision: expectedScheduleRevision }] : []), ...additional], draftDeletion ? [draftDeletion] : [])
 }
 async function eraseRows(rows: LearningEntity[]): Promise<void> {
   for (const row of rows) { await db.learningEntityTombstones.put({ id: row.id, courseId: row.courseId, deletedAt: Date.now() }); await db.learningRecords.delete(row.id) }
@@ -381,7 +392,7 @@ export async function deletePracticeHistory(courseId: string, expectedCourseRevi
   await db.transaction('rw', [db.learningRecords, db.learningCourseTombstones, db.learningEntityTombstones], async () => {
     const course = await requireCourse(courseId); if (course.revision !== expectedCourseRevision) conflict()
     const attempts = await listEntities(courseId, 'attempt'); const attemptIds = new Set(attempts.map((a) => a.id))
-    await eraseRows([...attempts, ...(await listEntities(courseId, 'assessment'))])
+    await eraseRows([...attempts, ...(await listEntities(courseId, 'assessment')), ...(await listEntities(courseId, 'journey')).filter((item) => item.mode === 'remediation')])
     for (const support of await listEntities(courseId, 'support')) if (support.attemptId && attemptIds.has(support.attemptId)) {
       const changed = { ...support, status: 'rejected' as const, revision: support.revision + 1, updatedAt: Date.now() }; delete changed.attemptId; delete changed.learnerAnswer; await db.learningRecords.put(changed)
     }
@@ -400,7 +411,7 @@ export async function deleteLearningArchive(courseId: string, archiveId: string,
     const previousGoals = await goalScope(courseId)
     const rows = (await db.learningRecords.where('courseId').equals(courseId).toArray()).map(parseLearningEntity)
     const attempts = rows.filter((r) => r.kind === 'attempt' && r.question.archiveId === archiveId); const attemptIds = new Set(attempts.map((a) => a.id))
-    await eraseRows(rows.filter((r) => r.id === archiveId || r.kind === 'attempt' && attemptIds.has(r.id) || r.kind === 'assessment' && (attemptIds.has(r.attemptId) || r.feedbackArchiveId === archiveId) || 'question' in r && r.question.archiveId === archiveId || r.kind === 'binding' && r.archiveId === archiveId || r.kind === 'support' && (r.generatedArchiveId === archiveId || r.sourceRefs.some((ref) => ref.archiveId === archiveId) || r.questionRef?.archiveId === archiveId || r.attemptId && attemptIds.has(r.attemptId))))
+    await eraseRows(rows.filter((r) => r.id === archiveId || r.kind === 'attempt' && attemptIds.has(r.id) || r.kind === 'assessment' && (attemptIds.has(r.attemptId) || r.feedbackArchiveId === archiveId) || 'question' in r && r.question.archiveId === archiveId || r.kind === 'binding' && r.archiveId === archiveId || r.kind === 'journey' && r.questionRef?.archiveId === archiveId || r.kind === 'support' && (r.generatedArchiveId === archiveId || r.sourceRefs.some((ref) => ref.archiveId === archiveId) || r.questionRef?.archiveId === archiveId || r.attemptId && attemptIds.has(r.attemptId))))
     for (const row of rows) if (row.kind === 'point') {
       const sourceRefs = row.sourceRefs.filter((r) => r.archiveId !== archiveId); const questionRefs = row.questionRefs.filter((r) => r.archiveId !== archiveId)
       if (sourceRefs.length !== row.sourceRefs.length || questionRefs.length !== row.questionRefs.length || row.archiveId === archiveId) {

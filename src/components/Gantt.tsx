@@ -120,14 +120,16 @@ export default function Gantt() {
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
-  /* 存活标记：拖拽中切视图/卸载时，window 监听自我清理（修 F-8） */
+  /* 存活标记：拖拽中切视图/卸载时，window 监听自我清理（修 F-8）。
+     setup 显式复位 true：StrictMode dev 双 effect（setup→cleanup→setup）
+     下不能只在 cleanup 置 false，否则条形拖拽第一次 move 即失效。 */
   const aliveRef = useRef(true)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
       aliveRef.current = false
-    },
-    [],
-  )
+    }
+  }, [])
 
   const height = HEADER_H + model.rows.length * ROW_H
   const today = todayISO()
@@ -584,7 +586,7 @@ const Bar = memo(function Bar({ id, task, rowY, model, color, critical, selected
     const cy = g.y + g.size / 2
     const r = g.size / 2
     return (
-      <g onPointerDown={(e) => onDown(e, id, 'move')} style={{ cursor: 'pointer' }}>
+      <g onPointerDown={(e) => onDown(e, id, 'move')} style={{ cursor: 'pointer', touchAction: 'none' }}>
         <polygon
           points={`${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`}
           fill={barColor}
@@ -609,7 +611,7 @@ const Bar = memo(function Bar({ id, task, rowY, model, color, critical, selected
         stroke={barColor}
         strokeWidth={selected ? 2.6 : 1.8}
         onPointerDown={(e) => onDown(e, id, 'move')}
-        style={{ cursor: 'grab' }}
+        style={{ cursor: 'grab', touchAction: 'none' }}
       />
       {pct > 0 && (
         <rect x={g.x} y={g.y} width={Math.max(2, g.w * pct)} height={g.h} rx={7} fill={barColor} opacity={0.75} pointerEvents="none" />
@@ -621,7 +623,7 @@ const Bar = memo(function Bar({ id, task, rowY, model, color, critical, selected
         height={g.h + 2}
         rx={3}
         fill="transparent"
-        style={{ cursor: 'ew-resize' }}
+        style={{ cursor: 'ew-resize', touchAction: 'none' }}
         onPointerDown={(e) => onDown(e, id, 'resize')}
       />
       <text x={g.x + 7} y={g.y + g.h / 2} dominantBaseline="central" fontSize={10.5} fill={theme.ink} pointerEvents="none">

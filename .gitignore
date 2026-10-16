@@ -25,3 +25,16 @@ NODE_CONFIRMATION.md
 audit/
 .hallmark/
 .trae/
+
+# 本机过程资料与生成产物（保留测试代码、固定测试素材和产品图片）
+/reports/
+/.learning-v1-run/
+/design.md
+/PRD.md
+/docs/DOCUMENT_IMPORT_ENHANCEMENT_PLAN.md
+/docs/LEARNING_SUPPORT_V2_2_SPEC.md
+/docs/PRODUCT_DIRECTION.md
+/猫思之_CatThinking_PPT_优化版.pptx
+/.cat-thinking-postgres/
+*.mszcourse
+*.dump

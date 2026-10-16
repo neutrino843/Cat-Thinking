@@ -22,7 +22,7 @@ export default function DocumentImportDialog({ draft, onClose, onConfirm }: Prop
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !saving) onClose()
+      if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('dialog[open]') && !saving) onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -113,9 +113,10 @@ export default function DocumentImportDialog({ draft, onClose, onConfirm }: Prop
           <p className="document-import-support">{t('import.currentSupport')}</p>
           {error && <div className="document-import-error" role="alert">{t('import.failed')}{error}</div>}
         </div>
+        <div className="focus-perch" data-isis-perch/>
         <div className="document-import-actions">
           <button className="tbtn" onClick={onClose} disabled={saving}>{t('common.cancel')}</button>
-          <button className="tbtn primary" onClick={() => void confirm()} disabled={saving}>
+          <button className="tbtn primary" data-guide="confirm-import" onClick={() => void confirm()} disabled={saving}>
             {saving ? t('import.saving') : t('import.create')}
           </button>
         </div>

@@ -616,6 +616,8 @@ html[data-reduce-motion='1'] .file-toast {
   width: 100%;
   height: 100%;
   display: block;
+  /* 触屏/触控板下禁止浏览器接管手势，保证单指拖拽平移不吞指针（捏合缩放走 ctrl+wheel） */
+  touch-action: none;
 }
 
 .node-editor {
@@ -2542,6 +2544,9 @@ html[data-reduce-motion='1'] .bbtn:active:not(:disabled) { transform: none; }
 .learning-list small, .learning-detail small { color: var(--color-muted); display: block; }
 .learning-section, .learning-feedback { padding: var(--space-sm); border: var(--rule-fine) solid var(--color-rule-2); margin-block: var(--space-sm); min-width: 0; }
 .learning-feedback { background: var(--color-support); }
+.learning-empty { max-width: 640px; padding: var(--space-lg) var(--space-md); display: grid; gap: var(--space-xs); justify-items: start; }
+.learning-empty p { margin: 0; color: var(--color-muted); line-height: 1.7; }
+.learning-empty-cta { margin-top: var(--space-xs); min-height: var(--control-height); }
 .learning-option { display: flex; align-items: start; gap: var(--space-2xs); margin-block: var(--space-xs); }
 .learning-option input { margin-top: 4px; flex: 0 0 auto; }
 .learning-workspace fieldset { min-width: 0; margin-block: var(--space-sm); border: var(--rule-fine) solid var(--color-rule-2); padding: var(--space-sm); }
@@ -2559,6 +2564,45 @@ html[data-reduce-motion='1'] .bbtn:active:not(:disabled) { transform: none; }
 .learning-danger { margin-top: var(--space-lg); border-top: var(--rule-hair) solid var(--color-error); padding-top: var(--space-sm); }
 .learning-error { color: var(--color-error); background: var(--color-error-paper); padding: var(--space-xs); }
 .learning-footer { padding: var(--space-xs) var(--space-md); font-size: var(--text-xs); color: var(--color-muted); border-top: var(--rule-hair) solid var(--color-rule-2); flex: 0 0 auto; }
+
+/* v2.1 需求3：沉浸式一体化学习（浏览器全屏失败时降级为 CSS 全屏覆盖层） */
+.immersive-learning { position: fixed; inset: 0; z-index: 300; background: var(--color-paper); color: var(--color-ink); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.immersive-learning:fullscreen { background: var(--color-paper); width: 100%; height: 100%; }
+.immersive-top { padding: var(--space-sm) var(--space-md); border-bottom: var(--rule-fine) solid var(--color-rule); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2xs) var(--space-md); align-items: center; flex: 0 0 auto; }
+.immersive-heading h2 { margin: 0; font-size: var(--text-xl); }
+.immersive-top-actions { display: flex; gap: var(--space-2xs); align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.immersive-top-actions .tbtn { min-height: 44px; }
+.immersive-step-count { color: var(--color-muted); font-size: var(--text-sm); white-space: nowrap; }
+.immersive-progress { grid-column: 1 / -1; width: 100%; height: 6px; accent-color: var(--color-accent); }
+.immersive-body { overflow: auto; padding: var(--space-lg) var(--space-md); display: grid; justify-items: center; align-content: start; gap: var(--space-sm); min-height: 0; }
+.immersive-card { width: min(760px, 100%); background: var(--color-paper-2); border: var(--rule-fine) solid var(--color-rule); border-radius: var(--radius-card); padding: var(--space-lg); display: grid; gap: var(--space-sm); outline: none; }
+.immersive-card:focus-visible { outline: var(--rule-strong) solid var(--color-focus); outline-offset: 3px; }
+.immersive-card h3 { margin: 0; font-size: var(--text-xl); }
+.immersive-card p { line-height: 1.7; margin: 0; }
+.immersive-step-label { color: var(--color-accent); font-size: var(--text-sm); font-weight: 600; }
+.immersive-card label { display: grid; gap: var(--space-3xs); line-height: 1.6; }
+.immersive-learning textarea, .immersive-learning input:not([type=checkbox]):not([type=radio]), .immersive-learning select { color: var(--color-ink); background: var(--color-paper); border: var(--rule-fine) solid var(--color-rule); border-radius: var(--radius-input); padding: var(--space-2xs); font: inherit; max-width: 100%; min-width: 0; box-sizing: border-box; min-height: var(--control-height); }
+.immersive-card textarea { width: 100%; min-height: 180px; resize: vertical; }
+.immersive-card blockquote { margin: 0; border-inline-start: var(--rule-strong) solid var(--color-rule-2); padding-inline-start: var(--space-sm); white-space: pre-wrap; line-height: 1.8; }
+.immersive-card-actions { display: flex; gap: var(--space-2xs); flex-wrap: wrap; }
+.immersive-card-actions .tbtn, .immersive-sources .tbtn { min-height: 44px; }
+.immersive-sources { display: grid; gap: var(--space-xs); }
+.immersive-sources small { color: var(--color-muted); display: block; }
+.immersive-alert { width: min(760px, 100%); color: var(--color-error); background: var(--color-error-paper); border: var(--rule-hair) solid var(--color-error); border-radius: var(--radius-input); padding: var(--space-sm); display: grid; gap: var(--space-2xs); }
+.immersive-alert .tbtn { justify-self: start; min-height: 44px; }
+.immersive-actions { border-top: var(--rule-fine) solid var(--color-rule); background: var(--color-paper-2); padding: var(--space-xs) var(--space-md); display: flex; justify-content: space-between; align-items: center; gap: var(--space-sm); flex-wrap: wrap; flex: 0 0 auto; }
+.immersive-status { color: var(--color-muted); font-size: var(--text-sm); }
+.immersive-action-buttons { display: flex; gap: var(--space-2xs); flex-wrap: wrap; }
+.immersive-action-buttons .tbtn { min-height: 44px; padding-inline: var(--space-sm); }
+@media (max-width: 768px) {
+  .immersive-top { grid-template-columns: minmax(0, 1fr); }
+  .immersive-top-actions { justify-content: flex-start; }
+  .immersive-body { padding: var(--space-sm); }
+  .immersive-card { padding: var(--space-sm); }
+  .immersive-actions { flex-direction: column; align-items: stretch; }
+  .immersive-action-buttons { width: 100%; }
+  .immersive-action-buttons .tbtn { flex: 1 1 auto; }
+}
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 @media(max-width: 768px) {
   .learning-head, .learning-course-bar, .learning-content, .learning-footer { padding: var(--space-xs); }

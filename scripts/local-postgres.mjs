@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { Pool } from 'pg'
-import { chooseLocalAppPorts, stopOwnedService } from './local-app-lifecycle.mjs'
+import { chooseLocalAppPorts, chooseLocalDatabasePort, isLocalDatabasePort, stopOwnedService } from './local-app-lifecycle.mjs'
 import { assertPostgresTestEvidence } from './postgres-test-evidence.mjs'
 
 const exec = promisify(execFile)
@@ -47,7 +47,7 @@ const pg = async (name, args, env = cleanEnvironment()) => {
 }
 const load = async () => {
   const config = JSON.parse(await readFile(configPath, 'utf8'))
-  if (config.version !== 1 || config.host !== '127.0.0.1' || config.port !== 55432 || !config.admin?.password
+  if (config.version !== 1 || config.host !== '127.0.0.1' || !isLocalDatabasePort(config.port) || !config.admin?.password
     || Object.entries(names).some(([kind, name]) => config.databases?.[kind]?.name !== name || config.databases[kind].user !== name || !config.databases[kind].password)) throw new Error('local_database_configuration_invalid')
   return config
 }
@@ -89,7 +89,8 @@ const setup = async () => {
   }
   await protect(secrets)
   if (!await exists(configPath)) {
-    const config = { version: 1, host: '127.0.0.1', port: 55432, admin: { user: 'cat_analysis_admin', password: randomBytes(32).toString('base64url') },
+    const port = await chooseLocalDatabasePort()
+    const config = { version: 1, host: '127.0.0.1', port, admin: { user: 'cat_analysis_admin', password: randomBytes(32).toString('base64url') },
       databases: Object.fromEntries(Object.entries(names).map(([kind, name]) => [kind, { name, user: name, password: randomBytes(32).toString('base64url') }])),
       contentEncryptionKey: randomBytes(32).toString('base64'), serviceToken: randomBytes(32).toString('base64url') }
     await writeFile(configPath, JSON.stringify(config, null, 2), { flag: 'wx', mode: 0o600 })
@@ -101,7 +102,7 @@ const setup = async () => {
       await writeFile(passwordFile, config.admin.password, { flag: 'wx', mode: 0o600 })
       await pg('initdb', ['-D', data, '-U', config.admin.user, '--encoding=UTF8', '--locale=C', '--auth-host=scram-sha-256', '--auth-local=scram-sha-256', `--pwfile=${nativePath('secrets/initdb-password.tmp')}`])
     } finally { await rm(passwordFile, { force: true }) }
-    await writeFile(join(data, 'postgresql.auto.conf'), "listen_addresses = '127.0.0.1'\nport = 55432\npassword_encryption = 'scram-sha-256'\nmax_connections = 30\nshared_buffers = '64MB'\nlog_statement = 'none'\nlog_min_error_statement = 'panic'\nlog_parameter_max_length_on_error = 0\n")
+    await writeFile(join(data, 'postgresql.auto.conf'), `listen_addresses = '127.0.0.1'\nport = ${config.port}\npassword_encryption = 'scram-sha-256'\nmax_connections = 30\nshared_buffers = '64MB'\nlog_statement = 'none'\nlog_min_error_statement = 'panic'\nlog_parameter_max_length_on_error = 0\n`)
   }
   await protect(data)
   await start()
@@ -118,12 +119,13 @@ const setup = async () => {
     const connection = pool(config, kind)
     try { await connection.query('SELECT 1') } finally { await connection.end() }
   }
-  console.log('Local PostgreSQL ready at 127.0.0.1:55432; three isolated databases configured. Provider disabled; release held.')
+  console.log(`Local PostgreSQL ready at 127.0.0.1:${config.port}; three isolated databases configured. Provider disabled; release held.`)
 }
 
 const status = async () => {
   const active = await running()
-  console.log(JSON.stringify({ installed: await exists(join(binaries, 'postgres.exe')), configured: await exists(configPath), running: active, host: '127.0.0.1', port: 55432, databases: Object.values(names), provider: 'disabled', releaseHold: true }, null, 2))
+  const config = await exists(configPath) ? await load() : undefined
+  console.log(JSON.stringify({ installed: await exists(join(binaries, 'postgres.exe')), configured: Boolean(config), running: active, host: '127.0.0.1', port: config?.port ?? null, databases: Object.values(names), provider: 'disabled', releaseHold: true }, null, 2))
 }
 const prepareProvider = async () => {
   const arguments_ = process.argv.slice(3)

@@ -1,3 +1,4 @@
+import { visibleQuestions } from './workspaceView'
 import { LearningError, learningBase, type CourseSnapshot, type KnowledgePoint, type LearningSession } from './model'
 import { learningDate } from './reviewScheduler'
 
@@ -50,4 +51,12 @@ export function advanceSession(session: LearningSession, status: 'completed' | '
 export function resumableSessions(snapshots: readonly CourseSnapshot[]) {
   return snapshots.filter((snapshot) => !snapshot.course.example).flatMap((snapshot) => snapshot.sessions.filter((session) => session.status === 'active' && session.purpose !== 'exam').map((session) => ({ snapshot, session, reason: sessionInvalidReason(session, snapshot) })))
     .sort((a, b) => b.session.updatedAt - a.session.updatedAt || a.session.id.localeCompare(b.session.id))
+}
+
+/** New sessions focus on a question; old saved sessions retain their original steps. */
+export function createFocusedSession(snapshot: CourseSnapshot, points: readonly KnowledgePoint[]): LearningSession {
+  const session = createGuidedSession(snapshot, points)
+  session.steps = points.flatMap((point) => (visibleQuestions(snapshot, point.id).length ? ['practice', 'recall', 'explain'] as const : ['read', 'explain'] as const).map((action) => ({ pointId: point.id, action, status: 'pending' as const, note: '' })))
+  if (session.checkpoint) session.checkpoint = { ...session.checkpoint, stepIndex: 0, hidden: true }
+  return session
 }

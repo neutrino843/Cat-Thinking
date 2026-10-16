@@ -1,10 +1,12 @@
 import { vi } from 'vitest'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { db } from '../store/db'
 
 /** Serial, rollback-capable domain double; browser coverage separately exercises actual IndexedDB. */
 export function installLearningTestStore() {
   const names = ['learningRecords', 'learningCourseTombstones', 'learningEntityTombstones', 'docs', 'sources', 'blobs', 'docVersions', 'trash', 'documentTombstones', 'analysisTasks'] as const
   const maps = Object.fromEntries(names.map((n) => [n, new Map<string, unknown>()])) as Record<typeof names[number], Map<string, unknown>>
+  const context = new AsyncLocalStorage<boolean>()
   let tail: Promise<unknown> = Promise.resolve()
   let failOnTable: string | undefined
   for (const name of names) {
@@ -30,11 +32,12 @@ export function installLearningTestStore() {
     } })) as unknown as typeof table.where)
   }
   vi.spyOn(db, 'transaction').mockImplementation((async (...args: unknown[]) => {
-    const work = tail.then(async () => {
+    if (context.getStore()) return (args.at(-1) as () => Promise<unknown>)()
+    const work = tail.then(() => context.run(true, async () => {
       const previous = Object.fromEntries(names.map((n) => [n, new Map([...maps[n]].map(([id, value]) => [id, structuredClone(value)]))]))
       try { return await (args.at(-1) as () => Promise<unknown>)() }
       catch (error) { for (const n of names) { maps[n].clear(); for (const [id, value] of previous[n] as Map<string, unknown>) maps[n].set(id, value) } throw error }
-    })
+    }))
     tail = work.catch(() => undefined); return work
   }) as typeof db.transaction)
   return { maps, failWritesTo: (table?: string) => { failOnTable = table } }

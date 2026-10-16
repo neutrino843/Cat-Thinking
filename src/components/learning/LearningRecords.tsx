@@ -4,7 +4,7 @@ import { deletePracticeHistory, saveEntity } from '../../learning/repository'
 import { archivedQuestions, questionKey, sameQuestion } from '../../learning/workspaceView'
 import type { LearningAction } from './CourseOverview'
 
-export default function LearningRecords({ snapshot, action, busy, onPractice }: { snapshot: CourseSnapshot; action: LearningAction; busy: boolean; onPractice: (pointId?: string, questionKey?: string) => void }) {
+export default function LearningRecords({ snapshot, action, busy, onPractice, onJourney }: { snapshot: CourseSnapshot; action: LearningAction; busy: boolean; onPractice: (pointId?: string, questionKey?: string) => void; onJourney?: (id: string) => void }) {
   const [clearing, setClearing] = useState(false)
   const questions = archivedQuestions(snapshot.archives)
   return <section><h3>学习记录</h3><p>每次提交独立保留。自评、错因和争议以修订记录保存；一次答对不代表整个知识点已经掌握。</p>
@@ -21,6 +21,7 @@ export default function LearningRecords({ snapshot, action, busy, onPractice }: 
     })}</ol>{!snapshot.attempts.length && <p>尚无长期作答记录。从保存的学习资料进入练习后，提交会记录在这里。</p>}
     <h4>待核对题目</h4><ul className="learning-list">{snapshot.issues.filter((issue) => issue.status === 'open').map((issue) => <li key={issue.id}><strong>{questions.find((q) => sameQuestion(q.ref, issue.question))?.question.prompt ?? '题目不可用'}</strong><p>{issue.note}</p>
       <button className="tbtn" disabled={busy} onClick={() => void action(() => saveEntity({ ...issue, status: 'resolved' }, issue.revision))}>我已核对 解除疑问</button><p>解除后仍需在今日页明确恢复已暂停的队列。</p></li>)}</ul>
+    <h4>阅读与补学记录</h4><ul className="learning-list">{(snapshot.journeys ?? []).map((item) => <li key={item.id}><strong>{item.title} · {item.mode === 'reading' ? '阅读' : '补学'}</strong><p>{item.note || '尚未记录个人解释'}</p><p>{item.status === 'completed' ? '已结束' : '可继续'}{item.dueDate && ` · 下次回看 ${item.dueDate}`}</p>{item.blockedReason && <p role="status">{item.blockedReason}</p>}<button className="tbtn" onClick={() => onJourney?.(item.id)}>查看或继续这一轮</button></li>)}</ul>
     <h4>学习单元记录</h4><ul>{snapshot.sessions.map((session) => <li key={session.id}>{session.title} · {session.steps.filter((s) => s.status === 'completed').length}/{session.steps.length} 步完成 · {session.status === 'active' ? '进行中' : '已结束'}</li>)}</ul>
     <div className="learning-danger"><button className="tbtn" disabled={busy} onClick={() => setClearing(!clearing)}>清除本课程作答历史</button>{clearing && <div><p>将删除 {snapshot.attempts.length} 次回答与自评修订，重置并暂停复习队列。原文、导图与个人笔记保留。</p><button className="tbtn" disabled={busy} onClick={() => void action(async () => { await deletePracticeHistory(snapshot.course.id, snapshot.course.revision); setClearing(false) })}>确认清除回答与自评历史</button><button className="tbtn" onClick={() => setClearing(false)}>取消</button></div>}</div>
   </section>

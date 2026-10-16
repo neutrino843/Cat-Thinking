@@ -6,9 +6,31 @@ import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
-const { assertLoopbackPortsAvailable, chooseLocalAppPorts, probeLoopbackPort, stopOwnedService } = await import(pathToFileURL(resolve('scripts/local-app-lifecycle.mjs')).href)
+const { assertLoopbackPortsAvailable, chooseLocalAppPorts, chooseLocalDatabasePort, isLocalDatabasePort, probeLoopbackPort, stopOwnedService } = await import(pathToFileURL(resolve('scripts/local-app-lifecycle.mjs')).href)
 
 describe('local application lifecycle', () => {
+  it('initializes a new database on a free port without taking over an existing listener', async () => {
+    const listener = createServer()
+    await new Promise<void>((done) => listener.listen(0, '127.0.0.1', done))
+    const address = listener.address()
+    if (!address || typeof address === 'string') throw new Error('Missing test port')
+    try {
+      const port = await chooseLocalDatabasePort({ preferredPort: address.port })
+      expect(port).not.toBe(address.port)
+      expect(isLocalDatabasePort(port)).toBe(true)
+      expect(listener.listening).toBe(true)
+    } finally { await new Promise<void>((done) => listener.close(() => done())) }
+  })
+  it('bounds database candidates and does not hide port permission failures', async () => {
+    const occupied = vi.fn(async () => false)
+    await expect(chooseLocalDatabasePort({ probe: occupied, candidateCount: 2 })).rejects.toThrow('local_app_no_available_port:database:2')
+    expect(occupied.mock.calls.length).toBe(2)
+    const denied = vi.fn(async () => { throw new Error('local_app_port_probe_failed:55432:EPERM') })
+    await expect(chooseLocalDatabasePort({ probe: denied })).rejects.toThrow('EPERM')
+    expect(denied).toHaveBeenCalledTimes(1)
+    for (const port of [0, 1023, 65_536, 55432.5, '55432']) expect(isLocalDatabasePort(port)).toBe(false)
+    await expect(chooseLocalDatabasePort({ candidateCount: 11 })).rejects.toThrow('local_app_port_configuration_invalid')
+  })
   it('chooses a frontend fallback while the occupied owner remains functional', async () => {
     const listener = createServer((socket) => socket.end('unrelated-owner-preserved'))
     await new Promise<void>((done) => listener.listen(0, '127.0.0.1', done))

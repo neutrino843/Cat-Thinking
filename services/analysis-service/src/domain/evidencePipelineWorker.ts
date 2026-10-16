@@ -63,6 +63,8 @@ export interface EvidencePipelineWorkerOptions {
   readonly broker: RunEventBroker
   readonly leaseMs: number
   readonly chunkPolicy?: ChunkPlannerPolicy
+  /** Bound simultaneous calls without changing persisted chunk identities. */
+  readonly maxConcurrency?: number
   readonly budgetPolicy?: EvidenceBudgetPolicy
   readonly now?: () => number
   readonly createId?: () => string
@@ -84,6 +86,7 @@ export class EvidencePipelineWorker {
   private readonly broker: RunEventBroker
   private readonly leaseMs: number
   private readonly chunkPolicy: ChunkPlannerPolicy
+  private readonly maxConcurrency: number
   private readonly budgetPolicy?: EvidenceBudgetPolicy
   private readonly now: () => number
   private readonly createId: () => string
@@ -93,6 +96,10 @@ export class EvidencePipelineWorker {
     if (!Number.isInteger(options.leaseMs) || options.leaseMs <= 0) {
       throw new RangeError('leaseMs must be a positive integer')
     }
+    if (options.maxConcurrency !== undefined && (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency <= 0)) {
+      throw new RangeError('maxConcurrency must be a positive safe integer')
+    }
+    this.maxConcurrency = options.maxConcurrency ?? Number.MAX_SAFE_INTEGER
     this.store = options.store
     this.generator = options.generator
     this.broker = options.broker
@@ -185,7 +192,7 @@ export class EvidencePipelineWorker {
       })
     }
 
-    const cards = await this.mapChunks(tenantId, run, lease, sources, chunks, budget.concurrency, signal)
+    const cards = await this.mapChunks(tenantId, run, lease, sources, chunks, Math.min(budget.concurrency, this.maxConcurrency), signal)
     const coverage = calculateEvidenceCoverage({
       selectedRanges: Object.fromEntries(run.request.manifest.sources.map((snapshot) => [
         snapshot.sourceId,

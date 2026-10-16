@@ -2,9 +2,9 @@ import type { ArtifactEnvelopeV1, SourceManifestV1 } from '@cat-thinking/analysi
 import type { DocMeta, SourceDocument } from '../types'
 
 /** Versioned local learning records. No provider secrets or resumable network tasks belong here. */
-export interface LearningBase { version: 1; id: string; courseId: string; revision: number; createdAt: number; updatedAt: number }
+export interface LearningBase { originId?: string; version: 1; id: string; courseId: string; revision: number; createdAt: number; updatedAt: number }
 export interface CourseGoal { id: string; title: string; level: QuestionLevel; priority: 'normal' | 'important' | 'required'; pointIds: string[]; confirmed: boolean }
-export interface Course extends LearningBase { kind: 'course'; name: string; goal: string; timeZone: string; dailyMinutes: number; dailyQuestionLimit: number; examDate?: string; goalVersion: number; automaticReviews?: boolean; goals?: CourseGoal[]; example?: boolean }
+export interface Course extends LearningBase { kind: 'course'; firstStudyAt?: number; name: string; goal: string; timeZone: string; dailyMinutes: number; dailyQuestionLimit: number; examDate?: string; goalVersion: number; automaticReviews?: boolean; goals?: CourseGoal[]; example?: boolean }
 export interface CourseDocument extends LearningBase { kind: 'document'; docId: string; chapter: string; role?: 'syllabus' | 'slides' | 'textbook' | 'notes' }
 export interface ArchivedSourceRef { archiveId: string; sourceId: string; start: number; end: number }
 export interface QuestionRef { archiveId: string; artifactId: string; questionId: string; confirmed: boolean }
@@ -51,7 +51,16 @@ export interface QuestionIssue extends LearningBase { kind: 'issue'; question: Q
 export interface NodeBinding extends LearningBase { kind: 'binding'; docId: string; archiveId: string; artifactId: string; mappings: { generatedNodeId: string; localNodeId: string; pointId: string; originalText: string; originalNote?: string }[]; status: 'active' | 'pending' | 'retired' }
 export type SupportMode = 'explain' | 'compare' | 'hint' | 'feedback' | 'goals' | 'variation' | 'supplement'
 export interface LearningSupport extends LearningBase { kind: 'support'; mode: SupportMode; docId: string; pointIds: string[]; sourceRefs: ArchivedSourceRef[]; prompt: string; learnerAnswer?: string; hintLevel?: number; quizType?: 'mixed' | 'multiple-choice' | 'true-false' | 'short-answer'; difficulty?: 'easy' | 'medium' | 'hard'; status: 'prepared' | 'viewed' | 'accepted' | 'rejected'; generatedArchiveId?: string; questionRef?: QuestionRef; attemptId?: string; sessionId?: string; viewedAt?: number }
-export type LearningEntity = Course | CourseDocument | KnowledgePoint | LearningArchive | PracticeAttempt | PracticeDraft | AssessmentEvent | ReviewSchedule | KnowledgeRelation | KnowledgeMergeEvent | LearningSession | ApplicationTask | QuestionIssue | NodeBinding | LearningSupport
+/** Reading and remediation checkpoints are not quiz submissions or mastery evidence. */
+export interface LearningJourney extends LearningBase {
+  kind: 'journey'; mode: 'reading' | 'remediation'; title: string; status: 'active' | 'paused' | 'completed'
+  step: number; note: string; position: number; scroll: number; dueDate?: string; finishedAt?: number
+  source?: { docId: string; sourceId: string; sourceHash: string }
+  questionRef?: QuestionRef; archiveHash?: string; attemptId?: string; retryAttemptId?: string
+  parentSessionId?: string; originSessionId?: string; blockedReason?: string
+  planning?: { date: string; minutes: number }
+}
+export type LearningEntity = Course | CourseDocument | KnowledgePoint | LearningArchive | PracticeAttempt | PracticeDraft | AssessmentEvent | ReviewSchedule | KnowledgeRelation | KnowledgeMergeEvent | LearningSession | ApplicationTask | QuestionIssue | NodeBinding | LearningSupport | LearningJourney
 export type LearningKind = LearningEntity['kind']
 export type EntityOf<K extends LearningKind> = Extract<LearningEntity, { kind: K }>
 export interface CourseSnapshot {
@@ -60,10 +69,11 @@ export interface CourseSnapshot {
   drafts: PracticeDraft[]
   merges: KnowledgeMergeEvent[]; sessions: LearningSession[]; applicationTasks: ApplicationTask[]; issues: QuestionIssue[]; bindings: NodeBinding[]
   supports?: LearningSupport[]
+  journeys?: LearningJourney[]
 }
 export const newLearningId = (): string => crypto.randomUUID()
 export function learningBase(courseId: string, id = newLearningId(), now = Date.now()): LearningBase {
-  return { version: 1, id, courseId, revision: 1, createdAt: now, updatedAt: now }
+  return { version: 1, id, originId: id, courseId, revision: 1, createdAt: now, updatedAt: now }
 }
 export class LearningError extends Error {
   constructor(public readonly code: 'invalid' | 'conflict' | 'missing' | 'corrupt' | 'limit' | 'password', message: string) { super(message); this.name = 'LearningError' }

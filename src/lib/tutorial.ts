@@ -73,19 +73,38 @@ export async function getOrCreateLatestTutorial(): Promise<DocData> {
   })
 }
 
-let openPromise: Promise<void> | null = null
+/** 复用/新建的创建去重：并发调用共享同一次 getOrCreateLatestTutorial，避免竞态创建两份教程 */
+let creatingPromise: Promise<DocData> | null = null
+/** 在途的「打开+落地」promise 按 to 缓存：同入口重复点击复用同一 promise，结束后清除 */
+const openPromises = new Map<'home' | 'editor', Promise<DocData>>()
 
-export function openLatestTutorial(): Promise<void> {
-  if (openPromise) return openPromise
-  openPromise = getOrCreateLatestTutorial().then((doc) => {
+/**
+ * 打开（复用/新建）最新版欢迎教程。
+ * - to:'editor'（默认）：编辑器内入口——切到思维导图视图并触发 fit，停留在编辑器；
+ * - to:'home'：学习首页入口——仅准备好教程文档（标签/会话就位），随后派发 msz:open-home
+ *   让 App 切回学习首页；调用方可拿返回的 doc 自行挂「查看教程导图」。
+ * 文档创建全局去重；落地动作按各调用方自己的 to 分发，并发时后到者的目标不会被忽略。
+ */
+export function openLatestTutorial(options: { to?: 'home' | 'editor' } = {}): Promise<DocData> {
+  const to = options.to ?? 'editor'
+  const cached = openPromises.get(to)
+  if (cached) return cached
+  if (!creatingPromise) creatingPromise = getOrCreateLatestTutorial().finally(() => { creatingPromise = null })
+  const open: Promise<DocData> = creatingPromise.then((doc) => {
     useDoc.getState().openDoc(doc)
-    useSettings.getState().setView('mind')
     emitDocsChanged()
-    requestAnimationFrame(() => window.dispatchEvent(new Event('msz:fit')))
-  }).finally(() => { openPromise = null })
-  return openPromise
+    if (to === 'home') {
+      window.dispatchEvent(new Event('msz:open-home'))
+    } else {
+      useSettings.getState().setView('mind')
+      requestAnimationFrame(() => window.dispatchEvent(new Event('msz:fit')))
+    }
+    return doc
+  }).finally(() => { if (openPromises.get(to) === open) openPromises.delete(to) })
+  openPromises.set(to, open)
+  return open
 }
 
-export function requestLatestTutorial(): void {
-  void openLatestTutorial().catch(() => window.alert('使用教程未能打开。请检查浏览器是否允许本地存储，再点击「使用教程」重试；现有文档不会被替换。'))
+export function requestLatestTutorial(to: 'home' | 'editor' = 'editor'): void {
+  void openLatestTutorial({ to }).catch(() => window.alert('使用教程未能打开。请检查浏览器是否允许本地存储，再点击「使用教程」重试；现有文档不会被替换。'))
 }

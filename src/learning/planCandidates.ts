@@ -58,5 +58,10 @@ export function coursePlanCandidates(snapshot: CourseSnapshot): DailyPlanCandida
     candidates.push({ id: task.id, courseId: snapshot.course.id, pointId: pointIds[0], type: 'application', title: task.title,
       estimatedMinutes: 10, questionCount: 0, sourceStatus: !allActive ? 'pending' : sourceMissing ? 'missing' : 'valid' })
   }
+  for (const journey of snapshot.journeys ?? []) {
+    if (journey.mode !== 'reading' || journey.blockedReason || journey.status === 'completed' && !journey.dueDate) continue
+    const attached = !!journey.source && snapshot.documents.some((item) => item.docId === journey.source?.docId)
+    candidates.push({ id: journey.id, courseId: snapshot.course.id, targetId: `journey:${journey.id}`, type: journey.dueDate ? 'review' : 'new', title: `回看资料 · ${journey.title}`, estimatedMinutes: 5, questionCount: 0, ...(journey.dueDate ? { dueDate: journey.dueDate } : {}), paused: journey.status === 'paused', sourceStatus: attached ? 'valid' : 'missing', reason: '回看原文与自己的笔记；这是阅读待办，不计正式题目作答。' })
+  }
   return candidates
 }

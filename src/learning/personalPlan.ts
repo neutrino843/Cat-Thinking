@@ -22,8 +22,10 @@ export function buildPersonalPlan(snapshots: readonly CourseSnapshot[], now: num
   for (const snapshot of snapshots.filter((item) => !item.course.example)) {
     const sessions = snapshot.sessions.filter((session) => session.planning?.date === today)
     const attempts = snapshot.attempts.filter((attempt) => attempt.origin === 'practice' && attempt.submittedAt !== null && learningDate(attempt.submittedAt) === today)
-    let amount = sessions.reduce((sum, session) => sum + (session.planning?.minutes ?? 0), 0)
-    for (const attempt of attempts.filter((item) => !sessions.some((session) => session.id === item.sessionId))) {
+    const journeys = (snapshot.journeys ?? []).filter((item) => item.planning?.date === today)
+    const retryIds = new Set(journeys.map((item) => item.retryAttemptId).filter(Boolean))
+    let amount = journeys.reduce((sum, item) => sum + (item.parentSessionId && sessions.some((session) => session.id === item.parentSessionId) ? 0 : item.planning?.minutes ?? 0), 0) + sessions.reduce((sum, session) => sum + (session.planning?.minutes ?? 0), 0)
+    for (const attempt of attempts.filter((item) => !retryIds.has(item.id) && !sessions.some((session) => session.id === item.sessionId))) {
       const artifact = snapshot.archives.find((archive) => archive.id === attempt.question.archiveId)?.artifacts.find((item) => item.id === attempt.question.artifactId)
       const question = artifact?.kind === 'quiz' ? artifact.payload.questions.find((item) => item.id === attempt.question.questionId) : undefined
       if (question) amount += question.type === 'short-answer' ? 5 : 2
@@ -34,7 +36,7 @@ export function buildPersonalPlan(snapshots: readonly CourseSnapshot[], now: num
   const candidates: PlannedLearningTask[] = []; const backlog: DeferredLearningTask[] = []
   for (const snapshot of snapshots.filter((item) => !item.course.example && (!courseId || item.course.id === courseId))) {
     const used = usage.get(snapshot.course.id)
-    const source = coursePlanCandidates(snapshot)
+    const source = coursePlanCandidates(snapshot).filter((item) => !(snapshot.journeys ?? []).some((journey) => journey.status !== 'completed' && journey.planning?.date === today && (journey.mode === 'reading' && journey.id === item.id || journey.mode === 'remediation' && journey.questionRef && `${journey.questionRef.archiveId}/${journey.questionRef.artifactId}/${journey.questionRef.questionId}` === item.targetId)))
     const options = { learningDate: learningDate(now, snapshot.course.timeZone), timeBudgetMinutes: Math.max(0, snapshot.course.dailyMinutes - (used?.minutes ?? 0)), questionLimit: Math.max(0, snapshot.course.dailyQuestionLimit - (used?.questions ?? 0)) }
     const initial = buildDailyPlan(source, options)
     const deferredByUser = initial.selected.filter((task) => decisions.get(todayPlanTaskKey(task.courseId, task.id)) === 'tomorrow')

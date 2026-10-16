@@ -144,9 +144,12 @@ describe('analysis task orchestration', () => {
     expect(h.saved?.request.requestKey).toBe(key)
     expect(h.client.createRun).toHaveBeenCalledTimes(2)
   })
-  it('resends identical receiving parts after refresh without creating another run', async () => {
+  it('opens receiving tasks read-only and only resends identical parts after explicit resume', async () => {
     const h = await seeded(); await connect(h)
     expect(h.client.createRun).not.toHaveBeenCalled()
+    expect(h.client.uploadSource).not.toHaveBeenCalled()
+    expect(h.client.startRun).not.toHaveBeenCalled()
+    await h.controller.resume()
     expect(h.client.uploadSource).toHaveBeenCalledTimes(2)
     expect(h.client.startRun).toHaveBeenCalledTimes(1)
     expect(h.saved?.revision).toBe(2)
@@ -191,6 +194,8 @@ describe('analysis task orchestration', () => {
     const h2 = await seeded()
     vi.mocked(h2.client.uploadSource).mockResolvedValue({ version: 1, sourceId: 'wrong', partCount: 2, receivedParts: 2, complete: true, computedHash: '0'.repeat(64) })
     await connect(h2)
+    expect(h2.client.uploadSource).not.toHaveBeenCalled()
+    await h2.controller.resume()
     expect(h2.client.startRun).not.toHaveBeenCalled()
     expect(h2.controller.getSnapshot().error).toContain('未通过校验')
   })
@@ -297,19 +302,47 @@ describe('analysis task orchestration', () => {
     expect(h.controller.getSnapshot().mirror?.lastSequence).toBe(3)
     expect(h.client.createRun).not.toHaveBeenCalled()
   })
-  it('retries read-only transport failures and stops nonretryable contract errors', async () => {
+  it('recovers from a temporary stream failure using read-only polling', async () => {
+    vi.useFakeTimers()
     const h = await seeded('queued')
     let calls = 0
     vi.mocked(h.client.events).mockImplementation(async function* () {
       calls++
-      if (calls === 1) throw new AnalysisClientError('service_unavailable', 'temporary', true)
       h.run = { ...h.run, status: 'succeeded' }
+      if (calls === 1) throw new AnalysisClientError('service_unavailable', 'temporary', true)
       yield* []
     })
     await connect(h)
-    await vi.waitFor(() => expect(h.controller.getSnapshot().run?.status).toBe('succeeded'), { timeout: 2500 })
+    // 轮询降级后每 2 秒一次快照读取；快照链路含原生异步步骤（哈希），
+    // waitFor 的每轮重试让出真实事件循环，避免 fake timers 下链路饿死。
+    await vi.waitFor(async () => {
+      await vi.advanceTimersByTimeAsync(2_100)
+      expect(calls).toBe(1)
+      expect(h.controller.getSnapshot().run?.status).toBe('succeeded')
+    }, { timeout: 10_000 })
     expect(h.client.startRun).not.toHaveBeenCalled()
     expect(h.client.createRun).not.toHaveBeenCalled()
+  })
+  it('rotates a silent event stream every 5 seconds instead of degrading to polling', async () => {
+    vi.useFakeTimers()
+    const h = await seeded('generating')
+    let streams = 0
+    // 静默流生成器有意不 yield：保持挂起直到被轮转/中止信号打断，模拟真实 SSE 长连接。
+    // eslint-disable-next-line require-yield
+    vi.mocked(h.client.events).mockImplementation(async function* (_runId: string, init?: { signal?: AbortSignal }) {
+      streams++
+      await new Promise<never>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+      })
+    })
+    await connect(h)
+    // 轮转后继续流订阅（streams 增长）；若轮转被误判为流结束会永久降级轮询（streams 停在 1）。
+    await vi.waitFor(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(streams).toBeGreaterThanOrEqual(3)
+    }, { timeout: 15_000 })
+    expect(h.controller.getSnapshot().run?.status).toBe('generating')
+    expect(h.client.startRun).not.toHaveBeenCalled()
   })
   it('reports errors without disclosing transport messages or secrets', () => {
     for (const status of [404, 410]) expect(analysisActionError(clientError('request_failed', status))).toContain('已删除或过期')
@@ -321,6 +354,36 @@ describe('analysis task orchestration', () => {
 })
 
 describe('audit recovery regressions', () => {
+  it.each(['silent', 'closed', 'unavailable', 'unsupported'] as const)('reconciles terminal state with %s SSE without generating again', async (mode) => {
+    vi.useFakeTimers()
+    const h = await seeded('mapping')
+    vi.spyOn(fingerprints, 'createSourceSnapshot').mockResolvedValue(h.run.request.manifest.sources[0]!)
+    if (mode === 'unsupported') vi.mocked(h.client.capabilities).mockResolvedValue({ ...capabilities, supportsSse: false })
+    vi.mocked(h.client.events).mockImplementation(async function* (_id, { signal }) {
+      if (mode === 'unavailable') throw new TypeError('private-network-detail')
+      if (mode === 'silent') await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        if (signal.aborted) reject(signal.reason)
+      })
+      yield* []
+    })
+    await connect(h)
+    await vi.advanceTimersByTimeAsync(1)
+    h.run = { ...h.run, status: 'failed', revision: 2,
+      error: { version: 1, code: 'provider_unavailable', category: 'availability', retryable: false,
+        messageKey: 'analysis.provider.invocation_unavailable', details: { reason: 'invocation_outcome_unknown', providerCode: 'request_timeout' } } }
+    await vi.advanceTimersByTimeAsync(8_000)
+    expect(h.controller.getSnapshot().run?.status).toBe('failed')
+    expect(h.controller.getSnapshot().run?.error?.details?.providerCode).toBe('request_timeout')
+    expect(h.controller.getSnapshot().error).toBeUndefined()
+    const reads = vi.mocked(h.client.getRun).mock.calls.length
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(h.client.getRun).toHaveBeenCalledTimes(reads)
+    if (mode === 'unsupported') expect(h.client.events).not.toHaveBeenCalled()
+    for (const mutation of [h.client.createRun, h.client.startRun, h.client.retryArtifact, h.client.uploadSource]) expect(mutation).not.toHaveBeenCalled()
+    h.controller.disconnect()
+  })
+
   it.each(['changed', 'deleted'])('reconciles a lost create response with %s source even while held, without uploading', async (change) => {
     const h = harness(); await connect(h)
     vi.mocked(h.client.createRun).mockImplementationOnce(async (request) => { h.run = runFor(request); throw new TypeError('Synthetic lost response') })

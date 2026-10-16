@@ -14,6 +14,9 @@ export function primaryAnalysisError(run: AnalysisRunV1): AnalysisErrorV1 | unde
 
 /** Only fixed, locally owned messages are displayed; provider details remain data. */
 export function analysisFailureMessage(error: AnalysisErrorV1): string {
+  if (error.details?.providerCode === 'request_timeout') {
+    return '等待模型响应超时，本次任务已停止。调用可能已产生费用，实际用量尚未确认；不会自动重发。请核对服务商记录，稍后可缩小原文范围重新分析。'
+  }
   if (typeof error.details?.reason === 'string' && UNKNOWN_OUTCOMES.has(error.details.reason)) {
     return '模型调用结果无法确认，使用量已保留。请先查看记录；不会自动重新调用。'
   }
@@ -85,7 +88,7 @@ export function createAnalysisDiagnostic(run: AnalysisRunV1, usage?: RunUsageV1)
     kind: 'cat-thinking-analysis-diagnostic',
     status: run.status,
     error: error ? { code: error.code, category: error.category, stage: error.stage, counts,
-      providerCode: ['finish_not_complete', 'response_not_completed', 'output_truncated', 'artifact_output_invalid',
+      providerCode: ['request_timeout', 'finish_not_complete', 'response_not_completed', 'output_truncated', 'artifact_output_invalid',
         'artifact_reference_not_found', 'artifact_reference_not_supported'].includes(String(error.details?.providerCode))
         ? error.details?.providerCode : undefined } : undefined,
     artifactErrors: Object.entries(run.artifactStates ?? {}).flatMap(([kind, state]) => state?.error

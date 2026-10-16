@@ -1,6 +1,7 @@
 import { createServer } from 'node:net'
 
 const validPort = (port) => Number.isSafeInteger(port) && port > 0 && port <= 65_535
+export const isLocalDatabasePort = (port) => validPort(port) && port >= 1024
 const probeError = (port, error) => {
   const systemCode = typeof error?.code === 'string' && /^[A-Z0-9_]+$/u.test(error.code) ? error.code : 'UNKNOWN'
   return Object.assign(new Error(`local_app_port_probe_failed:${port}:${systemCode}`), { port, systemCode })
@@ -21,6 +22,18 @@ export const probeLoopbackPort = async (port, serverFactory = createServer) => {
       else resolve(true)
     }))
   })
+}
+
+// Pick a port only when creating a new database configuration. Existing
+// configurations keep their port so that they always address their own data.
+export const chooseLocalDatabasePort = async ({ preferredPort = 55432, candidateCount = 10, probe = probeLoopbackPort } = {}) => {
+  if (!isLocalDatabasePort(preferredPort) || !Number.isSafeInteger(candidateCount) || candidateCount < 1 || candidateCount > 10) {
+    throw new Error('local_app_port_configuration_invalid')
+  }
+  for (let offset = 0; offset < candidateCount && preferredPort + offset <= 65_535; offset++) {
+    if (await probe(preferredPort + offset)) return preferredPort + offset
+  }
+  throw new Error(`local_app_no_available_port:database:${candidateCount}`)
 }
 
 export const chooseLocalAppPorts = async ({ preferredServicePort = 8787, preferredFrontendPort = 5173,

@@ -7,11 +7,6 @@ $downloadUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.6-5-window
 # Digest recorded from the official HTTPS download; not an independently signed vendor checksum.
 $expectedDigest = 'E2246BA91D22345BC3D017586C09EDE52D9DF180B1EEB480F050445F1CAD84E2'
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
-if (-not (Test-Path -LiteralPath $archivePath)) {
-  Write-Output 'Downloading official PostgreSQL Windows binaries...'
-  Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath -TimeoutSec 600 -UseBasicParsing
-}
-if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -ne $expectedDigest) { throw 'PostgreSQL archive digest mismatch; refusing extraction.' }
 $postgresPath = Join-Path $runtimeRoot 'pgsql\bin\postgres.exe'
 if (Test-Path -LiteralPath $postgresPath) {
   $version = & $postgresPath --version
@@ -19,6 +14,8 @@ if (Test-Path -LiteralPath $postgresPath) {
   Write-Output 'PostgreSQL 18.6 binaries already installed.'
   exit 0
 }
+. (Join-Path $PSScriptRoot 'verified-postgres-download.ps1')
+Save-VerifiedPostgresArchive -ArchivePath $archivePath -DownloadUrl $downloadUrl -ExpectedDigest $expectedDigest
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
 try {

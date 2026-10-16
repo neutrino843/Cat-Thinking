@@ -50,6 +50,8 @@ export function analysisActionError(error: unknown): string {
   return '连接或本地存储失败，操作结果可能尚未确认。请恢复查看，避免重复发起。'
 }
 const canReadAgain = (error: unknown) => !(error instanceof AnalysisClientError) || error.retryable
+/** eventBatch 定时器轮转哨兵：仅表示本轮 5 秒订阅到期，不代表连接失败，不得触发轮询降级。 */
+const STREAM_ROTATED = new Error('analysis event stream rotated')
 const delay = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
   if (signal.aborted) { reject(signal.reason); return }
   const abort = () => { clearTimeout(timer); reject(signal.reason) }
@@ -111,7 +113,7 @@ export class AnalysisTaskController {
       window.addEventListener('focus', this.onFocus)
       document.addEventListener('visibilitychange', this.onFocus)
     }
-    void this.initialize(this.requireSignal(), true)
+    void this.initialize(this.requireSignal(), false)
     return () => { if (this.lifetime === lifetime) this.disconnect() }
   }
   disconnect() {
@@ -197,7 +199,7 @@ export class AnalysisTaskController {
     let run: AnalysisRunV1
     let sources: SourceDocument[]
     try {
-      [run, sources] = await Promise.all([this.client.getRun(task.runId, signal), this.repository.sources(this.docId)])
+      ;[run, sources] = await Promise.all([this.client.getRun(task.runId, signal), this.repository.sources(this.docId)])
     } catch (error) {
       if (!signal.aborted && error instanceof AnalysisClientError && (error.status === 404 || error.status === 410)) {
         this.publish({ mirror: undefined, run: this.state.run && { ...this.state.run, status: 'expired' }, artifactReadErrors: {} })
@@ -487,41 +489,70 @@ export class AnalysisTaskController {
     lifetime.addEventListener('abort', abort, { once: true })
     void this.watchReadOnly(task.runId, watcher.signal).finally(() => lifetime.removeEventListener('abort', abort))
   }
+  /** Rotate streams so a silent/broken SSE connection cannot hide terminal state.
+   * A failed stream falls back to bounded, read-only snapshot polling.
+   * 定时器轮转不是连接失败：以 STREAM_ROTATED 哨兵结束本轮，watchReadOnly 捕获后继续下一轮流订阅。 */
+  private async *eventBatch(runId: string, signal: AbortSignal) {
+    const batch = new AbortController()
+    const streamSignal = AbortSignal.any([signal, batch.signal])
+    const timer = setTimeout(() => batch.abort(), 5_000)
+    try {
+      yield* this.client.events(runId, { signal: streamSignal, lastEventId: this.state.task?.lastEventId })
+    } catch (error) {
+      if (signal.aborted || !batch.signal.aborted) throw error
+      throw STREAM_ROTATED
+    } finally { clearTimeout(timer); batch.abort() }
+  }
   private async watchReadOnly(runId: string, signal: AbortSignal) {
     let failures = 0
+    let pollingOnly = this.state.capabilities?.supportsSse === false
+    let readError: string | undefined
     while (!signal.aborted) {
       try {
-        if (this.state.run && isAnalysisTerminal(this.state.run)) await delay(Math.min(500 * 2 ** failures, 8_000), signal)
+        if (pollingOnly || this.state.run && isAnalysisTerminal(this.state.run)) await delay(pollingOnly ? 2_000 : Math.min(500 * 2 ** failures, 8_000), signal)
         await this.refresh(signal)
+        if (readError && this.state.error === readError) this.publish({ error: undefined })
+        readError = undefined
         let lastRefreshAt = Date.now()
         if (this.state.sourceChanged) return
         if (this.state.run && isAnalysisTerminal(this.state.run)) {
           if (!this.hasRetryableReads() || ++failures >= 5) return
           continue
         }
-        for await (const event of this.client.events(runId, { signal, lastEventId: this.state.task?.lastEventId })) {
-          signal.throwIfAborted()
-          const reduction = applyAnalysisEvent(this.state.mirror ?? createRunMirror(runId), event)
-          if (!reduction.accepted) continue
-          this.publish({ mirror: reduction.state })
-          if (['artifact.ready', 'artifact.failed', 'run.completed', 'run.cancelled', 'run.failed', 'run.expired'].includes(event.type) || Date.now() - lastRefreshAt >= 5_000) {
-            await this.refresh(signal); lastRefreshAt = Date.now()
+        if (pollingOnly) { failures = 0; continue }
+        let rotated = false
+        try {
+          for await (const event of this.eventBatch(runId, signal)) {
+            signal.throwIfAborted()
+            const reduction = applyAnalysisEvent(this.state.mirror ?? createRunMirror(runId), event)
+            if (!reduction.accepted) continue
+            this.publish({ mirror: reduction.state })
+            if (['artifact.ready', 'artifact.failed', 'run.completed', 'run.cancelled', 'run.failed', 'run.expired'].includes(event.type) || Date.now() - lastRefreshAt >= 5_000) {
+              await this.refresh(signal); lastRefreshAt = Date.now()
+            }
+            const task = this.state.task
+            if (task) await this.save({ ...task, lastEventId: event.eventId, lastSequence: event.sequence, updatedAt: Date.now() }, signal)
+            if (this.state.run && isAnalysisTerminal(this.state.run)) {
+              if (!this.hasRetryableReads()) return
+              break
+            }
+            failures = 0
           }
-          const task = this.state.task
-          if (task) await this.save({ ...task, lastEventId: event.eventId, lastSequence: event.sequence, updatedAt: Date.now() }, signal)
-          if (this.state.run && isAnalysisTerminal(this.state.run)) {
-            if (!this.hasRetryableReads()) return
-            break
-          }
-          failures = 0
+        } catch (error) {
+          if (error !== STREAM_ROTATED) throw error
+          rotated = true
         }
         if (!this.state.run || !isAnalysisTerminal(this.state.run)) {
+          // 每轮到期都做一次快照核对（轮转的目的），但只有真实流结束才降级轮询。
           await this.refresh(signal)
-          if (!this.state.run || !isAnalysisTerminal(this.state.run)) throw new Error('Event stream ended before completion')
+          // Snapshot reads remain available even when the stream closes early.
+          if (!rotated && (!this.state.run || !isAnalysisTerminal(this.state.run))) pollingOnly = true
         }
       } catch (error) {
         if (signal.aborted) return
-        this.publish({ mirror: this.state.mirror && markConnectionLost(this.state.mirror), error: analysisActionError(error) })
+        pollingOnly = true
+        readError = analysisActionError(error)
+        this.publish({ mirror: this.state.mirror && markConnectionLost(this.state.mirror), error: readError })
         if (!canReadAgain(error) || ++failures >= 5) return
         await delay(Math.min(500 * 2 ** failures, 8_000), signal).catch(() => {})
       }

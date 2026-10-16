@@ -12,8 +12,8 @@ import { useLearningClock } from './useLearningClock'
 import ExamSessionPanel from './ExamSessionPanel'
 import { loadPersonalCapacity } from '../../learning/preferences'
 
-export default function ReviewDashboard({ snapshot, exam, onPractice, onKnowledge, action, busy }: {
-  snapshot: CourseSnapshot; exam: boolean; onPractice: (pointId?: string, questionKey?: string, sessionId?: string) => void; onKnowledge: (id: string) => void; action: LearningAction; busy: boolean
+export default function ReviewDashboard({ snapshot, exam, onPractice, onKnowledge, action, busy, onRemediate, reportSessionId, onJourney }: {
+  snapshot: CourseSnapshot; exam: boolean; onPractice: (pointId?: string, questionKey?: string, sessionId?: string, reportId?: string) => void; onKnowledge: (id: string) => void; action: LearningAction; busy: boolean; onRemediate?: (attemptId: string, reportId?: string) => void; reportSessionId?: string; onJourney?: (id: string) => void
 }) {
   const [scope, setScope] = useState(snapshot.points.filter((p) => p.status === 'active' && (snapshot.course.goals ? snapshot.course.goals.some((goal) => goal.confirmed && goal.pointIds.includes(p.id)) : p.goalIncluded)).map((p) => p.id))
   const [date, setDate] = useState(snapshot.course.examDate ?? '')
@@ -48,6 +48,7 @@ export default function ReviewDashboard({ snapshot, exam, onPractice, onKnowledg
       {!plan.selected.length && <p>今天没有已排入的任务。确认知识点、添加复习日期，或在资料页调整每天可用时间。</p>}
       {plan.backlog.length > 0 && <details><summary>查看未排入的 {plan.backlog.length} 项</summary><ul className="learning-list">{plan.backlog.map((task) => <li key={task.id}><strong>{task.title}</strong><span>{task.deferredReason}</span></li>)}</ul></details>}
       {snapshot.sessions.some((s) => s.status === 'active') && <section><h4>继续上次学习</h4>{snapshot.sessions.filter((s) => s.status === 'active').map((s) => <button key={s.id} className="tbtn" onClick={() => onKnowledge(s.pointIds[0])}>{s.title}</button>)}</section>}
+      {(snapshot.journeys ?? []).filter((item) => item.status !== 'completed').map((item) => <p key={item.id}>{item.title}<button className="tbtn" onClick={() => onJourney?.(item.id)}>继续这轮学习</button></p>)}
       <h4>复习队列</h4><ul className="learning-list">{snapshot.schedules.map((schedule) => <li key={schedule.id}><strong>{schedule.dueDate}</strong><span>{schedule.status === 'paused' ? '已暂停' : schedule.status === 'remediation' ? '先补学再验证' : schedule.manual ? '手动安排' : '规则建议'} · {schedule.ruleVersion}</span>
         <div className="learning-actions"><button className="tbtn" onClick={() => onPractice('', questionKey(schedule.question))}>打开题目</button><button className="tbtn" disabled={busy} onClick={() => void action(() => saveEntity({ ...schedule, status: schedule.status === 'paused' ? 'active' : 'paused' }, schedule.revision))}>{schedule.status === 'paused' ? '恢复队列' : '暂停复习'}</button></div></li>)}</ul>
     </>}
@@ -59,7 +60,7 @@ export default function ReviewDashboard({ snapshot, exam, onPractice, onKnowledg
       <label className="learning-option"><input type="checkbox" checked={customTypes} onChange={(event) => { setCustomTypes(event.target.checked); setShowExam(false) }} />指定各题型数量</label>{customTypes && <div className="learning-fields"><label>选择题数<input type="number" min="0" max="100" value={choiceCount} onChange={(event) => { setChoiceCount(Number(event.target.value)); setShowExam(false) }} /></label><label>判断题数<input type="number" min="0" max="100" value={booleanCount} onChange={(event) => { setBooleanCount(Number(event.target.value)); setShowExam(false) }} /></label><label>简答题数<input type="number" min="0" max="100" value={shortCount} onChange={(event) => { setShortCount(Number(event.target.value)); setShowExam(false) }} /></label></div>}{!typeCountValid && <p role="alert">各题型数量合计须等于模拟题量。</p>}
       <label>模拟时长（分钟）<input type="number" min="1" max="180" value={examMinutes} onChange={(event) => setExamMinutes(Number(event.target.value))} /></label>
       {selectedExam && <section><h4>模拟练习</h4><p>已有 {selectedExam.selected.length} 题，缺 {selectedExam.missingCount} 题；{selectedExam.uncoveredPointIds.length} 个范围知识点没有题目。不会自动补题。</p><p>题型：选择 {selectedExam.typeCounts['multiple-choice']}，判断 {selectedExam.typeCounts['true-false']}，简答 {selectedExam.typeCounts['short-answer']}。检查类型：记忆 {selectedExam.levelCounts.recall}，解释 {selectedExam.levelCounts.explanation}，应用 {selectedExam.levelCounts.application}。</p><ol>{selectedExam.selected.map((item) => <li key={questionKey(item.question)}><button className="tbtn" onClick={() => onPractice('', questionKey(item.question))}>练习 {item.title}</button></li>)}</ol></section>}
-      <ExamSessionPanel snapshot={snapshot} selection={selectedExam} scope={scope} action={action} busy={busy} onPractice={onPractice} durationMinutes={examMinutes} />
+      <ExamSessionPanel snapshot={snapshot} selection={selectedExam} scope={scope} action={action} busy={busy} onPractice={onPractice} durationMinutes={examMinutes} onRemediate={onRemediate} reportSessionId={reportSessionId} />
     </>}
   </section>
 }

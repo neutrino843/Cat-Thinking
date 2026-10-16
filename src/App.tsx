@@ -1,3 +1,6 @@
+import './desk.css'
+import './study.css'
+import './focus.css'
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import PresentOverlay from './components/PresentOverlay'
 import BackupBanner from './components/BackupBanner'
@@ -21,6 +24,7 @@ const Outline = lazy(() => import('./components/Outline'))
 const Palette = lazy(() => import('./components/Palette'))
 const Tabs = lazy(() => import('./components/Tabs'))
 const LearningHome = lazy(() => import('./components/learning/LearningHome'))
+const GuideCompanion = lazy(() => import('./onboarding/GuideCompanion'))
 
 function AnalysisLoadState({ onClose, failed = false, settings = false }: { onClose: () => void; failed?: boolean; settings?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null)
@@ -60,6 +64,7 @@ export default function App() {
   const presenting = useSettings((s) => s.presenting)
   const fsEntered = useRef(false)
   const [analysisOpen, setAnalysisOpen] = useState(false)
+  const [learningPreparation, setLearningPreparation] = useState(false)
   const [aiSettingsOpen, setAISettingsOpen] = useState(false)
   const [learningOpen, setLearningOpen] = useState(false)
   const [learningTarget, setLearningTarget] = useState<LearningTarget>({})
@@ -68,13 +73,27 @@ export default function App() {
     window.addEventListener('hashchange', route)
     return () => window.removeEventListener('hashchange', route)
   }, [])
+  // v2.1 需求1：首页入口准备好欢迎教程后，通过该事件统一回到学习首页
+  useEffect(() => {
+    const goHome = () => { setScreen('home'); window.location.hash = 'home' }
+    window.addEventListener('msz:open-home', goHome)
+    return () => window.removeEventListener('msz:open-home', goHome)
+  }, [])
   const openEditor = (id?: string) => {
     void (async () => { if (id) await openDocById(id); setScreen('editor'); window.location.hash = 'mindmap' })()
   }
   const openHome = () => { setScreen('home'); window.location.hash = 'home' }
+  const learningOrigin = useRef<{ docId: string; selection: string[]; view: 'mind' | 'gantt'; viewport?: import('./lib/viewport').View; gantt?: { left: number; top: number } } | null>(null)
   const learningTrigger = useRef<HTMLElement | null>(null)
   useEffect(() => {
     const open = (event: Event) => {
+      if (window.location.hash === '#mindmap' && !learningOrigin.current) {
+        const doc = useDoc.getState(); const view = useSettings.getState().view
+        const gantt = document.querySelector<HTMLElement>('.gantt-right')
+        const origin = { docId: doc.doc.id, selection: [...doc.selection], view, gantt: gantt ? { left: gantt.scrollLeft, top: gantt.scrollTop } : undefined, viewport: undefined as import('./lib/viewport').View | undefined }
+        window.dispatchEvent(new CustomEvent('msz:capture-learning-viewport', { detail: (value: import('./lib/viewport').View) => { origin.viewport = value } }))
+        learningOrigin.current = origin
+      }
       learningTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
       const detail = (event as CustomEvent<typeof learningTarget>).detail
       setLearningTarget(detail && typeof detail === 'object' ? detail : {})
@@ -88,6 +107,17 @@ export default function App() {
     return () => window.removeEventListener('msz:learning-open', open)
   }, [])
   const closeLearning = () => {
+    const origin = learningOrigin.current; learningOrigin.current = null
+    if (origin) void (async () => {
+      if (useDoc.getState().doc.id !== origin.docId && await loadDoc(origin.docId)) await openDocById(origin.docId)
+      const doc = useDoc.getState(); if (doc.doc.id !== origin.docId) return
+      doc.select(origin.selection.filter((id) => !!doc.doc.nodes[id])); useSettings.getState().setView(origin.view)
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (origin.viewport) window.dispatchEvent(new CustomEvent('msz:restore-learning-viewport', { detail: origin.viewport }))
+        const gantt = document.querySelector<HTMLElement>('.gantt-right'); const list = document.querySelector<HTMLElement>('.gantt-left')
+        if (origin.gantt && gantt) { gantt.scrollLeft = origin.gantt.left; gantt.scrollTop = origin.gantt.top; if (list) list.scrollTop = origin.gantt.top }
+      }))
+    })()
     setLearningOpen(false)
     requestAnimationFrame(() => {
       if (document.querySelector('dialog[open]')) return
@@ -96,7 +126,7 @@ export default function App() {
     })
   }
   useEffect(() => {
-    const openAnalysis = () => { setLearningOpen(false); setAISettingsOpen(false); setAnalysisOpen(true) }
+    const openAnalysis = () => { setLearningPreparation(true); setLearningOpen(false); setAISettingsOpen(false); setAnalysisOpen(true) }
     window.addEventListener('msz:learning-close-for-analysis', openAnalysis)
     return () => window.removeEventListener('msz:learning-close-for-analysis', openAnalysis)
   }, [])
@@ -371,9 +401,9 @@ export default function App() {
 
   return (
     <div className={'app' + (screen === 'home' && !presenting ? ' study-app' : '') + (presenting ? ' presenting' : '')}>
-      {screen === 'home' && !presenting ? <Suspense fallback={<div className="loading">正在打开学习首页…</div>}><LearningHome onEditor={openEditor} onAnalysis={() => { setAISettingsOpen(false); setAnalysisOpen(true) }} onSettings={openAISettings}/></Suspense>
+      {screen === 'home' && !presenting ? <Suspense fallback={<div className="loading">正在打开学习首页…</div>}><LearningHome onEditor={openEditor} onAnalysis={() => { setLearningPreparation(false); setAISettingsOpen(false); setAnalysisOpen(true) }} onSettings={openAISettings}/></Suspense>
         : <Suspense fallback={<div className="loading">正在打开思维导图工具…</div>}>
-      {!presenting && <Toolbar query={query} setQuery={setQuery} onAnalysis={() => { setAISettingsOpen(false); setAnalysisOpen(true) }} onAISettings={openAISettings} onHome={openHome} />}
+      {!presenting && <Toolbar query={query} setQuery={setQuery} onAnalysis={() => { setLearningPreparation(false); setAISettingsOpen(false); setAnalysisOpen(true) }} onAISettings={openAISettings} onHome={openHome} />}
       {!presenting && <Tabs />}
       {!presenting && <BackupBanner />}
       <div className="main">
@@ -386,7 +416,7 @@ export default function App() {
       </Suspense>}
       {!presenting && analysisOpen && (
         <Suspense fallback={<AnalysisLoadState onClose={() => setAnalysisOpen(false)} />}>
-          <AnalysisResultsPanel key={docId} docId={docId} onClose={() => setAnalysisOpen(false)} onOpenSettings={openAISettings} />
+          <AnalysisResultsPanel key={`${docId}:${learningPreparation}`} docId={docId} learningPreparation={learningPreparation} onClose={() => setAnalysisOpen(false)} onOpenSettings={openAISettings} />
         </Suspense>
       )}
       {!presenting && aiSettingsOpen && (
@@ -399,6 +429,7 @@ export default function App() {
           <LearningWorkspace initialTarget={learningTarget} onClose={closeLearning} />
         </Suspense>
       )}
+      {!presenting && <Suspense fallback={null}><GuideCompanion /></Suspense>}
     </div>
   )
 }

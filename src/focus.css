@@ -1,0 +1,103 @@
+/* Hallmark · genre: modern-minimal · macrostructure: focused learning · design-system: design.md · designed-as-app */
+.study-shell.focus-shell { display: block; min-height: 100dvh; background: var(--color-paper); color: var(--color-ink); }
+.focus-shell *, .focus-dialog * { box-sizing: border-box; }
+.focus-nav { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); padding: var(--space-sm) var(--space-lg); border-bottom: var(--rule-fine) solid var(--color-rule); }
+.focus-nav .study-brand { margin: 0; padding: 0; gap: var(--space-2xs); }
+.focus-nav nav { display: flex; align-items: center; gap: var(--space-xs); }
+.focus-nav [aria-current='page'] { color: var(--color-accent); text-decoration: underline; text-underline-offset: 8px; }
+.focus-more { position: relative; }
+.focus-more-menu { position: absolute; right: 0; top: 100%; z-index: 200; width: min(280px, calc(100vw - 32px)); padding: var(--space-2xs); display: grid; max-height: 75dvh; overflow: auto; background: var(--color-study-surface); border: var(--rule-fine) solid var(--color-rule); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.focus-more-menu button { text-align: left; min-height: var(--control-height); border: 0; background: transparent; color: var(--color-ink); padding: var(--space-xs); font: inherit; cursor: pointer; border-radius: var(--radius-input); }
+.focus-more-menu button:hover { background: var(--color-support); }
+.focus-more-menu small { padding: var(--space-xs); color: var(--color-muted); overflow-wrap: anywhere; }
+.focus-page { min-width: 0; }
+.focus-home.study-content { width: min(920px, 100%); margin: auto; padding: var(--space-md) var(--space-lg); }
+.focus-home-meta { display: flex; justify-content: space-between; align-items: center; gap: var(--space-sm); font-size: var(--text-sm); color: var(--color-muted); }
+.focus-start-modes { display: flex; gap: var(--space-3xs); flex-wrap: wrap; margin-top: var(--space-lg); }
+.focus-start-modes button { min-height: var(--control-height); border: var(--rule-fine) solid transparent; background: transparent; font: inherit; font-size: var(--text-sm); color: var(--color-muted); padding: var(--space-2xs) var(--space-sm); border-radius: var(--radius-pill); cursor: pointer; }
+.focus-start-modes button[aria-pressed='true'] { color: var(--color-accent); background: var(--color-support); border-color: var(--color-rule); }
+.focus-start-modes button:hover { border-color: var(--color-accent); }
+.focus-hero { padding: var(--space-xl) 0 var(--space-md); max-width: 700px; }
+.focus-hero h1 { font: 500 clamp(1.65rem, 3.3vw, 2.5rem)/1.5 var(--font-display); letter-spacing: .015em; margin: var(--space-2xs) 0 var(--space-md); overflow-wrap: anywhere; }
+.focus-hero-description { color: var(--color-muted); line-height: 1.9; max-width: 600px; margin-bottom: var(--space-lg); }
+.focus-muted { color: var(--color-muted); font-size: var(--text-sm); }
+.focus-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); margin-top: var(--space-md); }
+.focus-actions .study-button-primary { gap: var(--space-lg); }
+.focus-mode-label { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs); color: var(--color-muted); font-size: var(--text-sm); margin: var(--space-md) 0; }
+.focus-shell select, .focus-shell input, .focus-dialog input, .focus-dialog select { min-height: var(--control-height); max-width: 100%; min-width: 0; background: var(--color-study-surface); color: var(--color-ink); border: var(--rule-fine) solid var(--color-rule); border-radius: var(--radius-input); padding: var(--space-2xs) var(--space-xs); font: inherit; }
+.focus-first-use { display: flex; flex-wrap: wrap; gap: var(--space-xs); margin-top: var(--space-lg); }
+.focus-home-links { display: flex; flex-wrap: wrap; gap: var(--space-md); border-top: var(--rule-fine) solid var(--color-rule); padding: var(--space-sm) 0; }
+.focus-perch { box-sizing: border-box; min-width: 0; min-height: 76px; flex-shrink: 0; display: flex; justify-content: flex-end; align-items: flex-end; width: 100%; margin: var(--space-2xs) 0; padding-inline: var(--space-xs); }
+.focus-plan { border-top: var(--rule-fine) solid var(--color-rule); padding: var(--space-sm) 0; }
+.focus-plan > summary { cursor: pointer; min-height: var(--control-height); line-height: 1.8; font-size: var(--text-sm); }
+.focus-plan > summary span { color: var(--color-muted); margin-left: var(--space-xs); display: inline-block; }
+.focus-home-footer { color: var(--color-muted); font-size: var(--text-xs); display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); padding-bottom: var(--space-md); }
+.focus-choices { border: var(--rule-fine) solid var(--color-rule); border-radius: var(--radius-card); padding: var(--space-md); margin: var(--space-sm) 0; }
+.focus-choices[hidden] { display: none; }
+.focus-choices > label { display: grid; gap: var(--space-2xs); margin: var(--space-xs) 0; }
+.focus-content-list { display: grid; margin-top: var(--space-sm); }
+.focus-content-list > button, .focus-content-list > div { border: 0; border-bottom: var(--rule-fine) solid var(--color-rule); padding: var(--space-xs) 0; background: transparent; color: var(--color-ink); text-align: left; font: inherit; }
+.focus-content-list > div { display: flex; justify-content: space-between; align-items: center; gap: var(--space-xs); }
+.focus-content-list button { cursor: pointer; min-height: var(--control-height); }
+.focus-content-list > div > button:first-child { flex: 1; min-width: 0; background: transparent; border: 0; color: inherit; text-align: left; font: inherit; }
+.focus-content-list strong, .focus-content-list small { display: block; overflow-wrap: anywhere; }
+.focus-content-list small { margin-top: var(--space-3xs); color: var(--color-muted); }
+.focus-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: var(--space-md); border: var(--rule-fine) solid var(--color-rule); border-radius: var(--radius-card); background: var(--color-study-surface); color: var(--color-ink); font: var(--text-md)/1.8 var(--font-body); box-shadow: var(--shadow-card); overflow: auto; overscroll-behavior: contain; }
+.focus-dialog::backdrop { background: var(--color-overlay); }
+.focus-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+.focus-dialog h2 { font: 500 var(--text-xl)/1.5 var(--font-display); margin: 0; }
+.focus-dialog fieldset { border: var(--rule-fine) solid var(--color-rule); border-radius: var(--radius-input); margin: var(--space-md) 0; padding: var(--space-xs); }
+.focus-dialog legend { padding: 0 var(--space-2xs); }
+.focus-dialog fieldset label { display: flex; align-items: flex-start; gap: var(--space-xs); padding: var(--space-2xs); cursor: pointer; }
+.focus-dialog input[type='radio'] { min-height: 24px; width: 20px; flex: 0 0 20px; accent-color: var(--color-accent); margin: var(--space-3xs) 0 0; }
+.focus-dialog fieldset small { display: block; color: var(--color-muted); font-size: var(--text-xs); }
+.focus-dialog blockquote, .focus-study blockquote { border-left: 2px solid var(--color-accent); padding: var(--space-sm) var(--space-md); margin: var(--space-md) 0; line-height: 2; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--color-support); }
+.focus-study { max-width: 920px; width: 100%; margin: auto; padding: var(--space-md) var(--space-lg); }
+.focus-study-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-xs); flex-wrap: wrap; font-size: var(--text-sm); color: var(--color-muted); }
+.focus-study-progress { margin: var(--space-md) 0 var(--space-lg); font-size: var(--text-sm); color: var(--color-muted); }
+.focus-study-progress progress { display: block; width: 100%; height: 4px; accent-color: var(--color-accent); margin-top: var(--space-xs); }
+.focus-study-card { min-height: 260px; padding: var(--space-lg) 0; max-width: 700px; margin: auto; outline: none; }
+.focus-study-card h1 { font: 500 var(--text-2xl)/1.5 var(--font-display); margin: var(--space-sm) 0 var(--space-md); }
+.focus-study-card p { line-height: 1.9; }
+.focus-study-card section > .study-text-button { margin-top: var(--space-md); }
+.focus-study-card form { display: grid; justify-items: start; gap: var(--space-md); margin-top: var(--space-lg); }
+.focus-study-card form label { width: 100%; display: grid; gap: var(--space-xs); }
+.focus-study-card form input { width: min(100%, 420px); }
+.focus-question { font-size: var(--text-lg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.focus-study-foot { border-top: var(--rule-fine) solid var(--color-rule); display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; justify-content: space-between; color: var(--color-muted); font-size: var(--text-xs); padding: var(--space-sm) 0; }
+.focus-shell :focus-visible, .focus-dialog :focus-visible { outline: var(--focus-ring) solid var(--color-focus); outline-offset: 3px; }
+.focus-choices:focus, .focus-study-card:focus { outline: none; }
+.focus-shell button:disabled, .focus-dialog button:disabled { opacity: .55; cursor: not-allowed; }
+.focus-shell button:active:not(:disabled), .focus-dialog button:active:not(:disabled) { transform: translateY(1px); }
+@media (max-width: 600px) {
+  .focus-nav { padding: var(--space-xs) var(--space-sm); gap: var(--space-2xs); }.focus-nav nav { gap: var(--space-3xs); }
+  .focus-nav .study-brand span { font-size: var(--text-md); }.focus-home.study-content, .focus-study { padding: var(--space-sm); }
+  .focus-start-modes { gap: 0; margin-top: var(--space-sm); }.focus-start-modes button { padding: var(--space-2xs) var(--space-xs); font-size: var(--text-xs); }
+  .focus-hero { padding: var(--space-lg) 0 var(--space-sm); }.focus-hero h1 { font-size: var(--text-xl); }.focus-home-links { gap: var(--space-xs); }
+  .focus-choices { padding: var(--space-sm); }.focus-plan > summary span { display: block; margin-left: var(--space-sm); }
+  .focus-study-top > span { display: none; }.focus-study-card { padding: var(--space-sm) 0; }.focus-study-card h1 { font-size: var(--text-xl); }
+  .focus-dialog { padding: var(--space-sm); }.focus-dialog fieldset { padding: var(--space-2xs); }
+}
+@media (prefers-reduced-motion: reduce) { .focus-shell button:active:not(:disabled), .focus-dialog button:active:not(:disabled) { transform: none; } }
+
+/* Source-specific preparation and saved reading/remediation rounds. */
+.learning-bridge { max-width: 760px; margin: auto; padding: var(--space-md) 0; }
+.learning-bridge h3 { font-family: var(--font-display); font-size: var(--text-xl); }
+.journey-study { box-sizing: border-box; position: fixed; inset: 0; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-ink); background: var(--color-paper); }
+.journey-study[open] { display: flex; flex-direction: column; }
+.journey-study * { box-sizing: border-box; min-width: 0; }
+.journey-study::backdrop { background: var(--color-paper); }
+.journey-study .immersive-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-xs); }
+.journey-study progress { flex-basis: 100%; width: 100%; }
+.journey-study .immersive-body { flex: 1; min-height: 0; overflow-y: auto; }
+.journey-study textarea { width: 100%; min-height: 150px; padding: var(--space-sm); background: var(--color-study-surface); color: var(--color-ink); border: var(--rule-fine) solid var(--color-rule); border-radius: var(--radius-input); font: inherit; }
+.journey-study label { display: block; margin-block: var(--space-sm); }
+.journey-study .learning-option { display: flex; }
+.journey-study .learning-actions, .journey-study .learning-fields { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
+.journey-source { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.95; }
+.journey-study .immersive-card { margin-inline: auto; }
+.journey-study .immersive-actions { flex-wrap: wrap; }
+.journey-study h2 { overflow-wrap: anywhere; font-size: var(--text-lg); }
+@media (max-width: 600px) { .journey-study .immersive-top, .journey-study .immersive-actions { padding: var(--space-sm); } .journey-study .immersive-body { padding: var(--space-sm); } }
+
+.journey-study .focus-perch { max-width: 760px; margin-inline: auto; }

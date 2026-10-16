@@ -5,7 +5,7 @@ import { AnalysisTaskController, isAnalysisTerminal } from '../../analysis/taskC
 import { analysisTaskRepository } from '../../analysis/taskPersistence'
 import { learningBase, newLearningId, type CourseSnapshot, type LearningSupport, type QuestionRef, type SupportMode } from '../../learning/model'
 import { appendAssessment, createLearningArchive, saveEntity, updateCourse } from '../../learning/repository'
-import { prepareLearningSupport, supportGeneration, supportSources, SUPPORT_LABELS } from '../../learning/learningSupport'
+import { defaultSupportScope, MAX_SUPPORT_CHARACTERS, nextHintLevel, prepareLearningSupport, supportGeneration, supportSources, SUPPORT_LABELS } from '../../learning/learningSupport'
 import { sourceExcerpt } from '../../learning/workspaceView'
 import GroundedArtifactResults from '../analysis/GroundedArtifactResults'
 import type { LearningAction } from './CourseOverview'
@@ -52,34 +52,37 @@ function SupportRun({ record, snapshot, action, busy }: { record: LearningSuppor
 export default function LearningSupportPanel({ snapshot, pointIds, action, busy, questionRef, prompt: initialPrompt, learnerAnswer: initialAnswer, attemptId, sessionId }: {
   snapshot: CourseSnapshot; pointIds: string[]; action: LearningAction; busy: boolean; questionRef?: QuestionRef; prompt?: string; learnerAnswer?: string; attemptId?: string; sessionId?: string
 }) {
+  const refs = supportSources(snapshot, pointIds)
+  const records = (snapshot.supports ?? []).filter((item) => questionRef ? item.questionRef?.archiveId === questionRef.archiveId && item.questionRef.questionId === questionRef.questionId : item.pointIds.some((id) => pointIds.includes(id)) || !pointIds.length)
+  const suggestedHintLevel = nextHintLevel(records, pointIds, questionRef)
+  const initialScope = defaultSupportScope(snapshot, refs)
   const [mode, setMode] = useState<SupportMode>(attemptId ? 'feedback' : 'explain')
   const [prompt, setPrompt] = useState(initialPrompt ?? '')
   const [answer, setAnswer] = useState(initialAnswer ?? '')
-  const [level, setLevel] = useState(1)
+  const [level, setLevel] = useState(suggestedHintLevel)
   const [quizType, setQuizType] = useState<NonNullable<LearningSupport['quizType']>>('mixed')
   const [difficulty, setDifficulty] = useState<NonNullable<LearningSupport['difficulty']>>('medium')
-  const refs = supportSources(snapshot, pointIds)
-  const [selection, setSelection] = useState<number[]>(refs.map((_, index) => index).slice(0, 20))
+  const [selection, setSelection] = useState<number[]>(initialScope.selection)
   const [currentId, setCurrentId] = useState('')
-  const [ranges, setRanges] = useState<Record<number, { start: number; end: number }>>({})
-  const records = (snapshot.supports ?? []).filter((item) => questionRef ? item.questionRef?.archiveId === questionRef.archiveId && item.questionRef.questionId === questionRef.questionId : item.pointIds.some((id) => pointIds.includes(id)) || !pointIds.length)
+  const [ranges, setRanges] = useState<Record<number, { start: number; end: number }>>(initialScope.ranges)
+  const selectedHintLevel = Math.max(level, suggestedHintLevel) as 1 | 2 | 3
   const record = records.find((item) => item.id === currentId) ?? [...records].sort((a, b) => b.createdAt - a.createdAt)[0]
   const selected = refs.flatMap((ref, index) => selection.includes(index) ? [{ ...ref, ...ranges[index] }] : [])
   const rangeInvalid = selected.some((ref) => !Number.isInteger(ref.start) || !Number.isInteger(ref.end) || ref.start < 0 || ref.end <= ref.start || ref.end > (snapshot.archives.find((archive) => archive.id === ref.archiveId)?.sources.find((source) => source.id === ref.sourceId)?.text.length ?? 0))
   const chars = selected.reduce((sum, ref) => sum + ref.end - ref.start, 0)
   return <details className="learning-section"><summary>AI 学习辅助 · 依据当前资料</summary>
     {snapshot.course.example ? <p>示例仅使用预先核对的内容。请在个人课程中使用 AI 辅助。</p> : <form className="learning-form" onSubmit={(event) => { event.preventDefault(); void action(async () => {
-      const existing = await prepareLearningSupport(snapshot, { mode, pointIds, sourceRefs: selected, prompt, ...(mode === 'feedback' && answer ? { learnerAnswer: answer } : {}), ...(mode === 'hint' ? { hintLevel: level } : {}), ...(mode === 'variation' ? { quizType, difficulty } : {}), ...(questionRef ? { questionRef } : {}), ...(attemptId ? { attemptId } : {}), ...(sessionId ? { sessionId } : {}) }); setCurrentId(existing.id)
+      const existing = await prepareLearningSupport(snapshot, { mode, pointIds, sourceRefs: selected, prompt, ...((mode === 'feedback' || mode === 'hint') && answer.trim() ? { learnerAnswer: answer } : {}), ...(mode === 'hint' ? { hintLevel: selectedHintLevel } : {}), ...(mode === 'variation' ? { quizType, difficulty } : {}), ...(questionRef ? { questionRef } : {}), ...(attemptId ? { attemptId } : {}), ...(sessionId ? { sessionId } : {}) }); setCurrentId(existing.id)
     }) }}>
-      <label>我需要什么帮助<select value={mode} onChange={(event) => setMode(event.target.value as SupportMode)}>{Object.entries(SUPPORT_LABELS).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
+      <label>我需要什么帮助<select value={mode} onChange={(event) => { const next = event.target.value as SupportMode; setMode(next); if (next === 'hint') setLevel(suggestedHintLevel) }}>{Object.entries(SUPPORT_LABELS).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
       <label>当前问题或学习目标<textarea required maxLength={3000} value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
-      {mode === 'feedback' && <label>我的解释（只有主动选择才发送）<textarea required maxLength={10000} value={answer} onChange={(event) => setAnswer(event.target.value)} /></label>}
-      {mode === 'hint' && <label>提示程度<select value={level} onChange={(event) => setLevel(Number(event.target.value))}><option value="1">关键概念</option><option value="2">推理步骤</option><option value="3">完整解释</option></select></label>}
+      {(mode === 'feedback' || mode === 'hint') && <label>{mode === 'feedback' ? '我的解释（检查理解时必填）' : '我已经想到的内容（可选，用于缩小提示）'}<textarea required={mode === 'feedback'} maxLength={10000} value={answer} onChange={(event) => setAnswer(event.target.value)} /></label>}
+      {mode === 'hint' && <><label>提示程度<select value={selectedHintLevel} onChange={(event) => setLevel(Number(event.target.value) as 1 | 2 | 3)}><option value="1" disabled={suggestedHintLevel > 1}>第 1 级 · 关键概念与引导问题</option><option value="2" disabled={suggestedHintLevel > 2}>第 2 级 · 下一步推理</option><option value="3">第 3 级 · 完整解释与回忆检查</option></select></label><p>系统建议第 {suggestedHintLevel} 级。查看过的提示才推进层级；完整解释后的作答仍会记录为使用过辅助。</p></>}
       {mode === 'variation' && <div className="learning-fields"><label>题型<select value={quizType} onChange={(event) => setQuizType(event.target.value as typeof quizType)}><option value="mixed">混合</option><option value="multiple-choice">选择</option><option value="true-false">判断</option><option value="short-answer">简答</option></select></label><label>难度<select value={difficulty} onChange={(event) => setDifficulty(event.target.value as typeof difficulty)}><option value="easy">基础</option><option value="medium">进阶</option><option value="hard">挑战</option></select></label></div>}
       <fieldset><legend>仅发送选中原文片段</legend>{refs.map((ref, index) => { const archive = snapshot.archives.find((item) => item.id === ref.archiveId); const source = archive && sourceExcerpt(archive, ref.sourceId, ref.start, ref.end); const total = archive?.sources.find((item) => item.id === ref.sourceId)?.text.length ?? 0; const range = ranges[index] ?? ref; return <div key={JSON.stringify(ref)}><label className="learning-option"><input type="checkbox" checked={selection.includes(index)} onChange={(event) => setSelection(event.target.checked ? [...selection, index] : selection.filter((value) => value !== index))} />{source?.name ?? '原文缺失'} · 默认 {ref.start}–{ref.end}，原文共 {total} 字符</label><div className="learning-fields"><label>片段 {index + 1} 起点<input type="number" min="0" max={total} value={range.start} onChange={(event) => setRanges({ ...ranges, [index]: { ...range, start: Number(event.target.value) } })} /></label><label>片段 {index + 1} 终点<input type="number" min="1" max={total} value={range.end} onChange={(event) => setRanges({ ...ranges, [index]: { ...range, end: Number(event.target.value) } })} /></label></div></div> })}</fieldset>
       {rangeInvalid && <p role="alert">选段范围无效，请检查起点、终点和原文长度。</p>}
-      <p>选中 {chars.toLocaleString()} 字符，最多 24,000。问题、选中片段和主动填写的解释会发给已连接模型，使用其额度；先准备再明确生成。</p>
-      <button className="tbtn" disabled={busy || rangeInvalid || !prompt.trim() || !selected.length || chars > 24000 || mode === 'feedback' && !answer.trim()}>准备本次辅助</button>
+      <p>选中 {chars.toLocaleString()} 字符，最多 {MAX_SUPPORT_CHARACTERS.toLocaleString()}。默认范围会自动截到上限内；问题、选中片段和主动填写的内容会发给已连接模型，使用其额度；先准备再明确生成。</p>
+      <button className="tbtn" disabled={busy || rangeInvalid || !prompt.trim() || !selected.length || chars > MAX_SUPPORT_CHARACTERS || mode === 'feedback' && !answer.trim()}>{mode === 'hint' ? `准备第 ${selectedHintLevel} 级提示` : '准备本次辅助'}</button>
     </form>}
     {record && <SupportRun key={record.id} record={record} snapshot={snapshot} action={action} busy={busy} />}
     {records.length > 1 && <label>查看以往辅助<select value={record?.id ?? ''} onChange={(event) => setCurrentId(event.target.value)}>{records.map((item) => <option key={item.id} value={item.id}>{SUPPORT_LABELS[item.mode]} · {new Date(item.createdAt).toLocaleString('zh-CN')}</option>)}</select></label>}
