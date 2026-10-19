@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { Readable, Writable } from 'node:stream'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi } from 'vitest'
 import { createBrowserGateway, validateBrowserGatewayConfig, type BrowserGatewayConfig } from '../src/api/browserGateway.js'
 
@@ -22,7 +24,7 @@ describe('trusted loopback browser gateway', () => {
     const fetcher = vi.fn(async () => json({ version: 1, hasApiKey: true }))
     for (const [method, path] of [['GET', '/personal/settings'], ['PUT', '/personal/settings'],
       ['POST', '/personal/models'], ['POST', '/personal/check'], ['POST', '/personal/enable'],
-      ['POST', '/personal/pause'], ['DELETE', '/personal/settings']] as const) {
+      ['POST', '/personal/pause'], ['POST', '/personal/chat'], ['DELETE', '/personal/settings']] as const) {
       const body = method === 'GET' ? undefined : JSON.stringify({ version: 1, expectedRevision: 7 })
       const e = exchange({ method, url: `/api/analysis/v1${path}`, body,
         headers: { authorization: 'Bearer browser-forged', 'x-cat-tenant-id': 'other', ...(body ? { 'content-type': 'application/json' } : {}) } })
@@ -42,6 +44,59 @@ describe('trusted loopback browser gateway', () => {
       expect(e.status).toBe(404)
     }
     expect(fetcher).toHaveBeenCalledTimes(before)
+  })
+  it('forwards version-bound chat through real loopback HTTP with trusted identity', async () => {
+    const payload = JSON.stringify({ question: '公开测试', context: '', expectedRevision: 14 })
+    let received: { url?: string; authorization?: string; tenant?: string | string[]; body: string } | undefined
+    const upstream = createServer(async (request, response) => {
+      const chunks: Buffer[] = []
+      for await (const chunk of request) chunks.push(Buffer.from(chunk))
+      received = { url: request.url, authorization: request.headers.authorization, tenant: request.headers['x-cat-tenant-id'], body: Buffer.concat(chunks).toString() }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ answer: '合成连接成功', local: false }))
+    })
+    const gatewayServer = createServer()
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+      await new Promise<void>((resolve) => gatewayServer.listen(0, '127.0.0.1', resolve))
+      const origin = `http://127.0.0.1:${(gatewayServer.address() as AddressInfo).port}`
+      const gateway = createBrowserGateway({ ...config, upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`, origins: [origin] })
+      gatewayServer.on('request', (request, response) => { void gateway(request, response) })
+      const result = await fetch(`${origin}/api/analysis/v1/personal/chat`, { method: 'POST',
+        headers: { origin, 'content-type': 'application/json', authorization: 'Bearer forged', 'x-cat-tenant-id': 'forged' }, body: payload })
+      expect(result.status).toBe(200)
+      expect(await result.json()).toEqual({ answer: '合成连接成功', local: false })
+      expect(received).toEqual({ url: '/api/analysis/v1/personal/chat', authorization: `Bearer ${config.token}`, tenant: config.tenantId, body: payload })
+      for (const [method, suffix] of [['GET', '/personal/chat'], ['POST', '/personal/chat?target=other'], ['POST', '/personal/chat/extra']]) {
+        const rejected = await fetch(`${origin}/api/analysis/v1${suffix}`, { method, headers: { origin, 'content-type': 'application/json' } })
+        expect(rejected.status).toBe(404)
+        await rejected.text()
+      }
+    } finally {
+      gatewayServer.closeAllConnections(); upstream.closeAllConnections()
+      await Promise.all([new Promise<void>((resolve) => gatewayServer.close(() => resolve())), new Promise<void>((resolve) => upstream.close(() => resolve()))])
+    }
+  })
+  it('lets chat inference exceed 30 seconds but bounds it at 125 seconds after upload', async () => {
+    vi.useFakeTimers()
+    try {
+      const e = exchange({ method: 'POST', url: '/api/analysis/v1/personal/chat', body: '{}', headers: { 'content-type': 'application/json' } })
+      const pending = createBrowserGateway(config, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 45000))
+        return json({ answer: 'done' })
+      })(e.request, e.response)
+      await vi.advanceTimersByTimeAsync(45000)
+      await pending
+      expect(e.status).toBe(200)
+      const slow = exchange({ method: 'POST', url: '/api/analysis/v1/personal/chat', body: '{}', headers: { 'content-type': 'application/json' } })
+      const timeout = createBrowserGateway(config, async (_url, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('timeout')), { once: true })
+      }))(slow.request, slow.response)
+      await vi.advanceTimersByTimeAsync(125000)
+      await timeout
+      expect(slow.status).toBe(504)
+      expect(slow.response.writableEnded).toBe(true)
+    } finally { vi.useRealTimers() }
   })
   it('allows only one contract-valid requestKey query and readonly usage plus abandon routes', async () => {
     const fetcher = vi.fn(async () => json({ status: 'absent' }))
@@ -149,10 +204,10 @@ describe('trusted loopback browser gateway', () => {
       expect(e.response.writableEnded).toBe(true)
     } finally { vi.useRealTimers() }
   })
-  it('bounds an unfinished upload and never forwards a partial body', async () => {
+  it.each(['/runs', '/personal/chat'])('bounds an unfinished upload and never forwards a partial body: %s', async (path) => {
     vi.useFakeTimers()
     try {
-      const e = exchange({ method: 'POST', url: '/api/analysis/v1/runs', headers: { 'content-type': 'application/json' } })
+      const e = exchange({ method: 'POST', url: `/api/analysis/v1${path}`, headers: { 'content-type': 'application/json' } })
       const unfinished = new Readable({ read() { /* Simulate a client that never finishes its body. */ } }) as IncomingMessage
       Object.assign(unfinished, { url: e.request.url, method: e.request.method, headers: e.request.headers, socket: e.request.socket })
       const fetcher = vi.fn(async () => json())

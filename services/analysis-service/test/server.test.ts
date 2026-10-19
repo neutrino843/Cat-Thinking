@@ -178,19 +178,42 @@ describe('analysis service security boundary', () => {
   it('rate limits API traffic with a contract-shaped retryable error', async () => {
     const server = await createServer({ ANALYSIS_RATE_LIMIT_MAX: '2' })
     const request = () => server.inject({
-      method: 'GET',
-      url: '/api/analysis/v1/capabilities',
-      headers: authorizedHeaders,
+      method: 'POST',
+      url: '/api/analysis/v1/runs',
+      headers: { ...authorizedHeaders, 'content-type': 'application/json' },
+      payload: '{}',
     })
 
-    expect((await request()).statusCode).toBe(200)
-    expect((await request()).statusCode).toBe(200)
+    await request()
+    await request()
     const limited = await request()
     const payload = analysisErrorResponseSchema.parse(limited.json())
 
     expect(limited.statusCode).toBe(429)
     expect(payload.error.code).toBe('rate_limited')
     expect(payload.error.retryable).toBe(true)
+  })
+
+  it('buckets read-only GET traffic separately from writes at a raised ceiling', async () => {
+    const server = await createServer({ ANALYSIS_RATE_LIMIT_MAX: '2' })
+    const read = () => server.inject({
+      method: 'GET',
+      url: '/api/analysis/v1/capabilities',
+      headers: authorizedHeaders,
+    })
+    const write = () => server.inject({
+      method: 'POST',
+      url: '/api/analysis/v1/runs',
+      headers: { ...authorizedHeaders, 'content-type': 'application/json' },
+      payload: '{}',
+    })
+
+    // Reads tolerate up to 4× the base limit; the 9th read exceeds 2×4.
+    for (let i = 0; i < 8; i++) expect((await read()).statusCode).toBe(200)
+    expect((await read()).statusCode).toBe(429)
+    // Write bucket was not consumed by reads: two writes remain available.
+    for (let i = 0; i < 2; i++) expect((await write()).statusCode).not.toBe(429)
+    expect((await write()).statusCode).toBe(429)
   })
 
   it('enforces JSON body size before reporting that run creation is unavailable', async () => {

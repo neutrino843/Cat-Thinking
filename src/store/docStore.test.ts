@@ -245,7 +245,7 @@ describe('docStore 撤销重做', () => {
 })
 
 describe('docStore 甘特任务', () => {
-  it('setTask：日期颠倒自动纠正、进度钳制、清空后移除 task', () => {
+  it('setTask：日期颠倒自动纠正、进度钳制、清日期保留待安排任务', () => {
     const { a } = ids()
     const t = todayISO()
     get().setTask(a, { start: addDays(t, 9), end: t, progress: 2 })
@@ -254,6 +254,8 @@ describe('docStore 甘特任务', () => {
     expect(task.end).toBe(addDays(t, 9))
     expect(task.progress).toBe(1)
     get().setTask(a, { start: undefined, end: undefined, milestone: undefined })
+    expect(doc().nodes[a].task).toEqual({ start: undefined, end: undefined, milestone: undefined, progress: 1 })
+    get().clearTask(a)
     expect(doc().nodes[a].task).toBeUndefined()
   })
 

@@ -182,7 +182,7 @@ test('ordinary permanent deletion survives two pages, queued autosave and a data
     return { doc: fixture.doc, source: fixture.source, blobId }
   })
   const latePage = await context.newPage()
-  await latePage.goto('/')
+  await latePage.goto('/#mindmap')
   await expect(latePage.getByRole('button', { name: 'AI 分析', exact: true })).toBeVisible()
   // Freeze a write closure in another tab before deletion; page visibility flush remains active.
   await latePage.evaluate(async (saved) => {

@@ -33,7 +33,8 @@ export interface OpenAICompatibleProviderOptions {
   readonly networkMode?: ProviderNetworkMode
   readonly tokenParameter?: 'max_tokens' | 'max_completion_tokens'
   readonly temperaturePolicy?: 'request' | 'omit'
-  readonly chatThinkingMode?: 'disabled' | 'disable-qwen'
+  readonly chatThinkingMode?: 'disabled' | 'disable-qwen' | 'ollama-none'
+  readonly promptOnlyJson?: boolean
   readonly requestTimeoutMs: number
   readonly maxInputCharacters: number
   readonly maxOutputTokens: number
@@ -171,7 +172,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
   private readonly structuredOutput: ProviderStructuredOutput
   private readonly tokenParameter: 'max_tokens' | 'max_completion_tokens'
   private readonly temperaturePolicy: 'request' | 'omit'
-  private readonly chatThinkingMode?: 'disabled' | 'disable-qwen'
+  private readonly chatThinkingMode?: 'disabled' | 'disable-qwen' | 'ollama-none'
+  private readonly promptOnlyJson: boolean
   private readonly fetchImplementation: FetchImplementation
 
   constructor(options: OpenAICompatibleProviderOptions) {
@@ -200,6 +202,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     this.tokenParameter = options.tokenParameter ?? 'max_completion_tokens'
     this.temperaturePolicy = options.temperaturePolicy ?? 'request'
     this.chatThinkingMode = options.chatThinkingMode
+    this.promptOnlyJson = options.promptOnlyJson ?? false
     this.fetchImplementation = options.fetchImplementation ?? createPinnedProviderFetch({
       baseUrl, networkMode: options.networkMode, maxResponseBytes: options.maxResponseBytes,
     })
@@ -296,7 +299,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     if (new TextEncoder().encode(serializedSchema).byteLength > MAX_OUTPUT_SCHEMA_BYTES) {
       throw new RangeError('structured output schema is too large')
     }
-    if (this.structuredOutput === 'json_object' && request.systemPrompt.length + request.userPrompt.length + serializedSchema.length + 150 > this.capabilities.maxInputCharacters) {
+    if ((this.structuredOutput === 'json_object' || this.promptOnlyJson) && request.systemPrompt.length + request.userPrompt.length + serializedSchema.length + 150 > this.capabilities.maxInputCharacters) {
       throw new RangeError('provider JSON schema instructions exceed configured character limit')
     }
   }
@@ -307,7 +310,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       schema: request.output.schema,
       strict: true,
     }
-    const systemPrompt = this.structuredOutput === 'json_object'
+    const systemPrompt = this.structuredOutput === 'json_object' || this.promptOnlyJson
       ? `${request.systemPrompt}\nReturn only one JSON object conforming to this JSON Schema. Do not include Markdown fences or commentary.\nJSON Schema: ${JSON.stringify(request.output.schema)}`
       : request.systemPrompt
     const temperature = this.temperaturePolicy === 'request' && request.temperature !== undefined
@@ -330,10 +333,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
         { role: 'user', content: request.userPrompt },
       ],
       [this.tokenParameter]: request.maxOutputTokens,
-      response_format: this.structuredOutput === 'json_object'
-        ? { type: 'json_object' } : { type: 'json_schema', json_schema: schema },
+      ...(!this.promptOnlyJson ? { response_format: this.structuredOutput === 'json_object'
+        ? { type: 'json_object' } : { type: 'json_schema', json_schema: schema } } : {}),
       ...(this.chatThinkingMode === 'disabled' ? { thinking: { type: 'disabled' } }
-        : this.chatThinkingMode === 'disable-qwen' ? { enable_thinking: false } : {}),
+        : this.chatThinkingMode === 'disable-qwen' ? { enable_thinking: false }
+          : this.chatThinkingMode === 'ollama-none' ? { reasoning_effort: 'none' } : {}),
       ...temperature,
     }
   }

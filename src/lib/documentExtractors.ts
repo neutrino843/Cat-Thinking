@@ -1,4 +1,5 @@
 import type { SourceKind } from '../types'
+import { recordAnalysisPerf } from '../analysis/perfEvents'
 
 export const MAX_SOURCE_BYTES = 25 * 1024 * 1024
 export const MAX_SOURCE_CHARS = 2_000_000
@@ -92,7 +93,18 @@ const extractors: Record<SourceKind, Extractor> = {
 }
 
 /** Cat-Thinking 内建解析入口；不依赖外部进程、固定端口或绝对路径。 */
+/** 解析入口（C3 埋点：成功解析耗时与格式、字节数；失败路径不记，避免噪声） */
 export async function extractDocument(
+  file: File,
+  onProgress?: ImportProgressListener,
+): Promise<ExtractedDocument> {
+  const startedAt = performance.now()
+  const result = await extractDocumentInner(file, onProgress)
+  recordAnalysisPerf({ stage: 'doc-parse', ms: Math.round(performance.now() - startedAt), kind: result.kind, bytes: file.size })
+  return result
+}
+
+async function extractDocumentInner(
   file: File,
   onProgress?: ImportProgressListener,
 ): Promise<ExtractedDocument> {

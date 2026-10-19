@@ -4,7 +4,7 @@ import { db } from '../store/db'
 
 /** Serial, rollback-capable domain double; browser coverage separately exercises actual IndexedDB. */
 export function installLearningTestStore() {
-  const names = ['learningRecords', 'learningCourseTombstones', 'learningEntityTombstones', 'docs', 'sources', 'blobs', 'docVersions', 'trash', 'documentTombstones', 'analysisTasks'] as const
+  const names = ['learningRecords', 'learningCourseTombstones', 'learningEntityTombstones', 'docs', 'sources', 'blobs', 'docVersions', 'trash', 'documentTombstones', 'analysisTasks', 'applicationReceipts'] as const
   const maps = Object.fromEntries(names.map((n) => [n, new Map<string, unknown>()])) as Record<typeof names[number], Map<string, unknown>>
   const context = new AsyncLocalStorage<boolean>()
   let tail: Promise<unknown> = Promise.resolve()
@@ -28,7 +28,7 @@ export function installLearningTestStore() {
     vi.spyOn(table, 'toArray').mockImplementation((() => Promise.resolve(structuredClone(rows()))) as typeof table.toArray)
     vi.spyOn(table, 'where').mockImplementation(((index: string) => ({ equals: (value: unknown) => {
       const matching = () => rows().filter((r) => index === '[courseId+kind]' ? JSON.stringify([r.courseId, r.kind]) === JSON.stringify(value) : r[index] === value)
-      return { toArray: () => Promise.resolve(structuredClone(matching())), sortBy: (field: string) => Promise.resolve(structuredClone(matching()).sort((left, right) => Number(left[field] ?? 0) - Number(right[field] ?? 0))), delete: () => { const found = matching(); found.forEach((r) => maps[name].delete(keyFor(r))); return Promise.resolve(found.length) } }
+      return { first: () => Promise.resolve(structuredClone(matching()[0])), toArray: () => Promise.resolve(structuredClone(matching())), sortBy: (field: string) => Promise.resolve(structuredClone(matching()).sort((left, right) => Number(left[field] ?? 0) - Number(right[field] ?? 0))), delete: () => { const found = matching(); found.forEach((r) => maps[name].delete(keyFor(r))); return Promise.resolve(found.length) } }
     } })) as unknown as typeof table.where)
   }
   vi.spyOn(db, 'transaction').mockImplementation((async (...args: unknown[]) => {

@@ -151,6 +151,10 @@ export class HttpProviderSettingsClient {
     return this.request('/settings', 'GET', personalProviderStatusSchema, signal)
   }
 
+  localOperation<T>(path: '/local-models' | '/local-models/start' | '/local-models/stop' | '/local-models/storage' | '/local-models/pull' | '/local-models/cancel' | '/chat', method: 'GET' | 'POST', decoder: Decoder<T>, signal: AbortSignal, body?: unknown): Promise<T> {
+    return this.request(path, method, decoder, signal, body)
+  }
+
   save(input: PersonalProviderSettingsInput, signal: AbortSignal): Promise<PersonalProviderStatus> {
     const parsed = personalProviderSettingsInputSchema.safeParse(input)
     if (!parsed.success) return Promise.reject(new ProviderSettingsClientError('invalid_input'))

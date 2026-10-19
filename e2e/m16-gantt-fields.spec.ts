@@ -23,6 +23,7 @@ test('甘特：设置优先级/负责人/备注，CSV 导出包含对应字段',
 
   // 切到甘特
   await page.getByRole('tab', { name: '甘特', exact: true }).click()
+  await page.getByLabel('甘特图显示范围').selectOption('all')
   await expect(page.locator('#gantt-world')).toBeAttached()
 
   // 变为任务

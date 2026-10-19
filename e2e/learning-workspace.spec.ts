@@ -101,10 +101,11 @@ test('archived study survives original task removal and reference inspection mak
   page.on('request', (request) => { if (request.method() === 'POST' && request.url().includes('/runs')) generationCalls++ })
   await page.evaluate(async ({ originDocId, sourceId }) => { const { db } = await import('/src/store/db.ts'); await db.analysisTasks.delete(originDocId); await db.sources.delete(sourceId) }, ids)
   await openWorkspace(page); await page.getByRole('button', { name: '练习', exact: true }).click()
-  await page.getByText('需要帮助，查看相关段落', { exact: true }).click()
-  await expect(page.locator('.learning-question blockquote')).toContainText('😀')
+  await expect(page.getByText('提交本题后，这里会显示与本题相关的原文段落。卡住了，可以问伊希斯要一点提示。', { exact: true })).toBeVisible()
   await page.getByRole('radio', { name: '正确项', exact: true }).check(); await expect(page.getByRole('button', { name: '提交本题' })).toBeEnabled(); await page.getByRole('button', { name: '提交本题' }).click()
   await expect(page.getByText('本次回答与参考答案一致。')).toBeVisible()
+  await page.getByText('需要帮助，查看相关段落', { exact: true }).click()
+  await expect(page.locator('.learning-question blockquote')).toContainText('😀')
   expect(generationCalls).toBe(0)
 })
 

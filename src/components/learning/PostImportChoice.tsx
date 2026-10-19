@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react'
 
 /**
  * v2.1 需求4：资料导入并归属课程后的三选一层（纯展示组件）。
- * ① 查看思维导图 ② 直接开始学习 ③ 回到学习首页（底部保留导图入口）。
+ * ① 查看思维导图 ② 直接开始学习（推荐，默认主按钮）③ 回到学习首页（底部保留导图入口）。
+ * A2 优化：「直接开始学习」为主按钮，降低新用户决策成本。
  */
 interface PostImportChoiceProps {
   docTitle: string
@@ -30,13 +31,13 @@ export default function PostImportChoice({ docTitle, onOpenMindMap, onStartLearn
         <h2>资料已加入课程</h2>
         <p>《{docTitle}》的可编辑导图已生成，选择接下来要做什么：</p>
         <div className="post-import-options">
+          <button type="button" className="post-import-option post-import-primary" onClick={onStartLearning}>
+            <strong>直接开始学习</strong>
+            <span>读一小段已保存的原文，完成第一道入门题</span>
+          </button>
           <button type="button" className="post-import-option" onClick={onOpenMindMap}>
             <strong>查看思维导图</strong>
             <span>打开导图，继续调整结构、备注与关系线</span>
-          </button>
-          <button type="button" className="post-import-option" onClick={onStartLearning}>
-            <strong>直接开始学习</strong>
-            <span>读一小段已保存的原文，完成第一道入门题</span>
           </button>
           <button type="button" className="post-import-option" onClick={onStayHome}>
             <strong>回到学习首页</strong>

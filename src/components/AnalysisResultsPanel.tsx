@@ -12,6 +12,8 @@ import LearningGoalPicker from './analysis/LearningGoalPicker'
 import KnowledgePracticeBridge from './analysis/KnowledgePracticeBridge'
 import { useKnowledgePracticeNavigation } from './analysis/useKnowledgePracticeNavigation'
 import AnalysisArchiveAction from './analysis/AnalysisArchiveAction'
+import AnalysisStageBar, { recordAnalysisComplete } from './analysis/AnalysisStageBar'
+import { recordAnalysisPerf } from '../analysis/perfEvents'
 import { analysisFailureMessage, createAnalysisDiagnostic, pendingArtifactLabel, primaryAnalysisError } from '../analysis/failurePresentation'
 
 const STATUS_LABELS: Record<string, string> = {
@@ -141,8 +143,26 @@ export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings, l
         {run?.providerRoutes[0] && <p className="analysis-source-caption">本次分析使用模型：{run.providerRoutes[0].modelId}。切换 AI 设置不会自动重做已有结果。要使用新模型，可删除这次分析内容后重新生成。</p>}
         <p>任务：{run ? STATUS_LABELS[state.mirror?.connection === 'connected' ? state.mirror.status : run.status] ?? STATUS_LABELS[run.status] : state.task.runId ? '正在恢复任务状态' : '创建结果尚未确认'}{state.mirror?.connection === 'lost' ? ' · 连接中断' : ''}</p>
         {failure && <p className="analysis-error" role="alert">{analysisFailureMessage(failure)}</p>}
+        {failure && onOpenSettings && <button className="tbtn" onClick={onOpenSettings}>检查 AI 连接</button>}
         {run?.status === 'failed' && <p className="analysis-source-caption">任务已结束，后续内容不会继续生成。「恢复查看」会读取已保存状态。要重新分析，请删除本次分析内容后手动生成；已经产生的使用量仍保留。</p>}
-        {run && <progress max={1} value={run.progress} aria-label="分析进度" />}
+        {run && <AnalysisStageBar
+          status={state.mirror?.connection === 'connected' ? state.mirror.status : run.status}
+          progress={run.progress}
+          charCount={state.task.request.manifest.sources.reduce((sum, s) => sum + (s.charCount ?? 0), 0)}
+          kinds={run.request.artifacts}
+          startedAt={run.createdAt}
+          onComplete={(totalMs) => {
+            recordAnalysisComplete(
+              state.task?.request.manifest.sources.reduce((sum, s) => sum + (s.charCount ?? 0), 0) ?? 0,
+              run.request.artifacts,
+              totalMs,
+            )
+            recordAnalysisPerf({
+              stage: 'run-complete', ms: totalMs, runId: state.task?.runId,
+              repairCount: run.artifactStates ? Object.values(run.artifactStates).filter((artifactState) => artifactState.attempt > 1).length : 0,
+            })
+          }}
+        />}
         <p className="analysis-source-caption">来源：{state.task.request.manifest.sources.map((snapshot) => {
           const source = state.sources.find((s) => s.id === snapshot.sourceId)
           return `${source?.name ?? snapshot.sourceId}（${snapshot.selectedRange ? `${snapshot.selectedRange.start}–${snapshot.selectedRange.end}` : '全文'}）`

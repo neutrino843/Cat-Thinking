@@ -175,6 +175,9 @@ export class MSZDB extends Dexie {
     this.version(10).stores({ documentTombstones: 'id' })
     // Learning V1 is additive: live task retention never removes immutable learning archives.
     this.version(11).stores({ learningRecords: 'id, kind, courseId, docId, [courseId+kind]', learningCourseTombstones: 'id', learningEntityTombstones: 'id, courseId' })
+    // V4 writes new discriminated records. A v11 binary must not silently edit this database.
+    // Stores are unchanged; old records are not transformed during opening.
+    this.version(12).stores({ learningRecords: 'id, kind, courseId, docId, [courseId+kind]', learningCourseTombstones: 'id', learningEntityTombstones: 'id, courseId' })
   }
 }
 

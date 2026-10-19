@@ -323,7 +323,7 @@ describe('analysis task orchestration', () => {
     expect(h.client.startRun).not.toHaveBeenCalled()
     expect(h.client.createRun).not.toHaveBeenCalled()
   })
-  it('rotates a silent event stream every 5 seconds instead of degrading to polling', async () => {
+  it('rotates a silent event stream every 30 seconds instead of degrading to polling', async () => {
     vi.useFakeTimers()
     const h = await seeded('generating')
     let streams = 0
@@ -338,8 +338,8 @@ describe('analysis task orchestration', () => {
     await connect(h)
     // 轮转后继续流订阅（streams 增长）；若轮转被误判为流结束会永久降级轮询（streams 停在 1）。
     await vi.waitFor(async () => {
-      await vi.advanceTimersByTimeAsync(5_000)
-      expect(streams).toBeGreaterThanOrEqual(3)
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(streams).toBeGreaterThanOrEqual(2)
     }, { timeout: 15_000 })
     expect(h.controller.getSnapshot().run?.status).toBe('generating')
     expect(h.client.startRun).not.toHaveBeenCalled()
@@ -348,7 +348,8 @@ describe('analysis task orchestration', () => {
     for (const status of [404, 410]) expect(analysisActionError(clientError('request_failed', status))).toContain('已删除或过期')
     for (const code of ['unauthorized', 'forbidden'] as const) expect(analysisActionError(clientError(code))).toContain('拒绝访问')
     for (const code of ['invalid_response', 'response_too_large'] as const) expect(analysisActionError(clientError(code))).toContain('校验')
-    expect(analysisActionError(clientError('rate_limited'))).toContain('拒绝')
+    expect(analysisActionError(clientError('rate_limited'))).toContain('稍后自动恢复')
+    expect(analysisActionError(clientError('rate_limited'))).not.toContain('拒绝')
     expect(analysisActionError(new Error('secret'))).not.toContain('secret')
   })
 })
@@ -372,7 +373,9 @@ describe('audit recovery regressions', () => {
     h.run = { ...h.run, status: 'failed', revision: 2,
       error: { version: 1, code: 'provider_unavailable', category: 'availability', retryable: false,
         messageKey: 'analysis.provider.invocation_unavailable', details: { reason: 'invocation_outcome_unknown', providerCode: 'request_timeout' } } }
-    await vi.advanceTimersByTimeAsync(8_000)
+    // Silent SSE is discovered by the 30s stream rotation + snapshot reconciliation;
+    // degraded modes converge faster via bounded polling. 31s covers both paths.
+    await vi.advanceTimersByTimeAsync(31_000)
     expect(h.controller.getSnapshot().run?.status).toBe('failed')
     expect(h.controller.getSnapshot().run?.error?.details?.providerCode).toBe('request_timeout')
     expect(h.controller.getSnapshot().error).toBeUndefined()

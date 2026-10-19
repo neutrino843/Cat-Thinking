@@ -17,17 +17,25 @@ export const createPersonalModelProvider = (
 ): ModelProvider => {
   const baseUrl = normalizeProviderBaseUrl(settings.baseUrl, { networkMode: settings.networkMode })
   if (!settings.modelId) throw new ProviderConnectionError('model_required')
+  if (settings.networkMode === 'local-loopback' && /cloud/iu.test(settings.modelId)) throw new ProviderConnectionError('local_model_required')
   if (settings.networkMode === 'public' && !settings.apiKey) throw new ProviderConnectionError('credentials_required')
   const preset = getProviderPreset(settings.providerId)
   const endpointPreset = preset?.id === 'custom' ? PROVIDER_CATALOG.find((entry) => (
     entry.baseUrl && new URL(entry.baseUrl).origin === new URL(baseUrl).origin
   )) : undefined
   const effectivePreset = endpointPreset ?? preset
-  const chatThinkingMode = effectivePreset?.id === 'deepseek' && ['deepseek-flash', 'deepseek-v4-pro'].includes(settings.modelId)
+  const chatThinkingMode = settings.networkMode === 'local-loopback' && settings.providerId === 'ollama' && /^qwen3:(?:4b|8b)$/u.test(settings.modelId)
+    ? 'ollama-none' as const
+    : effectivePreset?.id === 'deepseek' && ['deepseek-flash', 'deepseek-v4-pro'].includes(settings.modelId)
     ? 'disabled' as const
     : effectivePreset?.id === 'moonshot' && settings.modelId === 'kimi-k2.6' ? 'disabled' as const
       : effectivePreset?.id === 'qwen' && ['qwen3.7-plus', 'qwen3.8-flash', 'qwen3.8-max'].includes(settings.modelId)
-        ? 'disable-qwen' as const : undefined
+        ? 'disable-qwen' as const
+        : effectivePreset?.id === 'mobilecloud' && settings.modelId === 'deepseek-v4-flash-0731'
+          // Real probe confirmed the gateway ignores enable_thinking:false but
+          // honors thinking:{type:'disabled'} (reasoningCharacters null vs 14).
+          // Default reasoning otherwise exhausts the 4096-token output budget.
+          ? 'disabled' as const : undefined
   return new OpenAICompatibleProvider({
     id: `personal-${settings.providerId}`,
     profileVersion,
@@ -43,6 +51,7 @@ export const createPersonalModelProvider = (
     // provide broader compatibility without a paid trial-and-fallback call.
     temperaturePolicy: 'omit',
     chatThinkingMode,
+    promptOnlyJson: effectivePreset?.promptOnlyJson,
     requestTimeoutMs: 300_000,
     maxInputCharacters: PERSONAL_PROVIDER_LIMITS.maxInputCharacters,
     maxOutputTokens: PERSONAL_PROVIDER_LIMITS.maxOutputTokens,

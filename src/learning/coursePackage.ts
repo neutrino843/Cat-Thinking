@@ -9,14 +9,15 @@ import { isRecord, parseLearningEntity, parseSourceDocument, validateLearningArc
 import { LearningError, newLearningId, type Course, type LearningEntity, type LearningArchive } from './model'
 import { sameQuestion } from './workspaceView'
 import { prerequisiteCycle, questionRefKey } from './knowledgeGraph'
+import { assertNodeSupportArchive } from './nodeContracts'
 
 export const COURSE_PACKAGE_LIMITS = Object.freeze({ maxFileBytes: 192 * 1024 * 1024, maxPayloadBytes: 128 * 1024 * 1024, maxBlobBytes: 64 * 1024 * 1024, maxRecords: 50_000, maxDocuments: 1000, maxNodes: 50_000 })
 const FORMAT = 'maosizhi-course'
 const ITERATIONS = 250_000
-const AAD = new TextEncoder().encode(`${FORMAT}:1`)
+const packageAAD = (version: 1 | 2) => new TextEncoder().encode(`${FORMAT}:${version}`)
 interface PortableBlob { id: string; docId: string; nodeId?: string; mime: string; data: string; hash: string; createdAt: number }
 interface PortableDocument { doc: DocData; sources: SourceDocument[]; blobs: PortableBlob[]; versions: { id: string; docId: string; title: string; createdAt: number; doc: DocData }[] }
-export interface CoursePackagePayload { experience?: ExperiencePreferences; format: typeof FORMAT; version: 1; exportedAt: number; course: Course; records: LearningEntity[]; documents: PortableDocument[]; missingDocumentIds: string[]; contentHash: string }
+export interface CoursePackagePayload { experience?: ExperiencePreferences; format: typeof FORMAT; version: 1 | 2; exportedAt: number; course: Course; records: LearningEntity[]; documents: PortableDocument[]; missingDocumentIds: string[]; contentHash: string }
 export interface CoursePackagePreview { courseName: string; exportedAt: number; counts: { documents: number; sources: number; blobs: number; archives: number; attempts: number; schedules: number; records: number }; warnings: string[]; payload: CoursePackagePayload }
 function invalid(message = '课程包结构、版本或引用无效。'): never { throw new LearningError('invalid', message) }
 function keys(v: unknown, allowed: string[]): Record<string, unknown> { if (!isRecord(v) || Object.keys(v).some((k) => !allowed.includes(k))) invalid(); return v }
@@ -55,10 +56,12 @@ function entityReferences(record: LearningEntity): { questionRefs: { archiveId: 
 export async function validateCoursePackagePayload(raw: unknown): Promise<CoursePackagePayload> {
   const input = keys(raw, ['experience', 'format', 'version', 'exportedAt', 'course', 'records', 'documents', 'missingDocumentIds', 'contentHash'])
   if (input.experience !== undefined && canonicalizeJson(input.experience) !== canonicalizeJson(parseExperience(input.experience))) invalid('学习偏好格式无效。')
-  if (input.format !== FORMAT || input.version !== 1 || typeof input.exportedAt !== 'number' || !Number.isSafeInteger(input.exportedAt) || input.exportedAt < 0 || typeof input.contentHash !== 'string') invalid()
+  if (input.format !== FORMAT || input.version !== 1 && input.version !== 2 || typeof input.exportedAt !== 'number' || !Number.isSafeInteger(input.exportedAt) || input.exportedAt < 0 || typeof input.contentHash !== 'string') invalid()
   if (new TextEncoder().encode(canonicalizeJson(input)).length > COURSE_PACKAGE_LIMITS.maxPayloadBytes) invalid('课程包超过 128 MB 的校验上限。')
   const course = parseLearningEntity(input.course); if (course.kind !== 'course') invalid()
   boundedArray(input.records, COURSE_PACKAGE_LIMITS.maxRecords); const records = input.records.map(parseLearningEntity)
+  if (input.version === 1 && records.some((r) => r.kind === 'node-workspace' || r.kind === 'relation' && r.reason !== undefined) || input.version === 1 && course.learningMode !== undefined) invalid('V4 学习内容必须使用第 2 版课程包。')
+  if (records.filter((r) => r.kind === 'node-workspace').length > 1) invalid('课程包包含重复节点工作区。')
   if (records.some((r) => r.kind === 'course' || r.courseId !== course.id) || new Set([course.id, ...records.map((r) => r.id)]).size !== records.length + 1) invalid()
   boundedArray(input.documents, COURSE_PACKAGE_LIMITS.maxDocuments); boundedArray(input.missingDocumentIds, COURSE_PACKAGE_LIMITS.maxDocuments)
   if (input.missingDocumentIds.some((v) => typeof v !== 'string')) invalid()
@@ -94,6 +97,11 @@ export async function validateCoursePackagePayload(raw: unknown): Promise<Course
   const pointExists = (id: string) => ids.get(id)?.kind === 'point'
   for (const goal of course.goals ?? []) if (goal.pointIds.some((id) => !pointExists(id))) invalid('目标目录关联知识点缺失。')
   for (const record of records) {
+    if (record.kind === 'node-workspace') {
+      for (const binding of record.bindings) if (!pointExists(binding.pointId)) invalid('节点学习内容的知识点缺失。')
+      for (const source of record.sources) if (await sha256Hex(source.text) !== source.contentHash) invalid('节点原文快照哈希不一致。')
+      for (const support of record.supports) if (support.archiveId) assertNodeSupportArchive(record, support, archiveMap.get(support.archiveId))
+    }
     const refs = entityReferences(record)
     for (const ref of refs.questionRefs) { const archive = archiveMap.get(ref.archiveId); const artifact = archive?.artifacts.find((a) => a.id === ref.artifactId && a.kind === 'quiz'); if (!artifact || artifact.kind !== 'quiz' || !artifact.payload.questions.some((q) => q.id === ref.questionId)) invalid('课程包题目身份不一致。') }
     for (const ref of refs.sourceRefs) { const source = archiveMap.get(ref.archiveId)?.sources.find((s) => s.id === ref.sourceId); if (!source || ref.end > source.text.length) invalid('课程包原文引用越界或缺失。') }
@@ -174,7 +182,7 @@ export async function exportCoursePackage(courseId: string, options: { password?
     if (await db.learningCourseTombstones.get(courseId)) invalid('课程已删除。')
     const course = await db.learningRecords.get(courseId); if (!course || course.kind !== 'course') invalid('课程不存在。')
     const records = (await db.learningRecords.where('courseId').equals(courseId).toArray()).filter((r) => r.id !== courseId)
-    const docIds = new Set(records.flatMap((r) => r.kind === 'document' || r.kind === 'binding' || r.kind === 'support' ? [r.docId] : r.kind === 'journey' && r.source ? [r.source.docId] : []))
+    const docIds = new Set(records.flatMap((r) => r.kind === 'node-workspace' ? r.supports.filter((s) => !s.restored).map((s) => s.docId) : r.kind === 'document' || r.kind === 'binding' || r.kind === 'support' ? [r.docId] : r.kind === 'journey' && r.source ? [r.source.docId] : []))
     const documents = []; const missingDocumentIds: string[] = []
     for (const docId of docIds) {
       const row = await db.docs.get(docId); if (!row) { missingDocumentIds.push(docId); continue }
@@ -188,27 +196,31 @@ export async function exportCoursePackage(courseId: string, options: { password?
     for (const row of item.blobs) { const bytes = new Uint8Array(await row.blob.arrayBuffer()); blobs.push({ id: row.id, docId: row.docId, ...(row.nodeId ? { nodeId: row.nodeId } : {}), mime: row.blob.type, data: bytesToBase64(bytes), hash: await hashBytes(bytes), createdAt: row.createdAt }) }
     documents.push({ doc: item.doc, sources: item.sources, blobs, versions: item.versions.map((v) => ({ id: v.id, docId: v.docId, title: v.title, createdAt: v.createdAt, doc: JSON.parse(v.payload) as DocData })) })
   }
-  const payload: CoursePackagePayload = JSON.parse(JSON.stringify({ format: FORMAT, version: 1, exportedAt: Date.now(), experience: useExperience.getState().preferences, course: captured.course, records: captured.records, documents, missingDocumentIds: captured.missingDocumentIds, contentHash: '' })) as CoursePackagePayload
+  const version = captured.course.learningMode !== undefined || captured.records.some((r) => r.kind === 'node-workspace' || r.kind === 'relation' && r.reason !== undefined) ? 2 : 1
+  const payload: CoursePackagePayload = JSON.parse(JSON.stringify({ format: FORMAT, version, exportedAt: Date.now(), experience: useExperience.getState().preferences, course: captured.course, records: captured.records, documents, missingDocumentIds: captured.missingDocumentIds, contentHash: '' })) as CoursePackagePayload
   payload.contentHash = await sha256Hex(canonicalizeJson(payloadForHash(payload))); await validateCoursePackagePayload(payload)
   if (!options.password) return new Blob([JSON.stringify(payload)], { type: 'application/vnd.maosizhi.course+json' })
   const salt = crypto.getRandomValues(new Uint8Array(16)); const iv = crypto.getRandomValues(new Uint8Array(12)); const key = await passwordKey(options.password, salt)
-  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: asBuffer(iv), additionalData: asBuffer(AAD) }, key, asBuffer(new TextEncoder().encode(JSON.stringify(payload))))
-  return new Blob([JSON.stringify({ format: FORMAT, version: 1, encrypted: true, cipher: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iterations: ITERATIONS, salt: bytesToBase64(salt), iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(encrypted)) })], { type: 'application/vnd.maosizhi.course+json' })
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: asBuffer(iv), additionalData: asBuffer(packageAAD(version)) }, key, asBuffer(new TextEncoder().encode(JSON.stringify(payload))))
+  return new Blob([JSON.stringify({ format: FORMAT, version, encrypted: true, cipher: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iterations: ITERATIONS, salt: bytesToBase64(salt), iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(encrypted)) })], { type: 'application/vnd.maosizhi.course+json' })
 }
 export async function previewCoursePackage(file: Blob, options: { password?: string } = {}): Promise<CoursePackagePreview> {
   if (file.size > COURSE_PACKAGE_LIMITS.maxFileBytes) throw new LearningError('limit', '课程包文件超过 192 MB。')
   let raw: unknown
+  let envelopeVersion: 1 | 2 | undefined
   try { raw = JSON.parse(await file.text()) } catch { invalid('课程包不是有效 JSON 文件。') }
   if (isRecord(raw) && raw.encrypted === true) {
     const envelope = keys(raw, ['format', 'version', 'encrypted', 'cipher', 'kdf', 'iterations', 'salt', 'iv', 'data'])
-    if (envelope.format !== FORMAT || envelope.version !== 1 || envelope.cipher !== 'AES-256-GCM' || envelope.kdf !== 'PBKDF2-SHA256' || envelope.iterations !== ITERATIONS) invalid('课程包加密版本不受支持。')
+    if (envelope.format !== FORMAT || envelope.version !== 1 && envelope.version !== 2 || envelope.cipher !== 'AES-256-GCM' || envelope.kdf !== 'PBKDF2-SHA256' || envelope.iterations !== ITERATIONS) invalid('课程包加密版本不受支持。')
+    envelopeVersion = envelope.version as 1 | 2
     const salt = base64ToBytes(envelope.salt, 16); const iv = base64ToBytes(envelope.iv, 12); if (salt.length !== 16 || iv.length !== 12) invalid()
     if (!options.password) throw new LearningError('password', '此课程包已加密，请输入密码。')
     const key = await passwordKey(options.password, salt)
-    try { const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: asBuffer(iv), additionalData: asBuffer(AAD) }, key, asBuffer(base64ToBytes(envelope.data, COURSE_PACKAGE_LIMITS.maxPayloadBytes + 16))); raw = JSON.parse(new TextDecoder().decode(decrypted)) }
+    try { const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: asBuffer(iv), additionalData: asBuffer(packageAAD(envelopeVersion)) }, key, asBuffer(base64ToBytes(envelope.data, COURSE_PACKAGE_LIMITS.maxPayloadBytes + 16))); raw = JSON.parse(new TextDecoder().decode(decrypted)) }
     catch { throw new LearningError('password', '密码不正确或加密课程包已经损坏。') }
   }
   const payload = await validateCoursePackagePayload(raw)
+  if (envelopeVersion !== undefined && payload.version !== envelopeVersion) invalid('加密封装和内容版本不一致。')
   const warnings = payload.missingDocumentIds.length ? [`${payload.missingDocumentIds.length} 份可编辑文档已经不存在；归档原文和学习记录仍会恢复，失效编辑关联会移除。`] : []
   let historicalMissing = 0; let staleMappings = 0
   for (const bundle of payload.documents) {
@@ -261,6 +273,37 @@ export async function restoreCoursePackage(preview: CoursePackagePreview, option
   }
   const remapEntity = (input: LearningEntity): LearningEntity => {
     const r = structuredClone(input); r.id = localId(r.id); r.courseId = courseId
+    if (r.kind === 'node-workspace') {
+      const nested = new Map([...r.chapters, ...r.sources, ...r.rounds, ...r.notes, ...r.events, ...r.supports].map((item) => [item.id, newLearningId()]))
+      const nestedId = (id: string) => mapped(nested, id)
+      const remapRefs = (refs: typeof r.bindings[number]['refs']) => refs.map((ref) => ({ ...ref, snapshotId: nestedId(ref.snapshotId) }))
+      r.chapters.forEach((c) => { c.id = nestedId(c.id) })
+      r.sources.forEach((s) => {
+        const oldDoc = s.originDocId
+        s.id = nestedId(s.id); s.provenanceDocId ??= oldDoc; s.provenanceSourceId ??= s.originSourceId
+        s.originDocId = docMap.get(oldDoc) ?? oldDoc
+        s.originSourceId = sourceMaps.get(oldDoc)?.get(s.originSourceId) ?? s.originSourceId
+        s.anchors?.forEach((a) => { a.nodeId = nodeMaps.get(oldDoc)?.get(a.nodeId) ?? a.nodeId })
+      })
+      r.bindings.forEach((b) => {
+        b.pointId = localId(b.pointId); b.chapterId = nestedId(b.chapterId); b.refs = remapRefs(b.refs)
+        if (b.originKey) {
+          try {
+            const key: unknown = JSON.parse(b.originKey)
+            if (Array.isArray(key) && key.length === 3 && key.every((v) => typeof v === 'string')) {
+              if (key[0] === 'doc') b.originKey = JSON.stringify(['doc', docMap.get(key[1]) ?? key[1], nodeMaps.get(key[1])?.get(key[2]) ?? key[2]])
+              if (key[0] === 'archive') b.originKey = JSON.stringify(['archive', localId(key[1]), key[2]])
+            }
+          } catch { /* Preserve unknown legacy candidate keys as historical labels. */ }
+        }
+      })
+      r.rounds.forEach((round) => { round.id = nestedId(round.id); round.pointId = localId(round.pointId); round.refs = remapRefs(round.refs) })
+      r.notes.forEach((note) => { note.id = nestedId(note.id); note.pointId = localId(note.pointId); if (note.roundId) note.roundId = nestedId(note.roundId) })
+      r.events.forEach((event) => { event.id = nestedId(event.id); event.roundId = nestedId(event.roundId); if (event.supportId) event.supportId = nestedId(event.supportId) })
+      r.supports.forEach((support) => { support.id = nestedId(support.id); support.roundId = nestedId(support.roundId); support.refs = remapRefs(support.refs); support.docId = docMap.get(support.docId) ?? support.docId; if (support.archiveId) support.archiveId = localId(support.archiveId); support.restored = true })
+      if (r.lastPointId) r.lastPointId = localId(r.lastPointId)
+      if (r.lastRoundId) r.lastRoundId = nestedId(r.lastRoundId)
+    }
     if (r.kind === 'course') r.goals = r.goals?.map((goal) => ({ ...goal, id: newLearningId(), pointIds: goal.pointIds.map(localId) }))
     if ('question' in r) r.question.archiveId = localId(r.question.archiveId)
     if (r.kind === 'archive') r.originDocId = docMap.get(r.originDocId) ?? r.originDocId

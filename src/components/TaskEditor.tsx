@@ -2,6 +2,7 @@ import { useDoc } from '../store/docStore'
 import { todayISO } from '../lib/date'
 import { getTheme } from '../lib/theme'
 import { useSettings } from '../store/settings'
+import { createPortal } from 'react-dom'
 
 export default function TaskEditor({ id, onClose }: { id: string; onClose: () => void }) {
   const node = useDoc((s) => s.doc.nodes[id])
@@ -18,17 +19,20 @@ export default function TaskEditor({ id, onClose }: { id: string; onClose: () =>
     .filter((n) => n.id !== id && n.task)
     .sort((a, b) => a.text.localeCompare(b.text))
 
-  return (
+  return createPortal(
     <div
       className="task-editor"
+      role="dialog"
+      aria-label="编辑任务"
       style={{ background: theme.panel, borderColor: theme.ink, color: theme.ink }}
       onPointerDown={(e) => e.stopPropagation()}
+      onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); onClose() } }}
     >
       <div className="te-head">
         <span className="te-title" title={node.text}>
           📌 {node.text || '未命名节点'}
         </span>
-        <button className="tbtn" onClick={onClose}>
+        <button className="tbtn" onClick={onClose} aria-label="关闭任务编辑">
           ✕
         </button>
       </div>
@@ -127,6 +131,13 @@ export default function TaskEditor({ id, onClose }: { id: string; onClose: () =>
       </div>
 
       <button
+        className="tbtn"
+        disabled={!t.start && !t.end}
+        onClick={() => st.setTask(id, { start: undefined, end: undefined, progress: t.progress ?? 0 })}
+      >
+        清除排期，保留待安排任务
+      </button>
+      <button
         className="tbtn te-clear"
         onClick={() => {
           st.clearTask(id)
@@ -135,6 +146,6 @@ export default function TaskEditor({ id, onClose }: { id: string; onClose: () =>
       >
         移除任务信息（节点保留）
       </button>
-    </div>
+    </div>, document.body
   )
 }

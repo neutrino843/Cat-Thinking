@@ -1,19 +1,21 @@
 import { artifactEnvelopeSchema, canonicalizeJson, identifierSchema, sourceKindSchema, sourceManifestSchema, validateArtifactAgainstManifest } from '@cat-thinking/analysis-contracts'
 import { createSourceSnapshot, sha256Hex } from '../analysis/fingerprint'
+import { validateNodeState } from './nodeContracts'
 import type { SourceDocument } from '../types'
 import { LearningError, type ArchivedSourceRef, type LearningArchive, type LearningEntity, type QuestionRef } from './model'
 
 const baseKeys = ['originId', 'version', 'id', 'courseId', 'revision', 'createdAt', 'updatedAt', 'kind']
 const fields: Record<LearningEntity['kind'], string[]> = {
+  'node-workspace': ['chapters', 'sources', 'bindings', 'rounds', 'notes', 'events', 'supports', 'lastPointId', 'lastRoundId'],
   journey: ['mode', 'title', 'status', 'step', 'note', 'position', 'scroll', 'dueDate', 'finishedAt', 'source', 'questionRef', 'archiveHash', 'attemptId', 'retryAttemptId', 'parentSessionId', 'originSessionId', 'blockedReason', 'planning'],
-  course: ['firstStudyAt', 'name', 'goal', 'timeZone', 'dailyMinutes', 'dailyQuestionLimit', 'examDate', 'goalVersion', 'automaticReviews', 'goals', 'example'],
+  course: ['firstStudyAt', 'name', 'goal', 'timeZone', 'dailyMinutes', 'dailyQuestionLimit', 'examDate', 'goalVersion', 'automaticReviews', 'goals', 'example', 'learningMode'],
   document: ['docId', 'chapter', 'role'], point: ['title', 'definition', 'chapter', 'parentId', 'aliases', 'notes', 'sourceRefs', 'questionRefs', 'status', 'docId', 'nodeId', 'questionLevels', 'goalIncluded', 'archiveId', 'generatedNodeId'],
   archive: ['originDocId', 'provenanceDocId', 'runId', 'title', 'manifest', 'sources', 'artifacts', 'contentHash'],
   attempt: ['question', 'answer', 'submittedAt', 'learningDate', 'answerRevealed', 'origin', 'confidence', 'sessionId', 'assistance', 'recallText'],
   draft: ['question', 'answer', 'answerRevealed', 'attemptId', 'assistance', 'recallText'],
   assessment: ['attemptId', 'outcome', 'difficulty', 'selfAssessmentComplete', 'reason', 'rubricChecks', 'sequence', 'feedbackArchiveId', 'origin'],
   schedule: ['question', 'status', 'dueDate', 'stage', 'lastLearningDate', 'lastAttemptId', 'manual', 'ruleVersion', 'successfulLearningDates', 'suspendedReason'],
-  relation: ['fromPointId', 'toPointId', 'type', 'confirmed', 'sourceRefs'],
+  relation: ['fromPointId', 'toPointId', 'type', 'confirmed', 'sourceRefs', 'reason'],
   merge: ['fromPointId', 'toPointId', 'action', 'undoOf', 'beforePoints', 'beforeRelations', 'afterPointRevisions', 'afterRelationRevisions', 'undoDisabledReason'],
   session: ['title', 'pointIds', 'status', 'steps', 'endedAt', 'purpose', 'questions', 'checkpoint', 'examConfig', 'planning'],
   application: ['pointIds', 'title', 'prompt', 'response', 'rubric', 'checks', 'status', 'learningDate'],
@@ -72,6 +74,7 @@ export function parseLearningEntity(v: unknown): LearningEntity {
   const kind = v.kind as LearningEntity['kind']; const r = strictObject(v, [...baseKeys, ...fields[kind]])
   if (r.version !== 1) invalid(); id(r.id); if (r.originId !== undefined) id(r.originId); id(r.courseId); number(r.revision, 1); number(r.createdAt); number(r.updatedAt)
   switch (kind) {
+    case 'node-workspace': return validateNodeState(r)
     case 'journey': {
       one(r.mode, ['reading', 'remediation']); text(r.title, 500); if (!(r.title as string).trim()) invalid()
       one(r.status, ['active', 'paused', 'completed']); number(r.step, 0, 3); text(r.note, 10000); number(r.position, 0, 8_000_000); number(r.scroll, 0, 10_000_000)
@@ -86,6 +89,7 @@ export function parseLearningEntity(v: unknown): LearningEntity {
       break
     }
     case 'course':
+      if (r.learningMode !== undefined) one(r.learningMode, ['nodes', 'legacy'])
       if (r.firstStudyAt !== undefined) number(r.firstStudyAt)
       if (r.id !== r.courseId) invalid(); text(r.name, 200); if (!(r.name as string).trim()) invalid(); text(r.goal); text(r.timeZone, 100)
       try { new Intl.DateTimeFormat('en', { timeZone: r.timeZone as string }).format() } catch { invalid() }
@@ -127,6 +131,7 @@ export function parseLearningEntity(v: unknown): LearningEntity {
       if (r.lastLearningDate !== undefined) date(r.lastLearningDate); if (r.lastAttemptId !== undefined) id(r.lastAttemptId); if (r.successfulLearningDates !== undefined) { array(r.successfulLearningDates, 1000); r.successfulLearningDates.forEach(date) }
       if (r.suspendedReason !== undefined) text(r.suspendedReason, 2000); break
     case 'relation':
+      if (r.reason !== undefined) text(r.reason, 3000)
       id(r.fromPointId); id(r.toPointId); if (r.fromPointId === r.toPointId) invalid(); one(r.type, ['prerequisite', 'part', 'step', 'comparison', 'cause', 'application']); bool(r.confirmed); if (r.sourceRefs !== undefined) { array(r.sourceRefs, 100); r.sourceRefs.forEach(parseArchivedSourceRef) } break
     case 'merge':
       id(r.fromPointId); id(r.toPointId); if (r.fromPointId === r.toPointId) invalid(); one(r.action, ['merge', 'undo']); if (r.undoOf !== undefined) id(r.undoOf)

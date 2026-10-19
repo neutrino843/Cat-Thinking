@@ -116,6 +116,7 @@ describe('provider invocation coordinator', () => {
     overrides: Partial<ProviderInvocationPolicy> = {},
     delay: (milliseconds: number, signal: AbortSignal) => Promise<void> = async () => undefined,
     canInvoke?: () => Promise<boolean>,
+    maxInvocationsForRun?: (tenantId: string, runId: string) => Promise<number | undefined>,
   ): ProviderInvocationCoordinator => new ProviderInvocationCoordinator({
     router: new ProviderRouter([provider], [{
       id: 'evidence-standard',
@@ -136,6 +137,7 @@ describe('provider invocation coordinator', () => {
     random: () => 0.5,
     delay,
     canInvoke,
+    maxInvocationsForRun,
   })
 
   const input = (invocationId: string, nodeKey = invocationId) => ({
@@ -221,6 +223,14 @@ describe('provider invocation coordinator', () => {
     await expect(coordinator({}, async () => { ready = false }, async () => ready).generate(input('release-retry'), new AbortController().signal)).rejects.toMatchObject({ kind: 'release_not_ready' })
     expect(provider.generate).toHaveBeenCalledTimes(1)
     expect((await store.getRunLedgerUsage('tenant-provider', runId))?.unresolvedCount).toBe(0)
+  })
+
+  it('honors the smaller per-request invocation cap before another model call', async () => {
+    provider.generate.mockResolvedValue({ outputText: '{"claims":[]}', usage: { inputTokens: 2, outputTokens: 2 } })
+    const limited = coordinator({ maxRunInvocations: 24 }, undefined, undefined, async () => 3)
+    for (let i = 0; i < 3; i++) await limited.generate(input(`bounded-${i}`), new AbortController().signal)
+    await expect(limited.generate(input('bounded-over'), new AbortController().signal)).rejects.toMatchObject({ kind: 'budget_exceeded' })
+    expect(provider.generate).toHaveBeenCalledTimes(3)
   })
 
   it('reserves budget before the call and persists only bounded invocation metadata on success', async () => {

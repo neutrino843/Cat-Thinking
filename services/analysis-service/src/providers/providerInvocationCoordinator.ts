@@ -102,6 +102,7 @@ interface CircuitPermit {
 }
 
 export interface ProviderInvocationCoordinatorOptions {
+  readonly maxInvocationsForRun?: (tenantId: string, runId: string) => Promise<number | undefined>
   readonly canInvoke?: () => Promise<boolean>
   readonly router: ProviderRouter
   readonly ledger: ProviderInvocationLedger
@@ -164,6 +165,7 @@ const requestInputTokenUpperBound = (request: ModelRequest): number => {
 }
 
 export class ProviderInvocationCoordinator {
+  private readonly maxInvocationsForRun?: ProviderInvocationCoordinatorOptions['maxInvocationsForRun']
   private readonly canInvoke?: () => Promise<boolean>
   private readonly router: ProviderRouter
   private readonly ledger: ProviderInvocationLedger
@@ -175,6 +177,7 @@ export class ProviderInvocationCoordinator {
   private readonly circuits = new Map<string, CircuitState>()
 
   constructor(options: ProviderInvocationCoordinatorOptions) {
+    this.maxInvocationsForRun = options.maxInvocationsForRun
     const policy = options.policy ?? DEFAULT_PROVIDER_INVOCATION_POLICY
     positiveInteger(policy.maxAttempts, 'maxAttempts', 5)
     positiveInteger(policy.retryBaseDelayMs, 'retryBaseDelayMs', 60_000)
@@ -223,6 +226,8 @@ export class ProviderInvocationCoordinator {
         reservedOutputTokens: input.request.maxOutputTokens,
       })
       nonNegativeInteger(estimatedCostMicros, 'estimatedCostMicros')
+      const requestedLimit = await this.maxInvocationsForRun?.(input.tenantId, input.runId)
+      if (requestedLimit !== undefined) positiveInteger(requestedLimit, 'requestedInvocationLimit', 24)
       const reserved = await this.ledger.reserveProviderInvocation({
         tenantId: input.tenantId,
         runId: input.runId,
@@ -239,7 +244,7 @@ export class ProviderInvocationCoordinator {
         estimatedCostMicros,
         maxRunEstimatedTokens: this.policy.maxRunEstimatedTokens,
         maxRunEstimatedCostMicros: this.policy.maxRunEstimatedCostMicros,
-        maxRunInvocations: this.policy.maxRunInvocations,
+        maxRunInvocations: requestedLimit === undefined ? this.policy.maxRunInvocations : Math.min(requestedLimit, this.policy.maxRunInvocations ?? 24),
         staleAfterMs: this.policy.staleAfterMs,
         now: this.now(),
       })

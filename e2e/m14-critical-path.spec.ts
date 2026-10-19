@@ -31,6 +31,7 @@ test('甘特关键路径：依赖链上的任务条高亮为关键路径色，�
 
   // 切到甘特
   await page.getByRole('tab', { name: '甘特', exact: true }).click()
+  await page.getByLabel('甘特图显示范围').selectOption('all')
   await expect(page.locator('#gantt-world')).toBeAttached()
 
   // 把 A、B 变为任务

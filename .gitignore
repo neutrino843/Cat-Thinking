@@ -1,4 +1,6 @@
 node_modules/
+/runtime/
+/.local-ai-validation/
 dist/
 coverage/
 coverage-postgres/
@@ -28,6 +30,10 @@ audit/
 
 # 本机过程资料与生成产物（保留测试代码、固定测试素材和产品图片）
 /reports/
+/.cache/
+/.trae-html-share-packages/
+/docs/iterations/
+/docs/v3/
 /.learning-v1-run/
 /design.md
 /PRD.md

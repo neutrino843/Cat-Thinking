@@ -6,6 +6,7 @@ import { EXPERIENCE_KEY, refreshExperience, useExperience } from '../learning/ex
 import { FORMAL_HELP } from './companionContext'
 import './guide.css'
 import { useAchievementShelf } from '../learning/achievementShelf'
+import LocalIsisChat from './LocalIsisChat'
 
 function Isis() {
   return <img className="isis-portrait" src={`${import.meta.env.BASE_URL}images/isis-cat.jpg`} width={76} height={76} alt="" aria-hidden="true" draggable={false} />
@@ -29,6 +30,7 @@ export default function GameCompanion() {
   const seen = useRef(new Set<string>())
   const [dialogPage, setDialogPage] = useState(0)
   const [toolsOpen, setToolsOpen] = useState(false)
+  const [localChatOpen, setLocalChatOpen] = useState(false)
   const [historyIndex, setHistoryIndex] = useState(-1)
   const lastPrompt = useRef(0)
   const previousFocus = useRef<HTMLElement | null>(null)
@@ -65,10 +67,11 @@ export default function GameCompanion() {
       const paused = !!formal?.querySelector('.immersive-card h3')?.textContent?.startsWith('已暂停')
       const current = useGuide.getState().progress
       const central = !!document.querySelector('[data-guide-study]')
+      const editor = !!scope.querySelector('.canvas-wrap')
       const preview = !!document.querySelector('.document-import-modal')
       const hint = auxiliary ? '这里可以按需查看或调整当前选项。关闭我的对话后，继续当前操作。' : readingScene ? '这里是独立阅读，可以正常滚动。读好后点「返回刚才的学习」，原回答会保留。' : formal ? failed ? '先处理上面的保存或资料提示。当前输入先保留在这里，别急着退出。' : paused ? '这轮已经暂停，点「继续本次学习」就能接着学。' : ({ prepare: '这是刚才那份资料。先核对待确认内容，或点「先读原文」；不会自动调用模型。', 'reading:0': '先读中央这一小段。想再看一点可读下一段，读好后点「继续下一步」。', 'reading:1': '在这里用自己的话写一点理解。文字保存好后，就能继续选回看日期。', 'reading:2': '想稍后再看就选一个日期；也可以先不安排，然后保存这一轮。', 'remediation:0': '先对照原文，找一找刚才哪里需要修正，再继续下一步。', 'remediation:1': '记下一点修正，接下来会重新回答原来那道题。旧答案会保留。', 'remediation:2': '真正提交这次重试；简答还需自评。最后由你决定后续日期。', 'round-end': '这一轮已保留。看看实际安排的日期，再返回课程或原报告。' } as Record<string, string>)[step] ?? FORMAL_HELP[step] ?? FORMAL_HELP.done : practice ? practice.dataset.hasQuestion === 'true' ? FORMAL_HELP.practice : '这里还没有可用题目。可以到课程资料阅读，或返回首页选择原文入门练习；不会自动生成题目。' : preview ? SHORT_COPY.preview : central || current.status === 'active' && current.step === 'import' ? SHORT_COPY[current.step] : '从首页的推荐任务开始，或点「换个内容学」。'
       const round = formal?.dataset.sessionId ?? formal?.dataset.journeyId ?? formal?.dataset.sourceDocument ?? practice?.dataset.practiceCourse ?? ''
-      const next = { key: formal ? `formal:${round}:${step}:${failed}:${paused}` : practice ? `practice:${practice.dataset.practiceCourse}:${practice.dataset.hasQuestion}` : preview ? 'preview' : central ? `guide:${current.step}` : 'home', hint, formal: !!formal || !!practice || !!readingScene || auxiliary, failed, round, helpId: help?.dataset.sourceHelp ?? '', canRead: help?.dataset.canRead === 'true', reader: !!readingScene, auxiliary }
+      const next = { key: formal ? `formal:${round}:${step}:${failed}:${paused}` : practice ? `practice:${practice.dataset.practiceCourse}:${practice.dataset.hasQuestion}` : preview ? 'preview' : central ? `guide:${current.step}` : editor ? 'editor' : 'home', hint, formal: !!formal || !!practice || !!readingScene || auxiliary, failed, round, helpId: help?.dataset.sourceHelp ?? '', canRead: help?.dataset.canRead === 'true', reader: !!readingScene, auxiliary }
       setScene((previous) => previous.key === next.key && previous.hint === next.hint && previous.helpId === next.helpId && previous.reader === next.reader && previous.auxiliary === next.auxiliary ? previous : next)
     }
     const observer = new MutationObserver(update)
@@ -77,7 +80,7 @@ export default function GameCompanion() {
     return () => { observer.disconnect(); document.removeEventListener('fullscreenchange', update) }
   }, [])
   useEffect(() => {
-    const focus = () => { const element = document.activeElement; if (element instanceof HTMLElement && !element.closest('.isis-companion')) lastStudyFocus.current = element; setTyping(!!element?.matches('input, textarea, [contenteditable="true"]')) }
+    const focus = () => { const element = document.activeElement; if (element instanceof HTMLElement && element !== document.body && !element.closest('.isis-companion')) lastStudyFocus.current = element; setTyping(!!element?.matches('input, textarea, [contenteditable="true"]')) }
     window.addEventListener('focusin', focus); window.addEventListener('focusout', focus)
     return () => { window.removeEventListener('focusin', focus); window.removeEventListener('focusout', focus) }
   }, [])
@@ -89,13 +92,17 @@ export default function GameCompanion() {
     return () => window.clearTimeout(timer)
   }, [context])
   useEffect(() => {
+    if (scene.key === 'editor' && p.status !== 'active') {
+      const clear = window.setTimeout(() => setBubble({ key: '', text: '' }), 0)
+      return () => window.clearTimeout(clear)
+    }
     if (scene.auxiliary || Date.now() - lastPrompt.current < 120_000 || mode === 'quiet' || (mode === 'beginner' && hasCompleted) || seen.current.has(hintKey)) return
     if (mode === 'gentle' && scene.formal && !scene.failed && seen.current.has(`intro:${scene.round}`)) return
     if (mode === 'gentle' && !scene.formal && p.status !== 'idle' && p.step !== 'import' && !failureAt) return
     const show = window.setTimeout(() => { lastPrompt.current = Date.now(); seen.current.add(hintKey); if (scene.formal) seen.current.add(`intro:${scene.round}`); setBubble({ key: hintKey, text: scene.hint }) }, 300)
     const hide = window.setTimeout(() => setBubble({ key: '', text: '' }), 12_000)
     return () => { window.clearTimeout(show); window.clearTimeout(hide) }
-  }, [scene.auxiliary, mode, hintKey, failureAt, p.status, p.step, hasCompleted, scene.formal, scene.failed, scene.round, scene.hint])
+  }, [scene.key, scene.auxiliary, mode, hintKey, failureAt, p.status, p.step, hasCompleted, scene.formal, scene.failed, scene.round, scene.hint])
   useEffect(() => {
     if (!active || scene.formal || mode === 'quiet' || (!expanded && (mode !== 'beginner' || hasCompleted))) return
     let target: Element | null = null
@@ -136,6 +143,8 @@ export default function GameCompanion() {
       <p className="isis-line" role="log" aria-label="与伊希斯的对话" aria-live="polite">{currentMessage?.speaker === 'you' ? '你：' : ''}{pages[Math.min(dialogPage, pages.length - 1)]}</p>
       {pages.length > 1 && <div className="isis-choices"><button disabled={!dialogPage} onClick={() => setDialogPage(dialogPage - 1)}>上一句</button><small>{dialogPage + 1} / {pages.length}</small><button disabled={dialogPage >= pages.length - 1} onClick={() => setDialogPage(dialogPage + 1)}>下一句</button></div>}
       {storageError && <p role="alert">{storageError}</p>}
+      <button className="tbtn" aria-pressed={localChatOpen} onClick={() => setLocalChatOpen(!localChatOpen)}>{localChatOpen ? '收起模型问答' : '模型问答'}</button>
+      {localChatOpen && <LocalIsisChat/>}
       {!toolsOpen ? <><div className="isis-choices">{scene.reader ? <button onClick={() => { close(); Array.from(document.querySelectorAll<HTMLDialogElement>('dialog[open]')).at(-1)?.querySelector<HTMLButtonElement>('[data-reader-return]')?.click() }}>返回刚才的学习</button> : scene.helpId ? <><button onClick={() => { window.dispatchEvent(new CustomEvent('msz:source-action', { detail: { id: scene.helpId, action: 'related' } })); close() }}>看相关段落</button>{scene.canRead && <button onClick={() => { window.dispatchEvent(new CustomEvent('msz:source-action', { detail: { id: scene.helpId, action: 'read' } })); close() }}>进入独立阅读</button>}</> : <><button onClick={scene.auxiliary ? close : scene.formal || p.status !== 'idle' ? locate : () => { startGuide(); close() }}>{scene.auxiliary ? '继续当前操作' : scene.formal ? '回到当前学习' : p.status === 'idle' ? '带我完成第一道题' : '定位操作'}</button><button onClick={() => chat('下一步怎么做')}>给点提示</button></>}<button onClick={() => setToolsOpen(true)}>更多对话</button></div>
       <form className="isis-chat-form" onSubmit={(event) => { event.preventDefault(); chat(input) }}><label className="sr-only" htmlFor="isis-chat">对伊希斯说</label><input id="isis-chat" maxLength={400} value={input} onChange={(event) => setInput(event.target.value)} placeholder="说说你卡在哪里…"/><button disabled={!input.trim()}>发送</button></form></> : <div className="isis-choices">
         <button onClick={() => { setToolsOpen(false); chat('下一步怎么做') }}>给点提示</button><button onClick={locate}>回到当前学习</button><button onClick={() => { setToolsOpen(false); chat('会收费吗') }}>会收费吗</button><button onClick={() => { setToolsOpen(false); chat('资料怎么保存') }}>资料怎么保存</button>
@@ -149,7 +158,7 @@ export default function GameCompanion() {
         {active && !scene.formal && HELP_REASONS.slice(0, 2).map((reason) => <button key={reason} onClick={() => { guideHelp(reason); chat(reason, false); setToolsOpen(false) }}>{reason}</button>)}
         <button onClick={() => setToolsOpen(false)}>返回对话</button>
       </div>}
-    </section> : bubble.key === hintKey && bubble.text && !scene.auxiliary && mode !== 'quiet' && !typing && <div className="isis-bubble"><span>{bubble.text}</span><button aria-label="收起伊希斯提示" onClick={() => setBubble({ key: '', text: '' })}>×</button></div>}
+    </section> : bubble.key === hintKey && bubble.text && !scene.auxiliary && mode !== 'quiet' && (!typing || !!perch) && <div className="isis-bubble"><span>{bubble.text}</span><button aria-label="收起伊希斯提示" onClick={() => setBubble({ key: '', text: '' })}>×</button></div>}
     <button className="isis-avatar" onClick={expanded ? close : openChat} aria-label="打开伊希斯新手引导" aria-expanded={expanded}><Isis/><span>伊希斯</span>{idle && !expanded && mode !== 'quiet' && <i aria-label="可以向伊希斯求助">?</i>}</button>
   </aside>
   return perch ? createPortal(avatar, perch) : avatar

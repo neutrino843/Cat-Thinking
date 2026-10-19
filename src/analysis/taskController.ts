@@ -6,6 +6,7 @@ import type { SourceDocument } from '../types'
 import { AnalysisClientError, type AnalysisEngineClient } from './engineClient'
 import { applyAnalysisEvent, createRunMirror, markConnectionLost, reconcileRunSnapshot, type AnalysisRunMirror } from './eventReducer'
 import { createAnalysisRequestKey, createSourceSnapshot } from './fingerprint'
+import { recordAnalysisPerf } from './perfEvents'
 import { artifactContentHash } from './localArtifactIdentity'
 import { artifactDependencyClosure, DEFAULT_ANALYSIS_OPTIONS } from './artifactRegistry'
 import { sourcePartRanges, sourceUploadPart } from './sourceUpload'
@@ -44,6 +45,7 @@ export function analysisActionError(error: unknown): string {
     if (error.code === 'conflict') return '任务状态已改变，已重新读取状态；请检查后再操作。'
     if (error.code === 'unauthorized' || error.code === 'forbidden') return '分析服务拒绝访问，请检查本机服务配置。'
     if (error.code === 'invalid_response' || error.code === 'response_too_large') return '服务响应未通过校验，已停止恢复。'
+    if (error.code === 'rate_limited') return '状态同步稍慢，任务仍在进行，稍后自动恢复。'
     if (error.code === 'service_unavailable') return '分析服务尚未开放或连接中断。已有任务可稍后恢复查看。'
     return '操作被服务拒绝，请检查任务状态后再操作。'
   }
@@ -73,6 +75,7 @@ export class AnalysisTaskController {
   private unsubscribe?: () => void
   private readonly origin = crypto.randomUUID()
   private lastFocusedRead = 0
+  private lastUsageReadAt = 0
   constructor(readonly docId: string, private readonly client: AnalysisEngineClient, private readonly repository: AnalysisTaskRepository) {}
   getSnapshot = (): AnalysisTaskState => this.state
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
@@ -154,6 +157,7 @@ export class AnalysisTaskController {
     } catch (error) { if (!signal.aborted) this.publish({ capabilities: undefined, error: analysisActionError(error) }) }
   }
   private async initialize(signal: AbortSignal, resumeReceiving: boolean) {
+    const panelOpenStartedAt = performance.now()
     try {
       const [sources, task] = await Promise.all([this.repository.sources(this.docId), this.repository.load(this.docId)])
       signal.throwIfAborted()
@@ -172,7 +176,13 @@ export class AnalysisTaskController {
         signal.throwIfAborted(); this.publish({ sourceChanged })
       }
     } catch (error) { if (!signal.aborted) this.publish({ error: analysisActionError(error) }) }
-    finally { if (!signal.aborted) { this.publish({ loading: false }); this.watch() } }
+    finally {
+      if (!signal.aborted) {
+        // C4 打开加载观测：capabilities→refresh→watch 全链路耗时；>2s 需在性能报告中单列
+        recordAnalysisPerf({ stage: 'panel-open', ms: Math.round(performance.now() - panelOpenStartedAt), runId: this.state.task?.runId })
+        this.publish({ loading: false }); this.watch()
+      }
+    }
   }
   private async sourcesMatch(task: StoredAnalysisTask, sources: SourceDocument[]): Promise<boolean> {
     for (const snapshot of task.request.manifest.sources) {
@@ -187,12 +197,12 @@ export class AnalysisTaskController {
     if (run.id !== task.runId || run.docId !== this.docId || run.requestKey !== task.request.requestKey
       || canonicalizeJson(run.request) !== canonicalizeJson(task.request)) throw new AnalysisClientError('invalid_response', 'Task identity mismatch', false)
   }
-  private refresh(signal: AbortSignal): Promise<void> {
-    const read = this.reads.catch(() => {}).then(() => this.refreshSnapshot(signal))
+  private refresh(signal: AbortSignal, options?: { usage?: 'now' | 'throttled' }): Promise<void> {
+    const read = this.reads.catch(() => {}).then(() => this.refreshSnapshot(signal, options))
     this.reads = read
     return read
   }
-  private async refreshSnapshot(signal: AbortSignal): Promise<void> {
+  private async refreshSnapshot(signal: AbortSignal, options?: { usage?: 'now' | 'throttled' }): Promise<void> {
     signal.throwIfAborted()
     const task = this.state.task
     if (!task?.runId) return
@@ -235,11 +245,18 @@ export class AnalysisTaskController {
         if (artifactState?.status === 'succeeded' && artifactState.artifactId === identity.artifactId && artifactState.attempt === identity.attempt) identities[kind as ArtifactKind] = identity
       }
     }
-    const usageRead = this.client.getUsage(run.id, signal).then((usage) => {
-      signal.throwIfAborted()
-      if (usage.runId !== run.id) throw new AnalysisClientError('invalid_response', 'Usage identity mismatch', false)
-      this.publish({ usage, usageError: undefined, usageRetryable: false })
-    }).catch((error: unknown) => { if (!signal.aborted) this.publish({ usage: undefined, usageError: analysisActionError(error), usageRetryable: canReadAgain(error) }) })
+    // Usage reads follow events and explicit actions; timer-driven refreshes are
+    // throttled so steady-state polling stays well under the service rate limit.
+    let usageRead: Promise<void> | undefined
+    const usageDue = options?.usage !== 'throttled' || isAnalysisTerminal(run) || Date.now() - this.lastUsageReadAt >= 30_000
+    if (usageDue) {
+      this.lastUsageReadAt = Date.now()
+      usageRead = this.client.getUsage(run.id, signal).then((usage) => {
+        signal.throwIfAborted()
+        if (usage.runId !== run.id) throw new AnalysisClientError('invalid_response', 'Usage identity mismatch', false)
+        this.publish({ usage, usageError: undefined, usageRetryable: false })
+      }).catch((error: unknown) => { if (!signal.aborted) this.publish({ usage: undefined, usageError: analysisActionError(error), usageRetryable: canReadAgain(error) }) })
+    }
     if (!sourceChanged && run.status !== 'expired') {
       await Promise.all(run.request.artifacts.map(async (kind) => {
         const artifactState = run.artifactStates[kind]
@@ -382,7 +399,9 @@ export class AnalysisTaskController {
     const matches = await this.sourcesMatch(task, sources)
     signal.throwIfAborted()
     if (!matches) { this.publish({ sources, sourceChanged: true }); throw new AnalysisClientError('conflict', 'Source changed', false) }
+    const createStartedAt = performance.now()
     const result = await this.client.createRun(task.request, signal)
+    recordAnalysisPerf({ stage: 'analysis-create', ms: Math.round(performance.now() - createStartedAt), runId: result.run.id, chars: task.request.manifest.sources.reduce((sum, s) => sum + s.charCount, 0) })
     signal.throwIfAborted()
     this.assertRunIdentity(result.run, { ...task, runId: result.run.id })
     await this.save({ ...task, runId: result.run.id, revision: result.run.revision, updatedAt: Date.now() }, signal)
@@ -394,6 +413,8 @@ export class AnalysisTaskController {
     let task = this.state.task
     if (!task?.runId) return
     const runId = task.runId
+    const uploadStartedAt = performance.now()
+    let uploadedParts = 0
     const capabilities = await this.client.capabilities(signal)
     signal.throwIfAborted(); this.publish({ capabilities })
     if (!capabilities.acceptsRuns) throw new AnalysisClientError('service_unavailable', 'Admission closed', false)
@@ -411,6 +432,7 @@ export class AnalysisTaskController {
         const part = await sourceUploadPart(snapshot, source.text, task.partBytes, index, ranges)
         const receipt = await this.client.uploadSource(runId, part, signal)
         signal.throwIfAborted()
+        uploadedParts += 1
         if (receipt.sourceId !== snapshot.sourceId || receipt.partCount !== ranges.length
           || receipt.complete && receipt.computedHash !== snapshot.contentHash) throw new AnalysisClientError('invalid_response', 'Upload receipt mismatch', false)
         task = await this.save({ ...task, uploadedParts: { ...task.uploadedParts, [snapshot.sourceId]: receipt.receivedParts }, updatedAt: Date.now() }, signal)
@@ -418,6 +440,7 @@ export class AnalysisTaskController {
     }
     await this.refresh(signal)
     if (this.state.run?.status === 'receiving') await this.client.startRun(runId, this.state.run.revision, signal)
+    recordAnalysisPerf({ stage: 'analysis-upload', ms: Math.round(performance.now() - uploadStartedAt), runId, parts: uploadedParts })
     await this.refresh(signal)
   }
   cancel(): Promise<void> { return this.mutate('cancel') }
@@ -491,11 +514,13 @@ export class AnalysisTaskController {
   }
   /** Rotate streams so a silent/broken SSE connection cannot hide terminal state.
    * A failed stream falls back to bounded, read-only snapshot polling.
-   * 定时器轮转不是连接失败：以 STREAM_ROTATED 哨兵结束本轮，watchReadOnly 捕获后继续下一轮流订阅。 */
+   * 定时器轮转不是连接失败：以 STREAM_ROTATED 哨兵结束本轮，watchReadOnly 捕获后继续下一轮流订阅。
+   * 轮转周期 30 秒：事件驱动的 refresh 保证实时性，轮转只做兜底核对，同时把 SSE 重连的
+   * 固定请求成本从 12/min 降到 2/min，避免触碰服务端全局限流。 */
   private async *eventBatch(runId: string, signal: AbortSignal) {
     const batch = new AbortController()
     const streamSignal = AbortSignal.any([signal, batch.signal])
-    const timer = setTimeout(() => batch.abort(), 5_000)
+    const timer = setTimeout(() => batch.abort(), 30_000)
     try {
       yield* this.client.events(runId, { signal: streamSignal, lastEventId: this.state.task?.lastEventId })
     } catch (error) {
@@ -509,8 +534,10 @@ export class AnalysisTaskController {
     let readError: string | undefined
     while (!signal.aborted) {
       try {
-        if (pollingOnly || this.state.run && isAnalysisTerminal(this.state.run)) await delay(pollingOnly ? 2_000 : Math.min(500 * 2 ** failures, 8_000), signal)
-        await this.refresh(signal)
+        // Degraded polling backs off exponentially (2s → 30s cap) instead of holding a
+        // fixed 2s cadence, so a rate-limit reply cannot feed a 60 req/min retry loop.
+        if (pollingOnly || this.state.run && isAnalysisTerminal(this.state.run)) await delay(pollingOnly ? Math.min(2_000 * 2 ** failures, 30_000) : Math.min(500 * 2 ** failures, 8_000), signal)
+        await this.refresh(signal, { usage: 'throttled' })
         if (readError && this.state.error === readError) this.publish({ error: undefined })
         readError = undefined
         let lastRefreshAt = Date.now()
@@ -542,12 +569,9 @@ export class AnalysisTaskController {
           if (error !== STREAM_ROTATED) throw error
           rotated = true
         }
-        if (!this.state.run || !isAnalysisTerminal(this.state.run)) {
-          // 每轮到期都做一次快照核对（轮转的目的），但只有真实流结束才降级轮询。
-          await this.refresh(signal)
-          // Snapshot reads remain available even when the stream closes early.
-          if (!rotated && (!this.state.run || !isAnalysisTerminal(this.state.run))) pollingOnly = true
-        }
+        // 真实流结束（非定时轮转）才降级轮询；快照核对由下一轮循环顶部的 refresh
+        // 统一完成（间隔≈0），不在此重复发起背靠背读取。
+        if (!rotated && (!this.state.run || !isAnalysisTerminal(this.state.run))) pollingOnly = true
       } catch (error) {
         if (signal.aborted) return
         pollingOnly = true

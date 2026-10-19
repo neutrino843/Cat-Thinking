@@ -98,3 +98,10 @@
 .isis-companion .isis-avatar { min-width: 80px; }
 .isis-companion.is-resting .isis-portrait { transform: rotate(-7deg); }
 @media (max-width: 600px) { .isis-portrait { width: 60px; height: 60px; border-radius: 18px; }.isis-companion .isis-avatar { min-width: 64px; } }
+
+/* Hallmark · genre: modern-minimal · macrostructure: Workbench · design-system: design.md · designed-as-app */
+.isis-dialogue { max-height: min(720px, 82dvh); overflow: auto; min-width: 0; }
+.isis-local-chat { border-block: 1px solid var(--line); padding-block: var(--space-xs); overflow-wrap: anywhere; }
+.isis-local-chat label { display: grid; gap: var(--space-2xs); margin-block: var(--space-2xs); }
+.isis-local-chat textarea { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; resize: vertical; font: inherit; }
+.isis-local-answer { white-space: pre-wrap; }

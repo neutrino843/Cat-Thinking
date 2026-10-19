@@ -1,7 +1,7 @@
 {
   "name": "maosizhi",
   "private": true,
-  "version": "0.1.0",
+  "version": "3.0.0-dev.1",
   "type": "module",
   "workspaces": [
     "packages/*",
@@ -77,6 +77,7 @@
     "@cat-thinking/analysis-contracts": "0.1.0",
     "dexie": "^4.0.8",
     "fflate": "0.8.3",
+    "katex": "0.19.0",
     "pdfjs-dist": "4.8.69",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -8,6 +8,14 @@ const error = (patch: Partial<AnalysisErrorV1>) => analysisErrorSchema.parse({
 })
 
 describe('failed analysis presentation', () => {
+  it('explains a lost response without calling it a wrong key or a confirmed zero charge', () => {
+    const failure = error({ code: 'provider_unavailable', details: { reason: 'invocation_outcome_unknown', providerCode: 'response_lost' } })
+    expect(analysisFailureMessage(failure)).toContain('检查 AI 连接')
+    expect(analysisFailureMessage(failure)).toContain('实际用量尚未确认')
+    expect(analysisFailureMessage(failure)).toContain('不会自动重新调用')
+    expect(analysisFailureMessage(failure)).not.toContain('密钥错误')
+    expect(createAnalysisDiagnostic({ error: failure, providerRoutes: [], artifactStates: {} } as unknown as AnalysisRunV1).error?.providerCode).toBe('response_lost')
+  })
   it('explains the recorded timeout even when its contract code is provider_unavailable', () => {
     const message = analysisFailureMessage(error({ code: 'provider_unavailable', details: {
       reason: 'invocation_outcome_unknown', providerCode: 'request_timeout', rawResponse: 'private-secret',

@@ -43,6 +43,7 @@ export const createAnalysisProviderRuntime = (options: {
       && existing.modelId === provider.modelId && existing.profileVersion === provider.profileVersion)
   }
   const route = (promptVersion: string) => ({ providerId: provider.id, modelId: provider.modelId, profileVersion: provider.profileVersion, promptVersion })
+  const maxInvocationsForRun = async (tenantId: string, runId: string) => (await options.store.getRun(tenantId, runId))?.request.options.invocationLimit
   const prompts = new PromptRegistry()
   for (const kind of ARTIFACT_KINDS) {
     prompts.register(artifactPrompt(kind))
@@ -65,6 +66,7 @@ export const createAnalysisProviderRuntime = (options: {
       roles: [definition.role], qualityProfiles: QUALITY_PROFILES, priority: 0,
     }))
     const coordinator = new ProviderInvocationCoordinator({
+      maxInvocationsForRun,
       router: new ProviderRouter([provider], profiles), ledger: options.store,
       estimateCostMicros: options.estimateCostMicros, now: options.now, policy: options.policy, canInvoke: options.canInvoke,
     })
@@ -89,6 +91,7 @@ export const createAnalysisProviderRuntime = (options: {
     // Evidence version and its independent repair prompt instead of falling
     // through to an Artifact repair or another Evidence version.
     const evidenceCoordinator = new ProviderInvocationCoordinator({
+      maxInvocationsForRun,
       router: new ProviderRouter([provider], [
         { id: `${EVIDENCE_MAP_PROMPT_ID}.${promptVersion}`, ...route(promptVersion), promptId: EVIDENCE_MAP_PROMPT_ID,
           roles: ['evidence-map'], qualityProfiles: QUALITY_PROFILES, priority: 0 },

@@ -1,5 +1,6 @@
  import type { DocData, MindNodeData } from '../types'
 import { richNoteToText } from './sanitizeHtml'
+import { computeGantt } from './gantt'
 
 const uid = () =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -485,7 +486,7 @@ function csvCell(s: string): string {
  * 先序行；deps 的 from 解析为对应节点文本（重名不消歧，仅文本 join）；
  * 折叠状态不影响导出（完整树）。
  */
-export function toGanttCSV(doc: DocData): string {
+export function toGanttCSV(doc: DocData, scope: 'all' | 'tasks' = 'all'): string {
   const header = ['层级', '任务', '开始', '结束', '进度%', '里程碑', '优先级', '负责人', '备注', '前置任务']
   const rows: string[][] = [header]
   const root = doc.nodes[doc.rootId]
@@ -505,8 +506,10 @@ export function toGanttCSV(doc: DocData): string {
     }
   }
   collect(root, 0)
+  const included = scope === 'tasks' ? new Set(computeGantt(doc, 'week', undefined, 'tasks').rows.map((row) => row.id)) : undefined
 
   for (const { n, lv } of order) {
+    if (included && !included.has(n.id)) continue
     const t = n.task
     const deps = t?.deps?.map((d) => textMap.get(d.from) ?? d.from).join('; ') ?? ''
     rows.push([

@@ -1,10 +1,11 @@
 import type { ArtifactEnvelopeV1, SourceManifestV1 } from '@cat-thinking/analysis-contracts'
 import type { DocMeta, SourceDocument } from '../types'
+import type { NodeLearningState } from './nodeTypes'
 
 /** Versioned local learning records. No provider secrets or resumable network tasks belong here. */
 export interface LearningBase { originId?: string; version: 1; id: string; courseId: string; revision: number; createdAt: number; updatedAt: number }
 export interface CourseGoal { id: string; title: string; level: QuestionLevel; priority: 'normal' | 'important' | 'required'; pointIds: string[]; confirmed: boolean }
-export interface Course extends LearningBase { kind: 'course'; firstStudyAt?: number; name: string; goal: string; timeZone: string; dailyMinutes: number; dailyQuestionLimit: number; examDate?: string; goalVersion: number; automaticReviews?: boolean; goals?: CourseGoal[]; example?: boolean }
+export interface Course extends LearningBase { kind: 'course'; firstStudyAt?: number; name: string; goal: string; timeZone: string; dailyMinutes: number; dailyQuestionLimit: number; examDate?: string; goalVersion: number; automaticReviews?: boolean; goals?: CourseGoal[]; example?: boolean; learningMode?: 'nodes' | 'legacy' }
 export interface CourseDocument extends LearningBase { kind: 'document'; docId: string; chapter: string; role?: 'syllabus' | 'slides' | 'textbook' | 'notes' }
 export interface ArchivedSourceRef { archiveId: string; sourceId: string; start: number; end: number }
 export interface QuestionRef { archiveId: string; artifactId: string; questionId: string; confirmed: boolean }
@@ -37,7 +38,7 @@ export interface ReviewSchedule extends LearningBase {
   lastLearningDate?: string; lastAttemptId?: string; manual: boolean; ruleVersion: string; successfulLearningDates?: string[]; suspendedReason?: string
 }
 export type KnowledgeRelationType = 'prerequisite' | 'part' | 'step' | 'comparison' | 'cause' | 'application'
-export interface KnowledgeRelation extends LearningBase { kind: 'relation'; fromPointId: string; toPointId: string; type: KnowledgeRelationType; confirmed: boolean; sourceRefs?: ArchivedSourceRef[] }
+export interface KnowledgeRelation extends LearningBase { kind: 'relation'; fromPointId: string; toPointId: string; type: KnowledgeRelationType; confirmed: boolean; sourceRefs?: ArchivedSourceRef[]; reason?: string }
 export interface KnowledgeMergeEvent extends LearningBase {
   kind: 'merge'; fromPointId: string; toPointId: string; action: 'merge' | 'undo'; undoOf?: string
   beforePoints?: KnowledgePoint[]; beforeRelations?: KnowledgeRelation[]; afterPointRevisions?: Record<string, number>
@@ -60,7 +61,7 @@ export interface LearningJourney extends LearningBase {
   parentSessionId?: string; originSessionId?: string; blockedReason?: string
   planning?: { date: string; minutes: number }
 }
-export type LearningEntity = Course | CourseDocument | KnowledgePoint | LearningArchive | PracticeAttempt | PracticeDraft | AssessmentEvent | ReviewSchedule | KnowledgeRelation | KnowledgeMergeEvent | LearningSession | ApplicationTask | QuestionIssue | NodeBinding | LearningSupport | LearningJourney
+export type LearningEntity = Course | CourseDocument | KnowledgePoint | LearningArchive | PracticeAttempt | PracticeDraft | AssessmentEvent | ReviewSchedule | KnowledgeRelation | KnowledgeMergeEvent | LearningSession | ApplicationTask | QuestionIssue | NodeBinding | LearningSupport | LearningJourney | NodeLearningState
 export type LearningKind = LearningEntity['kind']
 export type EntityOf<K extends LearningKind> = Extract<LearningEntity, { kind: K }>
 export interface CourseSnapshot {
@@ -70,6 +71,7 @@ export interface CourseSnapshot {
   merges: KnowledgeMergeEvent[]; sessions: LearningSession[]; applicationTasks: ApplicationTask[]; issues: QuestionIssue[]; bindings: NodeBinding[]
   supports?: LearningSupport[]
   journeys?: LearningJourney[]
+  nodeWorkspace?: NodeLearningState
 }
 export const newLearningId = (): string => crypto.randomUUID()
 export function learningBase(courseId: string, id = newLearningId(), now = Date.now()): LearningBase {

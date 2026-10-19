@@ -23,6 +23,7 @@ test('甘特表格：变为任务后可就地编辑开始日期、进度，切�
 
   // 切到甘特视图
   await page.getByRole('tab', { name: '甘特', exact: true }).click()
+  await page.getByLabel('甘特图显示范围').selectOption('all')
   await expect(page.locator('#gantt-world')).toBeAttached()
 
   // 表格头存在

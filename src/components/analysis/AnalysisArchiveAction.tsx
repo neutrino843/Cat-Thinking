@@ -55,8 +55,17 @@ export default function AnalysisArchiveAction({ docId, runId, artifacts, disable
       <button className="tbtn primary" disabled={disabled || busy || !artifacts.length || !courseId && !newName.trim()} onClick={() => void save()}>{busy ? '正在保存学习归档…' : '保存到课程'}</button>
     </div>}
     {error && <p role="alert">{error}</p>}
-    {saved && <p role="status">学习资料已归档。<button className="tbtn" onClick={() => {
-      onClose(); window.dispatchEvent(new CustomEvent('msz:learning-open', { detail: { courseId: saved.courseId, archiveId: saved.id, documentId: docId, view: 'prepare' } }))
-    }}>进入课程继续学习</button></p>}
+    {saved && <div className="analysis-archive-success" role="status" aria-label="归档成功">
+      <p><strong>学习资料已保存到课程。</strong></p>
+      <p>接下来可以做几道练习题检验掌握程度，或回到课程继续整理知识。</p>
+      <div className="focus-actions">
+        <button className="tbtn primary" onClick={() => {
+          onClose(); window.dispatchEvent(new CustomEvent('msz:learning-open', { detail: { courseId: saved.courseId, archiveId: saved.id, documentId: docId, view: 'prepare' } }))
+        }}>进入课程继续学习</button>
+        <button className="tbtn" onClick={() => {
+          onClose(); window.dispatchEvent(new CustomEvent('msz:home-learning-target', { detail: { courseId: saved.courseId, view: 'practice' } }))
+        }}>去做练习</button>
+      </div>
+    </div>}
   </section>
 }

@@ -1,6 +1,7 @@
 import SourceHelp from './SourceHelp'
 import SegmentedAnswer from './SegmentedAnswer'
 import ReviewAdvice from './ReviewAdvice'
+import PracticeNextStep from './PracticeNextStep'
 import { useEffect, useId, useRef, useState } from 'react'
 import type { CourseSnapshot, PracticeAttempt, AssessmentEvent, ReviewSchedule, QuestionRef, PracticeDraft, LearningJourney } from '../../learning/model'
 import { learningBase, newLearningId } from '../../learning/model'
@@ -11,12 +12,13 @@ import type { LearningAction } from './CourseOverview'
 import LearningSupportPanel from './LearningSupportPanel'
 import { saveRemediationAttempt } from '../../learning/learningLoop'
 import { useLearningClock } from './useLearningClock'
+import { openGuide } from '../../onboarding/guide'
 
 function scheduleFor(snapshot: CourseSnapshot, question: QuestionRef, date: string, manual: boolean): ReviewSchedule {
   return { ...learningBase(snapshot.course.id), kind: 'schedule', question, status: 'active', dueDate: date, stage: 0, manual, ruleVersion: REVIEW_RULE_VERSION }
 }
 
-function QuestionPractice({ item, snapshot, action, busy, onKnowledge, sessionId, cardMode = false, journey, onRemediate, onWritingChange, onDraftError }: { item: ArchivedQuestion; snapshot: CourseSnapshot; action: LearningAction; busy: boolean; onKnowledge: (id: string) => void; sessionId?: string; cardMode?: boolean; journey?: LearningJourney; onRemediate?: (attemptId: string) => void; onWritingChange?: (value: boolean) => void; onDraftError?: (message: string) => void }) {
+function QuestionPractice({ item, snapshot, action, busy, onKnowledge, sessionId, cardMode = false, journey, onRemediate, onWritingChange, onDraftError, onGoToday, hasNext, onNextQuestion }: { item: ArchivedQuestion; snapshot: CourseSnapshot; action: LearningAction; busy: boolean; onKnowledge: (id: string) => void; sessionId?: string; cardMode?: boolean; journey?: LearningJourney; onRemediate?: (attemptId: string) => void; onWritingChange?: (value: boolean) => void; onDraftError?: (message: string) => void; onGoToday?: () => void; hasNext?: boolean; onNextQuestion?: () => void }) {
   const groupId = useId()
   const q = item.question
   const initial = snapshot.drafts.find((draft) => sameQuestion(draft.question, item.ref))
@@ -107,10 +109,10 @@ function QuestionPractice({ item, snapshot, action, busy, onKnowledge, sessionId
     await saveLearningBatch([{ entity: event, expectedRevision: null }, ...(next ? [{ entity: next, expectedRevision: schedule?.revision ?? null }] : [])])
     setSelfSaved(true)
   })
-  return <article className="learning-question focused-question" data-question-scene={submitted ? 'feedback' : 'answer'}><div className="question-heading"><h4>{q.prompt}</h4><div className="focus-perch question-cat-place" data-isis-perch data-task-perch /></div>
+  return <article className="learning-question focused-question" data-question-scene={submitted ? 'feedback' : 'answer'}><div className="qstep qstep-dim"><div className="qstep-tag"><span className="qstep-num">1</span>题目</div><div className="question-heading"><h4>{q.prompt}</h4><div className="focus-perch question-cat-place" data-isis-perch data-task-perch /></div></div>
     {remainingSeconds !== undefined && <p role="status">模拟剩余 {Math.ceil(remainingSeconds / 60)} 分钟；{remainingSeconds ? '答案和辅助在结束后开放。' : '时间已到，请在备考页结束本场查看报告。'}</p>}
     {issue && <p role="status">这道题已标记有疑问，暂停提交与复习。请在记录页核对并解决疑问。</p>}
-    <div hidden={!!submitted}>
+    <div className={`qstep ${submitted ? 'qstep-dim' : 'qstep-active'}`}><div className="qstep-tag"><span className="qstep-num">2</span>作答</div>
     {cardMode && !simulated && !submitted && <section className="learning-section"><h5>回忆卡片 · 先回想，再翻面</h5><label>我回忆到的内容<SegmentedAnswer label="我回忆到的内容" value={recallText} disabled={busy || !!draftError} onChange={(value) => updateRecall(value)} /></label><button className="tbtn" disabled={busy || writing || !!draftError || !recallText.trim()} onClick={() => updateRecall(recallText, true)}>已回忆，查看卡片背面</button>{cardRevealed && <><p>参考：{referenceAnswer(item)}</p><p>{q.explanation}</p><p>翻面后的核对作答会记录为看过答案，不计独立延迟成功。</p></>}</section>}
     <fieldset hidden={cardMode && !cardRevealed && !submitted} disabled={busy || !!submitted || !!issue || !!draftError || remainingSeconds === 0}><legend>先回答，再查看参考答案</legend>
       {q.type === 'multiple-choice' && q.options.map((option, index) => <label key={index} className="learning-option"><input type="radio" name={`${groupId}:${questionKey(item.ref)}`} checked={answer === index} onChange={() => updateAnswer(index)} />{option}</label>)}
@@ -120,7 +122,7 @@ function QuestionPractice({ item, snapshot, action, busy, onKnowledge, sessionId
     {!submitted && <><details className="question-confidence"><summary>记录信心（可选）</summary><label>提交前的信心（可跳过）<select value={confidence} onChange={(event) => setConfidence(event.target.value)}><option value="">暂不记录</option><option value="25">不太确定</option><option value="50">一般</option><option value="75">比较确定</option><option value="100">很确定</option></select></label></details><button className="tbtn primary" disabled={busy || writing || !answered || !!draftError || !!issue || remainingSeconds === 0} onClick={submit}>提交本题</button></>}
     </div>
     {draftError && <div role="alert"><p>{draftError}</p><label>可复制的未保存回答<textarea readOnly value={String(answer)} /></label></div>}{writing && <p role="status">正在保存草稿…</p>}
-    {submitted && !simulated && <section className="learning-feedback"><h4>本次反馈</h4><p>{q.type === 'short-answer' ? '简答由你逐项自评。' : outcome === 'success' ? '本次回答与参考答案一致。' : '本次回答与参考答案不一致，建议回查原文。'}</p><p>参考答案：{referenceAnswer(item)}</p><p>{q.explanation}</p>
+    {submitted && !simulated && <section className="learning-feedback qstep qstep-active"><div className="qstep-tag"><span className="qstep-num">3</span>反馈</div><h4>本次反馈</h4><p>{q.type === 'short-answer' ? '简答由你逐项自评。' : outcome === 'success' ? '本次回答与参考答案一致。' : '本次回答与参考答案不一致，建议回查原文。'}</p><p>参考答案：{referenceAnswer(item)}</p><p>{q.explanation}</p>
       {q.type === 'short-answer' && <div>{q.rubric.map((criterion, index) => <label className="learning-option" key={index}><input type="checkbox" checked={rubricChecks[index]} onChange={(e) => { setRubricChecks(rubricChecks.map((value, i) => i === index ? e.target.checked : value)); setSelfSaved(false) }} />{criterion}</label>)}
         <label>回忆难度<select value={difficulty} onChange={(e) => setDifficulty(e.target.value as typeof difficulty)}><option value="again">没想起</option><option value="hard">想起但吃力</option><option value="good">比较顺利</option><option value="easy">很轻松</option></select></label>
         <button className="tbtn" disabled={busy} onClick={() => void assess()}>保存自评与复习安排</button>{selfSaved && <p role="status">自评已记录，原始答案保留。</p>}</div>}
@@ -133,7 +135,10 @@ function QuestionPractice({ item, snapshot, action, busy, onKnowledge, sessionId
       <button className="tbtn" disabled={busy || !!journey} onClick={() => { setSubmitted(undefined); setAnswer(''); setSelfSaved(false); setRecallText(''); setCardRevealed(false); setConfidence(''); setRubricChecks(q.type === 'short-answer' ? q.rubric.map(() => false) : []); draft.current = { ...learningBase(snapshot.course.id), kind: 'draft', question: item.ref, answer: null, answerRevealed: false, attemptId: newLearningId() }; revision.current = null }}>再练本题 保留历史</button>
     </section>}
     {submitted && simulated && <p role="status">本题已提交。模拟期间隐藏答案、提示与原文；结束场次后在备考报告核对。</p>}
-    {!simulated && <SourceHelp onViewed={sourceViewed} passages={q.citations.filter((citation) => citation.provenance === 'source').flatMap((citation) => { const source = sourceExcerpt(item.archive, citation.sourceId, citation.start, citation.end); return source ? [{ name: source.name, quote: source.quote }] : [] })} documents={item.archive.sources.filter((source) => q.citations.some((c) => c.provenance === 'source' && c.sourceId === source.id)).map((source) => { const c = q.citations.find((c) => c.provenance === 'source' && c.sourceId === source.id); return { id: source.id, name: source.name, text: source.text, start: c?.provenance === 'source' ? c.start : undefined, end: c?.provenance === 'source' ? c.end : undefined } })} />}
+    {submitted && !simulated && !journey && onGoToday && <PracticeNextStep snapshot={snapshot} busy={busy} hasNext={!!hasNext} onGoToday={onGoToday} onNextQuestion={onNextQuestion ?? (() => {})} />}
+    {!simulated && <div className="qstep" data-qstep-source><div className="qstep-tag"><span className="qstep-num">4</span>原文依据 · 只看相关段落</div>
+      {submitted ? <SourceHelp onViewed={sourceViewed} passages={q.citations.filter((citation) => citation.provenance === 'source').flatMap((citation) => { const source = sourceExcerpt(item.archive, citation.sourceId, citation.start, citation.end); return source ? [{ name: source.name, quote: source.quote }] : [] })} documents={item.archive.sources.filter((source) => q.citations.some((c) => c.provenance === 'source' && c.sourceId === source.id)).map((source) => { const c = q.citations.find((c) => c.provenance === 'source' && c.sourceId === source.id); return { id: source.id, name: source.name, text: source.text, start: c?.provenance === 'source' ? c.start : undefined, end: c?.provenance === 'source' ? c.end : undefined } })} /> : <div className="qstep-gate"><p>提交本题后，这里会显示与本题相关的原文段落。卡住了，可以问伊希斯要一点提示。</p><button type="button" className="tbtn" onClick={() => openGuide()}>问伊希斯要一点提示</button></div>}
+    </div>}
     <details className="question-tools"><summary>更多工具与复习安排</summary>
     {!simulated && <>
     <LearningSupportPanel key={submitted?.id ?? 'before-submit'} snapshot={snapshot} pointIds={related.map((point) => point.id)} action={action} busy={busy || writing} questionRef={item.ref} prompt={(q.type === 'multiple-choice' ? `${q.prompt}\n候选说法：${q.options.join('；')}` : q.prompt).slice(0, 3000)} learnerAnswer={submitted ? q.type === 'multiple-choice' && typeof submitted.answer === 'number' ? q.options[submitted.answer] : typeof submitted.answer === 'boolean' ? submitted.answer ? '正确' : '错误' : String(submitted.answer) : undefined} attemptId={submitted?.id} sessionId={sessionId} /></>}
@@ -146,12 +151,14 @@ function QuestionPractice({ item, snapshot, action, busy, onKnowledge, sessionId
   </article>
 }
 
-export default function LearningPractice({ snapshot, pointId, selectedQuestionKey, action, busy, onKnowledge, sessionId, onSelectedQuestion, journey, onRemediate, onWritingChange, onDraftError }: { snapshot: CourseSnapshot; pointId: string; selectedQuestionKey: string; action: LearningAction; busy: boolean; onKnowledge: (id: string) => void; sessionId?: string; onSelectedQuestion?: (key: string) => void; journey?: LearningJourney; onRemediate?: (attemptId: string) => void; onWritingChange?: (value: boolean) => void; onDraftError?: (message: string) => void }) {
+export default function LearningPractice({ snapshot, pointId, selectedQuestionKey, action, busy, onKnowledge, sessionId, onSelectedQuestion, journey, onRemediate, onWritingChange, onDraftError, onGoToday }: { snapshot: CourseSnapshot; pointId: string; selectedQuestionKey: string; action: LearningAction; busy: boolean; onKnowledge: (id: string) => void; sessionId?: string; onSelectedQuestion?: (key: string) => void; journey?: LearningJourney; onRemediate?: (attemptId: string) => void; onWritingChange?: (value: boolean) => void; onDraftError?: (message: string) => void; onGoToday?: () => void }) {
   const [selected, setSelected] = useState(selectedQuestionKey)
   const [cardMode, setCardMode] = useState(false)
   const session = sessionId ? snapshot.sessions.find((s) => s.id === sessionId) : undefined
   const questions = visibleQuestions(snapshot, pointId).filter((item) => !journey?.questionRef || sameQuestion(item.ref, journey.questionRef)).filter((item) => !sessionId || session?.purpose !== 'exam' || session.questions?.some((ref) => sameQuestion(ref, item.ref)))
   const current = questions.find((item) => questionKey(item.ref) === selected) ?? questions[0]
+  const nextAfter = current ? questions[questions.findIndex((item) => sameQuestion(item.ref, current.ref)) + 1] : undefined
+  const goNext = () => { if (nextAfter) { setSelected(questionKey(nextAfter.ref)); onSelectedQuestion?.(questionKey(nextAfter.ref)) } }
   return <section data-learning-practice data-practice-course={snapshot.course.id} data-has-question={!!current}><h3>{pointId ? `专项练习 · ${snapshot.points.find((p) => p.id === pointId)?.title ?? ''}` : '课程题库'}</h3>
     <p className="focus-muted">先尝试回答，需要时让伊希斯帮你找依据。</p>
     <details className="question-picker"><summary>更换题目或学习方式</summary>
@@ -160,6 +167,6 @@ export default function LearningPractice({ snapshot, pointId, selectedQuestionKe
     </details>
     {!questions.length && <p>尚无可准确关联的题目。可以在 AI 分析中明确选择测验并保存资料，已有任务不能事后追加内容。</p>}
     {sessionId && session?.status !== 'active' && <p role="status">这组模拟练习已结束；报告和历史保留。新的练习请从课程题库开始。</p>}
-    {current && (!sessionId || session?.status === 'active') && <QuestionPractice key={questionKey(current.ref)} item={current} snapshot={snapshot} action={action} busy={busy} onKnowledge={onKnowledge} sessionId={sessionId} cardMode={cardMode} journey={journey} onRemediate={onRemediate} onWritingChange={onWritingChange} onDraftError={onDraftError} />}
+    {current && (!sessionId || session?.status === 'active') && <QuestionPractice key={questionKey(current.ref)} item={current} snapshot={snapshot} action={action} busy={busy} onKnowledge={onKnowledge} sessionId={sessionId} cardMode={cardMode} journey={journey} onRemediate={onRemediate} onWritingChange={onWritingChange} onDraftError={onDraftError} onGoToday={onGoToday} hasNext={!!nextAfter} onNextQuestion={goNext} />}
   </section>
 }

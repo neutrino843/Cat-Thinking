@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { ARTIFACT_KINDS, collectArtifactCitations } from '@cat-thinking/analysis-contracts'
 import { InMemoryJobStore } from '../src/infrastructure/memoryJobStore.js'
 import {
-  verifyPersonalLearningPipeline, PERSONAL_LEARNING_VERIFICATION_LIMITS, PERSONAL_LEARNING_VERIFICATION_SAMPLE,
+  verifyPersonalLearningPipeline, verifyLocalQualitySample, PERSONAL_LEARNING_VERIFICATION_LIMITS, PERSONAL_LEARNING_VERIFICATION_SAMPLE,
   PERSONAL_VERIFICATION_LIMITS, type PersonalLearningVerificationResult,
 } from '../src/operations/personalProviderVerification.js'
 import type { ModelProvider, ModelRequest } from '../src/providers/modelProvider.js'
@@ -47,6 +47,17 @@ const expectOnlyOwnContentCleared = async (f: Fixture, result: PersonalLearningV
 }
 
 describe('separate bounded five-artifact learning verification', () => {
+  it('refuses a public profile in the extended local-only verification before any call or run', async () => {
+    const f = await prepare()
+    await f.profiles.save(f.state.revision, { ...personalFixtureSettings(), networkMode: 'public', baseUrl: 'https://api.example.com/v1/' })
+    await f.profiles.setCheck(f.state.revision + 1, 'ready')
+    await f.profiles.setEnabled(f.state.revision + 2, true)
+    const createRun = vi.spyOn(f.profiles, 'createRun')
+    const result = await verifyLocalQualitySample({ store: f.store, profiles: f.profiles, deadlineMs: 600000 }, 'photosynthesis')
+    expect(result).toMatchObject({ outcome: 'blocked', reason: 'provider_unavailable', callsUsed: 0, cleanupComplete: true, profileStateUnchanged: true })
+    expect(createRun).not.toHaveBeenCalled()
+    for (const deadlineMs of [0, -1, 2700001, Infinity]) await expect(verifyLocalQualitySample({ store: f.store, profiles: f.profiles, deadlineMs }, 'photosynthesis')).rejects.toThrow('deadline')
+  })
   it('validates all five artifacts in six calls while preserving profile, old work and the old three-request gate', async () => {
     const f = await prepare()
     const old = await prepareFixtureRun(f.store, 'unrelated-old-learning-run')

@@ -5,12 +5,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { liveQuery } from 'dexie'
 import { guideRead, guideViewSource, normalizeRecallAnswer, openGuide, pauseGuide, resumeGuide, setGuideAnswer, submitGuideAnswer, useGuide, type FirstQuestion } from './guide'
 import { readGuideQuestion } from './guideSource'
+import { useOnboarding, onboardingDone, ONBOARDING_ITEMS } from './onboarding'
 import StudyDialog from '../components/learning/StudyDialog'
 import { StudyModeChoice } from '../components/learning/ExperienceSettings'
 import { useExperience } from '../learning/experiencePreferences'
 
 export default function GuideStudy({ onClose, onMaterials, onReplace }: { onClose: () => void; onMaterials: () => void; onReplace: () => void }) {
   const { progress: p, storageError } = useGuide()
+  const onboarding = useOnboarding((state) => state.progress)
   const mode = useExperience((state) => state.preferences.study)
   const [readerDocument, setReaderDocument] = useState<{ id: string; name: string; text: string }>()
   const [question, setQuestion] = useState<FirstQuestion | null>(null)
@@ -41,6 +43,7 @@ export default function GuideStudy({ onClose, onMaterials, onReplace }: { onClos
     try {
       const current = await readGuideQuestion(binding)
       submitGuideAnswer(normalizeRecallAnswer(p.answer) === normalizeRecallAnswer(current.answer) ? 'match' : 'different', p.sessionId)
+      onboardingDone('first-question')
       setQuestion(current); setError('')
       if (useGuide.getState().progress.status === 'completed' && !useGuide.getState().storageError) {
         try { const { course } = await loadCourseSnapshot(binding.courseId)
@@ -51,8 +54,14 @@ export default function GuideStudy({ onClose, onMaterials, onReplace }: { onClos
     finally { setBusy(false) }
   }
   const complete = p.status === 'completed'
+  const doneCount = ONBOARDING_ITEMS.filter((item) => onboarding.items[item.id].done).length
   return <main className="focus-study" aria-label="原文入门学习" data-guide-study>
-    <header className="focus-study-top"><button className="study-text-button" onClick={onClose}>返回学习首页</button><span>原文入门练习</span>{!complete && <button className="study-text-button" onClick={p.status === 'paused' ? resumeGuide : pauseGuide}>{p.status === 'paused' ? '继续引导' : '暂停并保存'}</button>}</header>
+    <header className="focus-study-top">
+      <button className="study-text-button" onClick={onClose}>返回学习首页</button>
+      <span>新手任务 {doneCount}/{ONBOARDING_ITEMS.length}</span>
+      <button className="study-text-button" onClick={() => { onboardingDone('first-question'); onClose() }}>返回清单</button>
+      {!complete && <button className="study-text-button" onClick={p.status === 'paused' ? resumeGuide : pauseGuide}>{p.status === 'paused' ? '继续引导' : '暂停并保存'}</button>}
+    </header>
     <div className="focus-study-progress"><span>{complete ? '已提交第一题' : p.step === 'read' ? '读一小段' : '完成第一题'}</span><progress max={3} value={complete ? 3 : p.step === 'read' ? 1 : 2} aria-label="入门学习进度"/></div>
     <article ref={card} tabIndex={-1} className="focus-study-card"><div className="focus-perch guide-task-cat" data-isis-perch data-task-perch />
       {rewardError && <p role="status">{rewardError}</p>}

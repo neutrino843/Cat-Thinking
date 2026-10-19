@@ -30,7 +30,7 @@ for(const width of [320,1440]) test(`阅读与伊希斯在${width}px中不溢出
 
 test('笔记保存失败保留当前输入，返回前明确提示自行保留', async({page})=>{
   const {layer}=await reading(page);await layer.getByRole('button',{name:'继续下一步'}).click();await expect(layer.getByLabel('我读懂了什么')).toBeEnabled()
-  await page.evaluate(async()=>{const {db}=await import('/src/store/db.ts');db.learningRecords.hook('updating',(_changes,_key,record)=>{if(record.kind==='journey')throw new Error('synthetic saved failure')})})
+  await page.evaluate(async()=>{const {db}=await import('/src/store/db.ts');db.learningRecords.hook('updating',(changes,_key,record)=>{if(record.kind==='journey' && Object.prototype.hasOwnProperty.call(changes,'note'))throw new Error('synthetic saved failure')})})
   await layer.getByLabel('我读懂了什么').fill('这段文字不能被静默丢弃');await expect(layer.getByLabel('可复制的当前笔记')).toHaveValue('这段文字不能被静默丢弃');await expect(layer.getByRole('button',{name:'暂停并返回'})).toBeDisabled();page.once('dialog',async(dialog)=>{expect(dialog.message()).toContain('尚未保存');await dialog.dismiss()});await layer.getByRole('button',{name:'已自行保留文字，返回检查'}).click();await expect(layer).toBeVisible()
 })
 

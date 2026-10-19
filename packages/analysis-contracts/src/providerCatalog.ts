@@ -12,13 +12,15 @@ export interface ProviderPreset {
   readonly models: readonly PersonalProviderModel[]
   readonly documentationUrl: string
   readonly note?: string
+  /** Some gateways only document plain chat; keep schema instructions and validate locally. */
+  readonly promptOnlyJson?: boolean
   readonly verifiedAt: string
 }
 
-const preset = (input: Omit<ProviderPreset, 'verifiedAt'>): ProviderPreset => Object.freeze({
+const preset = (input: Omit<ProviderPreset, 'verifiedAt'> & { verifiedAt?: string }): ProviderPreset => Object.freeze({
   ...input,
   models: Object.freeze(input.models.map((model) => Object.freeze({ ...model }))),
-  verifiedAt: '2026-10-12',
+  verifiedAt: input.verifiedAt ?? '2026-10-12',
 })
 
 // Suggestions are a dated documentation snapshot, not an account entitlement.
@@ -37,6 +39,16 @@ export const PROVIDER_CATALOG: readonly ProviderPreset[] = Object.freeze([
     tokenParameter: 'max_tokens', requiresApiKey: true,
     models: [{ id: 'deepseek-flash', label: 'DeepSeek Flash' }, { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }],
     documentationUrl: 'https://api-docs.deepseek.com/',
+  }),
+  preset({
+    id: 'mobilecloud', label: '移动云 MoMA · DeepSeek', baseUrl: 'https://zhenze-huhehaote.cmecloud.cn/v1',
+    protocol: 'chat-completions', structuredOutput: 'json_object', networkMode: 'public',
+    tokenParameter: 'max_tokens', requiresApiKey: true, promptOnlyJson: true,
+    models: [{ id: 'deepseek-v4-flash-0731', label: 'DeepSeek V4 Flash · 0731' }],
+    documentationUrl: 'https://ecloud.10086.cn/api/page/maas/moma/modelSquare/modelSquareDetails?modelName=DeepSeek-V4-Flash-0731',
+    note: '按移动云控制台调用示例配置。使用移动云 API Key；其他地域请修改服务地址，模型权限与费用以你的账号为准。',
+    // User supplied the official console example on this date; no account access implied.
+    verifiedAt: '2026-10-17',
   }),
   preset({
     id: 'qwen', label: '通义千问 · 阿里云百炼', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',

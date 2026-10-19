@@ -3,24 +3,24 @@ import type { CourseSnapshot } from '../../learning/model'
 import { exportCoursePackage, previewCoursePackage, restoreCoursePackage, type CoursePackagePreview } from '../../learning/coursePackage'
 import type { LearningAction } from './CourseOverview'
 
-export default function LearningDataPanel({ snapshot, action, busy, onRestored }: { snapshot: CourseSnapshot; action: LearningAction; busy: boolean; onRestored: (courseId: string) => void }) {
+export default function LearningDataPanel({ snapshot, action, busy, onRestored }: { snapshot?: CourseSnapshot; action: LearningAction; busy: boolean; onRestored: (courseId: string) => void }) {
   const [password, setPassword] = useState('')
   const [restorePassword, setRestorePassword] = useState('')
   const [file, setFile] = useState<File>()
   const [preview, setPreview] = useState<CoursePackagePreview>()
   const [saved, setSaved] = useState('')
   const [restoreExperience, setRestoreExperience] = useState(false)
-  const missingDocs = snapshot.documents.filter((record) => !snapshot.docs.some((doc) => doc.id === record.docId))
+  const missingDocs = snapshot?.documents.filter((record) => !snapshot.docs.some((doc) => doc.id === record.docId)) ?? []
   return <section><h3>资料与进度一起备份</h3><p>课程包包含现存课程文档与附件、归档原文副本、学习记录、复习安排、学习偏好和成就的来源身份。恢复后根据记录重建纪念；临时聊天不导出。API 密钥与可执行的后台任务不在包内。</p>
     {missingDocs.length > 0 && <p role="status">有 {missingDocs.length} 份编辑文档已删除，无法导出这些文档；已保存的学习归档仍可备份。恢复预览会列出缺项。</p>}
-    <form className="learning-form" onSubmit={(e) => { e.preventDefault(); void action(async () => {
+    {snapshot && <form className="learning-form" onSubmit={(e) => { e.preventDefault(); void action(async () => {
       const blob = await exportCoursePackage(snapshot.course.id, password ? { password } : {})
       const link = document.createElement('a'); const url = URL.createObjectURL(blob)
       link.href = url; link.download = `${snapshot.course.name.replace(/[<>:"/\\|?*]/g, '_')}.mszcourse`; link.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 2000); setSaved('课程包已生成，请确认浏览器的实际保存位置。')
     }) }}><label>备份密码 可选<input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={8} maxLength={200} /></label>
       <p>密码至少 8 个字符，请自行保管；密码不会保存在学习记录中。无密码的课程包包含可读取的个人资料。</p>
-      <button className="tbtn primary" disabled={busy}>导出课程资料包</button>{saved && <p role="status">{saved}</p>}</form>
+      <button className="tbtn primary" disabled={busy}>导出课程资料包</button>{saved && <p role="status">{saved}</p>}</form>}
     <h4>先检查，再恢复</h4><form className="learning-form" onSubmit={(e) => { e.preventDefault(); if (!file) return; void action(async () => setPreview(await previewCoursePackage(file, restorePassword ? { password: restorePassword } : {}))) }}>
       <label>选择课程包<input type="file" accept=".mszcourse" onChange={(e) => { setFile(e.target.files?.[0]); setPreview(undefined) }} /></label>
       <label>课程包密码<input type="password" autoComplete="off" value={restorePassword} maxLength={200} onChange={(e) => { setRestorePassword(e.target.value); setPreview(undefined) }} /></label>

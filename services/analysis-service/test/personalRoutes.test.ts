@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildAnalysisServer } from '../src/api/server.js'
 import { loadAnalysisServiceConfig } from '../src/config.js'
@@ -25,6 +25,18 @@ const action = (server: FastifyInstance, name: 'check' | 'enable' | 'pause', rev
   method: 'POST', url: `/api/analysis/v1/personal/${name}`, headers, payload: { version: 1, expectedRevision: revision },
 })
 describe('authenticated personal configuration routes', () => {
+  it('protects every V3 local operation using the existing token and exact origin boundary', async () => {
+    const { server, runtime } = await fixture()
+    const start = vi.spyOn(runtime.localModels, 'start')
+    for (const url of ['/chat', '/local-models/start', '/local-models/stop', '/local-models/pull', '/local-models/cancel', '/local-models/storage']) {
+      expect((await server.inject({ method: 'POST', url: `/api/analysis/v1/personal${url}`, payload: {} })).statusCode).toBe(401)
+      expect((await server.inject({ method: 'POST', url: `/api/analysis/v1/personal${url}`, headers: { ...headers, origin: 'https://evil.example' }, payload: {} })).statusCode).toBe(403)
+    }
+    expect(start).not.toHaveBeenCalled()
+    for (const [path, payload] of [['/chat', { question: 'a'.repeat(2001) }], ['/local-models/pull', { model: 'unknown' }], ['/local-models/storage', { directory: 'x', arbitrary: true }], ['/local-models/arbitrary', {}]] as const) {
+      expect((await server.inject({ method: 'POST', url: `/api/analysis/v1/personal${path}`, headers, payload })).statusCode).toBe(400)
+    }
+  })
   it('allows authenticated reads but rejects every mutation of existing work in verification mode', async () => {
     const config = { ...personalFixtureConfig(), personalReadOnly: true }
     const jobs = new InMemoryJobStore()
@@ -43,6 +55,7 @@ describe('authenticated personal configuration routes', () => {
       { method: 'POST' as const, url: `/runs/${runId}/cancel` }, { method: 'POST' as const, url: `/runs/${runId}/start` },
       { method: 'DELETE' as const, url: `/runs/${runId}/content` }, { method: 'PUT' as const, url: `/runs/${runId}/sources/synthetic-source` },
       { method: 'POST' as const, url: '/runs/abandon' }, { method: 'POST' as const, url: '/personal/models' },
+      ...['chat', 'local-models/start', 'local-models/stop', 'local-models/pull', 'local-models/cancel', 'local-models/storage'].map((path) => ({ method: 'POST' as const, url: `/personal/${path}` })),
     ]
     for (const write of writes) {
       const response = await server.inject({ ...write, url: `/api/analysis/v1${write.url}`, headers, payload: {} })

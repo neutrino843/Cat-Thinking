@@ -12,7 +12,7 @@ test.beforeEach(async ({ page }) => {
     body: JSON.stringify({ version: 1, error: { code: 'service_unavailable', category: 'availability', retryable: false, message: 'Held fixture' } }) }))
   await page.goto('/')
   await expect(page.getByRole('main', { name: '今日学习首页' })).toBeVisible()
-  await page.getByRole('button', { name: '我的课程', exact: true }).click()
+  await page.getByRole('button', { name: '资料', exact: true }).click()
   await expect(page.getByRole('region', { name: '课程学习工作台' })).toBeVisible()
 })
 
@@ -25,14 +25,15 @@ const TAB_CASES = [
 ]
 
 test('无课程：五个标签逐个切换均渲染对应空态，不再卡在资料界面', async ({ page }) => {
+  const workspace = page.getByRole('region', { name: '课程学习工作台' })
   // 「我的课程」入口以资料为导航目标；重点是之后每个标签都能正常切换
   await expect(page.locator('.learning-empty')).toHaveAttribute('data-empty-view', 'materials')
   for (const item of TAB_CASES) {
-    await page.getByRole('button', { name: item.tab, exact: true }).click()
+    await workspace.getByRole('button', { name: item.tab, exact: true }).click()
     await expect(page.locator('.learning-empty')).toHaveAttribute('data-empty-view', item.view)
     await expect(page.getByRole('heading', { name: item.heading })).toBeVisible()
     // 被激活标签需要有明确的选中态
-    await expect(page.getByRole('button', { name: item.tab, exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await expect(workspace.getByRole('button', { name: item.tab, exact: true })).toHaveAttribute('aria-pressed', 'true')
   }
 })
 

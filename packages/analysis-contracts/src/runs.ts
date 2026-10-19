@@ -25,6 +25,7 @@ export const analysisOptionsSchema = z
     summaryDetail: z.enum(['brief', 'standard', 'detailed']),
     quizQuestionCount: z.number().int().min(1).max(100),
     externalKnowledge: z.boolean(),
+    invocationLimit: z.number().int().min(1).max(24).optional(),
     learningSupport: z.object({
       mode: z.enum(['explain', 'compare', 'hint', 'feedback', 'goals', 'variation', 'supplement']),
       question: z.string().trim().min(1).max(3000), learnerAnswer: z.string().max(10000).optional(),

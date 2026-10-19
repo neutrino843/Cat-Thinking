@@ -121,6 +121,7 @@ test('甘特任务条可横向拖拽改期（Gantt aliveRef 同构回归）', as
   await ed.press('Enter')
 
   await page.getByRole('tab', { name: '甘特', exact: true }).click()
+  await page.getByLabel('甘特图显示范围').selectOption('all')
   await expect(page.locator('#gantt-world')).toBeAttached()
   const row = page.locator('.gantt-left .gantt-row').nth(1)
   await row.locator('.gantt-add').click()

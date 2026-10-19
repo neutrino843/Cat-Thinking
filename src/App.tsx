@@ -65,7 +65,8 @@ export default function App() {
   const fsEntered = useRef(false)
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [learningPreparation, setLearningPreparation] = useState(false)
-  const [aiSettingsOpen, setAISettingsOpen] = useState(false)
+  const [aiSettingsProvider, setAISettingsProvider] = useState<'mobilecloud' | undefined>(() => new URLSearchParams(window.location.search).get('connect') === 'mobilecloud' ? 'mobilecloud' : undefined)
+  const [aiSettingsOpen, setAISettingsOpen] = useState(() => new URLSearchParams(window.location.search).get('connect') === 'mobilecloud')
   const [learningOpen, setLearningOpen] = useState(false)
   const [learningTarget, setLearningTarget] = useState<LearningTarget>({})
   useEffect(() => {
@@ -134,10 +135,14 @@ export default function App() {
   const openAISettings = () => {
     aiSettingsTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setAnalysisOpen(false)
+    setAISettingsProvider(undefined)
     setAISettingsOpen(true)
   }
   const closeAISettings = () => {
     setAISettingsOpen(false)
+    setAISettingsProvider(undefined)
+    const url = new URL(window.location.href)
+    if (url.searchParams.has('connect')) { url.searchParams.delete('connect'); window.history.replaceState(window.history.state, '', url) }
     const trigger = aiSettingsTrigger.current
     requestAnimationFrame(() => {
       if (document.querySelector('dialog[open]')) return
@@ -421,7 +426,7 @@ export default function App() {
       )}
       {!presenting && aiSettingsOpen && (
         <Suspense fallback={<AnalysisLoadState settings onClose={closeAISettings} />}>
-          <AISettingsPanel onClose={closeAISettings} onConnected={() => window.dispatchEvent(new Event('cat-thinking:ai-settings-changed'))} />
+          <AISettingsPanel initialProvider={aiSettingsProvider} onClose={closeAISettings} onConnected={() => window.dispatchEvent(new Event('cat-thinking:ai-settings-changed'))} />
         </Suspense>
       )}
       {!presenting && learningOpen && (

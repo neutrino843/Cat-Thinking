@@ -27,6 +27,15 @@ const servers: Server[] = []
 afterEach(async () => { for (const server of servers.splice(0)) await new Promise<void>((resolve) => server.close(() => resolve())) })
 
 describe('friendly provider compatibility', () => {
+  it.each(['qwen3:4b', 'qwen3:8b'])('disables Ollama thinking for bounded structured output on %s', async (modelId) => {
+    const fetchImplementation = vi.fn(async () => chatResult())
+    const provider = createPersonalModelProvider({ ...settings, providerId: 'ollama', modelId,
+      baseUrl: 'http://127.0.0.1:11434/v1/', networkMode: 'local-loopback', apiKey: undefined }, 'local-profile', fetchImplementation)
+    await provider.generate(request, new AbortController().signal)
+    const [, init] = fetchImplementation.mock.calls[0] as unknown as [URL, RequestInit]
+    expect(JSON.parse(String(init.body))).toMatchObject({ reasoning_effort: 'none', max_tokens: 300 })
+    expect(fetchImplementation).toHaveBeenCalledOnce()
+  })
   it('allows a slow accepted personal response beyond two minutes without sending a second request', async () => {
     vi.useFakeTimers()
     try {
@@ -59,13 +68,29 @@ describe('friendly provider compatibility', () => {
   })
 
   it('uses dated official presets without fabricated account availability or prices', () => {
-    expect(PROVIDER_CATALOG.map((entry) => entry.id)).toEqual(['openai', 'deepseek', 'qwen', 'moonshot', 'zhipu', 'siliconflow', 'gemini', 'ollama', 'custom'])
+    expect(PROVIDER_CATALOG.map((entry) => entry.id)).toEqual(['openai', 'deepseek', 'mobilecloud', 'qwen', 'moonshot', 'zhipu', 'siliconflow', 'gemini', 'ollama', 'custom'])
     expect(getProviderPreset('deepseek')?.models[0]?.id).toBe('deepseek-flash')
     expect(getProviderPreset('openai')?.protocol).toBe('responses')
     expect(getProviderPreset('missing')).toBeUndefined()
     expect(getProviderPreset('ollama')?.requiresApiKey).toBe(false)
-    expect(PROVIDER_CATALOG.every((entry) => entry.verifiedAt === '2026-10-12' && Object.isFrozen(entry.models))).toBe(true)
+    expect(PROVIDER_CATALOG.every((entry) => entry.verifiedAt === (entry.id === 'mobilecloud' ? '2026-10-17' : '2026-10-12') && Object.isFrozen(entry.models))).toBe(true)
     expect(JSON.stringify(PROVIDER_CATALOG)).not.toContain('price')
+  })
+
+  it.each(['mobilecloud', 'custom'])('uses the supplied MoMA endpoint with the probe-verified thinking switch and no other format switches (%s)', async (providerId) => {
+    const fetchImplementation = vi.fn(async () => chatResult())
+    const preset = getProviderPreset('mobilecloud')!
+    const provider = createPersonalModelProvider({ ...settings, providerId, baseUrl: preset.baseUrl + '/chat/completions',
+      modelId: preset.models[0].id }, 'moma-profile', fetchImplementation)
+    await provider.generate(request, new AbortController().signal)
+    const [input, init] = fetchImplementation.mock.calls[0] as unknown as [URL, RequestInit]
+    expect(String(input)).toBe('https://zhenze-huhehaote.cmecloud.cn/v1/chat/completions')
+    expect(init.headers).toMatchObject({ authorization: 'Bearer synthetic-key' })
+    const body = JSON.parse(String(init.body))
+    expect(body).toMatchObject({ model: 'deepseek-v4-flash-0731', max_tokens: 300, thinking: { type: 'disabled' } })
+    expect(body.messages[0].content).toContain('JSON Schema:')
+    for (const field of ['enable_thinking', 'reasoning_effort', 'response_format']) expect(body).not.toHaveProperty(field)
+    expect(fetchImplementation).toHaveBeenCalledOnce()
   })
 
   it('makes the public status contract reject accidental secret fields', () => {
@@ -188,6 +213,7 @@ describe('friendly provider compatibility', () => {
   it.each([
     ['qwen', 'qwen3.7-plus', { enable_thinking: false }],
     ['qwen', 'qwen3.8-max', { enable_thinking: false }],
+    ['mobilecloud', 'deepseek-v4-flash-0731', { thinking: { type: 'disabled' } }],
     ['moonshot', 'kimi-k2.6', { thinking: { type: 'disabled' } }],
     ['moonshot', 'kimi-k3', {}],
     ['qwen', 'unknown-qwen-model', {}],

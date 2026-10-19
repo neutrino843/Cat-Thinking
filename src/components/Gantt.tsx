@@ -17,6 +17,7 @@ import { ganttHolder } from '../store/refs'
 import type { DocData, TaskData } from '../types'
 import { useT } from '../i18n'
 import TaskEditor from './TaskEditor'
+import { suggestTasks } from '../lib/taskSuggestions'
 
 const SCALES: { id: GanttScale; label: string }[] = [
   { id: 'day', label: '日' },
@@ -51,9 +52,10 @@ function headerTicks(model: GanttModel, scale: GanttScale) {
       ticks.push({ x: i * model.pxPerDay, label: d.slice(5).replace('-', '/'), sub: weekStart(d).slice(5).replace('-', '/') })
     }
   } else {
-    for (let i = 0; i < model.dayCount; i += 30) {
+    for (let i = 0; i < model.dayCount; i++) {
       const d = addDays(model.day0, i)
-      ticks.push({ x: i * model.pxPerDay, label: d.slice(0, 4), sub: Number(d.slice(5)) + '月' })
+      if (i !== 0 && d.slice(8) !== '01') continue
+      ticks.push({ x: i * model.pxPerDay, label: d.slice(0, 4), sub: Number(d.slice(5, 7)) + '月' })
     }
   }
   return ticks
@@ -66,7 +68,7 @@ function monthBoundaries(model: GanttModel) {
     const d = addDays(model.day0, i)
     const m = monthKey(d)
     if (m !== last) {
-      out.push({ x: i * model.pxPerDay, label: `${d.slice(0, 4)}年${Number(d.slice(5))}月` })
+      out.push({ x: i * model.pxPerDay, label: `${d.slice(0, 4)}年${Number(d.slice(5, 7))}月` })
       last = m
     }
   }
@@ -83,8 +85,12 @@ export default function Gantt() {
   const theme = getTheme(dark)
   const t = useT()
   const [editorId, setEditorId] = useState<string | null>(null)
+  const [scope, setScope] = useState<'all' | 'tasks'>('tasks')
+  const [suggesting, setSuggesting] = useState(false)
+  const [approved, setApproved] = useState<string[]>([])
+  const suggestions = useMemo(() => suggestTasks(doc), [doc])
 
-  const model = useMemo(() => computeGantt(doc, scale), [doc, scale])
+  const model = useMemo(() => computeGantt(doc, scale, undefined, scope), [doc, scale, scope])
   const colors = useMemo(() => branchColors(doc), [doc])
   const edges = useMemo(() => depEdges(doc), [doc])
   // M14：关键路径节点集合（最长依赖链）
@@ -249,6 +255,22 @@ export default function Gantt() {
   }, [model, doc])
 
   return (
+    <div className="gantt-workspace">
+      <div className="gantt-plan-tools" aria-label="任务计划">
+        <strong>任务计划</strong>
+        <span>{Object.values(doc.nodes).filter((node) => node.task?.start).length} 项已排期 · {Object.values(doc.nodes).filter((node) => node.task && !node.task.start).length} 项待安排</span>
+        <button className="tbtn primary" onClick={() => { setApproved([]); setSuggesting(!suggesting) }}>从导图推测任务</button>
+        <label>显示范围 <select aria-label="甘特图显示范围" value={scope} onChange={(event) => setScope(event.target.value as 'all' | 'tasks')}><option value="tasks">已确认任务与分组</option><option value="all">全部节点（手动设任务）</option></select></label>
+        <button className="tbtn" onClick={() => { if (scrollRef.current) scrollRef.current.scrollLeft = Math.max(0, (model.todayOffset ?? 0) * model.pxPerDay - 100) }}>定位今天</button>
+      </div>
+      {suggesting && <section className="gantt-suggestions" aria-label="确认推测任务">
+        <p>以下是规则推测，请勾选确认。只建立待安排任务，不自动填写日期、依赖或完成进度。</p>
+        {!suggestions.length && <p>未发现明显行动项。可切换到全部节点，手动指定任务。</p>}
+        {suggestions.map((item) => <label key={item.id}><input type="checkbox" checked={approved.includes(item.id)} onChange={(event) => setApproved((ids) => event.target.checked ? [...ids, item.id] : ids.filter((id) => id !== item.id))}/><span>{item.text}<small>{item.reason}</small></span></label>)}
+        <button className="tbtn primary" disabled={!approved.length} onClick={() => { const store = useDoc.getState(); store.beginEdit(); approved.forEach((id) => { if (store.doc.nodes[id] && !store.doc.nodes[id].task) store.setTask(id, { progress: 0 }, false) }); setScope('tasks'); setSuggesting(false); setApproved([]) }}>确认所选任务</button>
+        <button className="tbtn" onClick={() => setSuggesting(false)}>取消</button>
+      </section>}
+      {!model.rows.length && <p className="gantt-empty">还没有确认的任务。先从导图推测任务，或切换显示范围手动指定；知识点不会自动变成日程。</p>}
     <div className="gantt">
       <div className="gantt-left" ref={listRef} onScroll={onListScroll}>
         <div style={{ height: HEADER_H }} className="gantt-corner gantt-grid">
@@ -276,9 +298,9 @@ export default function Gantt() {
               onDoubleClick={() => setEditorId(r.id)}
             >
               {/* 任务名列 */}
-              <div className="gantt-cell gantt-cell-name" style={{ paddingLeft: 8 + r.depth * 14 }}>
+              <div className="gantt-cell gantt-cell-name" style={{ paddingLeft: 8 + Math.min(r.depth, 5) * 14 }}>
                 <span className="gantt-dot" style={{ background: task ? theme.branch[colors.get(r.id) ?? 0] : 'transparent' }} />
-                <span className="gantt-name-text">{r.text || t('common.untitled')}</span>
+                <span className="gantt-name-text" title={r.text}>{r.text || t('common.untitled')}{task && !task.start ? ' · 待安排' : !task ? ' · 分组' : ''}</span>
                 <button
                   className="gantt-add"
                   title={task ? t('gantt.editTask') : t('gantt.makeTask')}
@@ -297,6 +319,7 @@ export default function Gantt() {
                   <input
                     type="date"
                     className="gantt-date"
+                    aria-label={`${r.text} 开始日期`}
                     value={task.start ?? ''}
                     onClick={(e) => e.stopPropagation()}
                     onChange={(e) => useDoc.getState().setTask(r.id, { start: e.target.value || undefined })}
@@ -311,6 +334,7 @@ export default function Gantt() {
                   <input
                     type="date"
                     className="gantt-date"
+                    aria-label={`${r.text} 结束日期`}
                     value={task.end ?? task.start ?? ''}
                     onClick={(e) => e.stopPropagation()}
                     onChange={(e) => useDoc.getState().setTask(r.id, { end: e.target.value || undefined })}
@@ -329,6 +353,7 @@ export default function Gantt() {
                       max={100}
                       value={Math.round(prog * 100)}
                       className="gantt-range"
+                      aria-label={`${r.text} 完成进度`}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => useDoc.getState().setTask(r.id, { progress: Number(e.target.value) / 100 })}
                     />
@@ -344,6 +369,7 @@ export default function Gantt() {
                   <input
                     type="checkbox"
                     className="gantt-check"
+                    aria-label={`${r.text} 里程碑`}
                     checked={isMs}
                     onClick={(e) => e.stopPropagation()}
                     onChange={(e) => useDoc.getState().setTask(r.id, { milestone: e.target.checked })}
@@ -374,6 +400,7 @@ export default function Gantt() {
                 {task ? (
                   <select
                     className="gantt-priority"
+                    aria-label={`${r.text} 优先级`}
                     value={String(task.priority ?? 0)}
                     onClick={(e) => e.stopPropagation()}
                     onChange={(e) =>
@@ -397,6 +424,7 @@ export default function Gantt() {
                   <input
                     type="text"
                     className="gantt-owner"
+                    aria-label={`${r.text} 负责人`}
                     value={task.owner ?? ''}
                     placeholder={t('gantt.ownerPlaceholder')}
                     onClick={(e) => e.stopPropagation()}
@@ -558,6 +586,8 @@ export default function Gantt() {
       {editorId && doc.nodes[editorId] && (
         <TaskEditor id={editorId} onClose={() => setEditorId(null)} />
       )}
+    </div>
+    <div className="gantt-companion-perch" data-isis-perch/>
     </div>
   )
 }

@@ -7,7 +7,7 @@ const MAX_BODY = 2_100_000
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 const ROUTES: readonly [string, RegExp][] = [
   ['GET', /^\/personal\/settings$/u], ['PUT', /^\/personal\/settings$/u], ['DELETE', /^\/personal\/settings$/u],
-  ['POST', /^\/personal\/(?:models|check|enable|pause)$/u],
+  ['POST', /^\/personal\/(?:models|check|enable|pause|chat)$/u],
   ['GET', /^\/capabilities$/u], ['POST', /^\/runs$/u],
   ['POST', /^\/runs\/abandon$/u],
   ['GET', /^\/runs\/[A-Za-z0-9._:-]+(?:\/(?:events|usage))?$/u],
@@ -96,11 +96,19 @@ export function createBrowserGateway(input: BrowserGatewayConfig | undefined, fe
     response.once('close', disconnected)
     const streaming = suffix.endsWith('/events')
     let timedOut = false
-    const timer = setTimeout(() => { timedOut = true; disconnected() }, streaming ? 30 * 60_000 : 30_000)
+    const expire = () => { timedOut = true; disconnected() }
+    let timer = setTimeout(expire, streaming ? 30 * 60_000 : 30_000)
     timer.unref()
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
       const body = hasBody ? await readBody(request, abort.signal) : undefined
+      // Bound uploads independently; model inference can legitimately take
+      // longer than other JSON operations (the provider itself has 120s).
+      if (suffix === '/personal/chat') {
+        clearTimeout(timer)
+        timer = setTimeout(expire, 125_000)
+        timer.unref()
+      }
       const headers = new Headers({ authorization: `Bearer ${config.token}`, 'x-cat-tenant-id': config.tenantId,
         accept: streaming ? 'text/event-stream' : 'application/json' })
       if (hasBody) headers.set('content-type', 'application/json')

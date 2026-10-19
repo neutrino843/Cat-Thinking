@@ -95,14 +95,23 @@ export async function verifyPayload(root) {
   return manifest
 }
 
-export async function buildDesktopPackage({ root = repositoryRoot, outputRoot = resolve(root, '../output/desktop'), release = '0.2.0-learning-v1',
-  nodePath = process.execPath, postgresRoot = resolve(root, '../.cat-thinking-postgres/pgsql'), compress = true } = {}) {
+export async function buildDesktopPackage({ root = repositoryRoot, outputRoot = resolve(root, '../output/desktop'), release = '3.0.0-dev.1',
+  nodePath = process.execPath, postgresRoot = resolve(root, '../.cat-thinking-postgres/pgsql'), ollamaRoot, compress = true } = {}) {
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('desktop_build_requires_windows_x64')
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$/u.test(release)) throw new Error('desktop_release_invalid')
   const { stdout: nodeVersion } = await exec(nodePath, ['--version'], { windowsHide: true })
   if (!/^v24\.(?:1[3-9]|[2-9][0-9])\.[0-9]+\s*$/u.test(nodeVersion) || nodeVersion.trim() === 'v24.13.0') throw new Error('desktop_node_version_unsupported')
   const { stdout: pgVersion } = await exec(join(postgresRoot, 'bin/postgres.exe'), ['--version'], { windowsHide: true })
   if (!/\b18\.6\b/u.test(pgVersion)) throw new Error('desktop_postgres_version_unverified')
+  // V3 distributions carry the engine, so users never need a separate installation.
+  if (/^3\./u.test(release) && !ollamaRoot) throw new Error('desktop_v3_bundled_ollama_required')
+  let ollamaVersion
+  if (ollamaRoot) {
+    const { stdout, stderr } = await exec(join(ollamaRoot, 'ollama.exe'), ['--version'], { windowsHide: true })
+    ollamaVersion = `${stdout} ${stderr}`.match(/\b\d+\.\d+\.\d+\b/u)?.[0]
+    if (!ollamaVersion) throw new Error('desktop_ollama_version_unverified')
+    await access(join(ollamaRoot, 'LICENSE'))
+  }
   const output = safeChild(outputRoot, `CatThinking-${release}-windows-x64`)
   try { await access(output); throw new Error('desktop_output_exists_choose_new_release') } catch (error) { if (error.code !== 'ENOENT') throw error }
   const payload = join(output, 'payload')
@@ -116,6 +125,7 @@ export async function buildDesktopPackage({ root = repositoryRoot, outputRoot = 
   await mkdir(join(payload, 'runtime'), { recursive: true })
   await cp(nodePath, join(payload, 'runtime/node.exe'))
   for (const component of ['bin', 'lib', 'share']) await copyFiltered(join(postgresRoot, component), join(payload, `runtime/postgres/${component}`))
+  if (ollamaRoot) await copyFiltered(ollamaRoot, join(payload, 'runtime/ollama'))
   const dependencies = await runtimeDependencyGraph(root)
   for (const dependency of dependencies.values()) await copyFiltered(dependency.root, safeChild(payload, dependency.destination))
   await mkdir(join(payload, 'node_modules/@cat-thinking/analysis-contracts'), { recursive: true })
@@ -126,6 +136,7 @@ export async function buildDesktopPackage({ root = repositoryRoot, outputRoot = 
   for (const path of await listRegularFiles(payload)) { const bytes = await readFile(safeChild(payload, path)); files.push({ path, bytes: bytes.length, sha256: fileDigest(bytes) }) }
   const manifest = { version: 1, application: 'cat-thinking', release, platform: 'win32-x64', nodeVersion: nodeVersion.trim(), postgresVersion: '18.6',
     fixedFrontendPort: 53013, fixedServicePort: 53014, fixedPostgresPort: 55435, signed: false, cleanWindowsVerified: false,
+    ...(ollamaVersion ? { ollamaVersion, bundledLocalEngine: true, modelsIncluded: false } : {}),
     dependencies: [...dependencies.values()].map((value) => ({ name: value.pkg.name, version: value.pkg.version, destination: value.destination })).sort((a, b) => a.destination.localeCompare(b.destination)), files }
   await writeFile(join(payload, 'manifest.json'), JSON.stringify(manifest, null, 2))
   await verifyPayload(payload)
@@ -139,7 +150,9 @@ export async function buildDesktopPackage({ root = repositoryRoot, outputRoot = 
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const args = process.argv.slice(2)
-  const release = args[0] ?? '0.2.0-learning-v1'
+  const release = args[0] ?? '3.0.0-dev.1'
   const compress = !args.includes('--no-zip')
-  buildDesktopPackage({ release, compress }).then((result) => console.log(JSON.stringify(result))).catch(() => { console.error('Windows package build failed; inspect required built artifacts, runtimes and fresh output version.'); process.exitCode = 1 })
+  const engineIndex = args.indexOf('--ollama-root')
+  const ollamaRoot = engineIndex >= 0 ? args[engineIndex + 1] : undefined
+  buildDesktopPackage({ release, compress, ollamaRoot }).then((result) => console.log(JSON.stringify(result))).catch(() => { console.error('Windows package build failed; inspect required built artifacts, runtimes and fresh output version.'); process.exitCode = 1 })
 }

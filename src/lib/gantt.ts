@@ -43,9 +43,20 @@ function hasTask(t: TaskData | undefined): t is ScheduledTask {
   return typeof t?.start === 'string' && t.start.length > 0
 }
 
-export function computeGantt(doc: DocData, scale: GanttScale, today = todayISO()): GanttModel {
-  const rows: GanttRow[] = []
-  dfs(doc, doc.rootId, 0, rows, { v: HEADER_H })
+export function computeGantt(doc: DocData, scale: GanttScale, today = todayISO(), scope: 'all' | 'tasks' = 'all'): GanttModel {
+  const all: GanttRow[] = []
+  dfs(doc, doc.rootId, 0, all, { v: HEADER_H })
+  const included = new Set<string>()
+  const include = (id: string): boolean => {
+    const node = doc.nodes[id]
+    if (!node) return false
+    const children = node.children.map(include).some(Boolean)
+    if (node.task || children) included.add(id)
+    return !!node.task || children
+  }
+  if (scope === 'tasks') include(doc.rootId)
+  const rows = (scope === 'all' ? all : all.filter((row) => included.has(row.id)))
+    .map((row, index) => ({ ...row, y: HEADER_H + index * ROW_H }))
 
   const tasks: ScheduledTask[] = []
   for (const row of rows) {
@@ -118,7 +129,7 @@ export function criticalPath(doc: DocData): Set<string> {
     const t = tasks.get(id)
     if (!t) throw new Error(`甘特任务索引不一致：${id}`)
     if (t.milestone) return 0
-    return Math.max(1, diffDays(t.start, t.end ?? t.start))
+    return Math.max(1, diffDays(t.start, t.end ?? t.start) + 1)
   }
 
   // 前驱/后继邻接（仅保留两端均为任务的依赖边）

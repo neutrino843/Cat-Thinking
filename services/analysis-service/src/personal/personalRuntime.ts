@@ -11,6 +11,8 @@ import { fetchProviderModels, normalizeProviderBaseUrl, ProviderConnectionError 
 import { ServiceHttpError, createContractError } from '../errors.js'
 import type { FetchImplementation } from '../providers/openAICompatibleProvider.js'
 import { PersonalProfileConflictError, PersonalProfileUnavailableError, storedPersonalSettingsSchema, type PersonalProfileState, type PersonalProfileStore } from './profileStore.js'
+import { LocalModelManager } from './localModels.js'
+import { localChat, configuredChat } from './localChat.js'
 
 export const unavailablePersonalStatus = (): PersonalProviderStatus => personalProviderStatusSchema.parse({
   version: 1, revision: 0, available: false, enabled: false, configured: false, hasApiKey: false,
@@ -19,6 +21,30 @@ export const unavailablePersonalStatus = (): PersonalProviderStatus => personalP
 
 /** Personal authorization is separate from production release evidence. */
 export class PersonalAnalysisRuntime {
+  readonly localModels = new LocalModelManager()
+  private chatting = false
+  async chat(input: { question: string; context: string; expectedRevision?: number }) {
+    this.assertWritable()
+    const state = await this.options.profiles.readState()
+    if (!state.profileId || !await this.canInvoke(state.profileId) || this.chatting) throw new PersonalProfileUnavailableError()
+    if (input.expectedRevision !== undefined && input.expectedRevision !== state.revision) throw new PersonalProfileConflictError()
+    const snapshot = await this.options.profiles.getSnapshot(state.profileId)
+    if (!snapshot || snapshot.revoked) throw new PersonalProfileUnavailableError()
+    if (!await this.canInvoke(snapshot.id)) throw new PersonalProfileUnavailableError()
+    const beforeSend = await this.options.profiles.readState()
+    if (beforeSend.revision !== state.revision || beforeSend.profileId !== snapshot.id || !beforeSend.enabled) throw new PersonalProfileConflictError()
+    if (this.chatting) throw new PersonalProfileUnavailableError()
+    this.chatting = true
+    try {
+      // Legacy clients called this a local-only operation. They cannot send
+      // content to a public provider without adopting the new explicit UI.
+      const result = await (input.expectedRevision === undefined ? localChat : configuredChat)(snapshot.settings, input, this.options.fetchImplementation)
+      if (!await this.canInvoke(snapshot.id)) throw new PersonalProfileUnavailableError()
+      if ((await this.options.profiles.readState()).revision !== beforeSend.revision) throw new PersonalProfileConflictError()
+      return result
+    }
+    finally { this.chatting = false }
+  }
   readonly runService: RunService
   readonly runStore: JobStore
   private dispatcher?: PersistentDispatcher
@@ -172,6 +198,7 @@ export class PersonalAnalysisRuntime {
     })
   }
   async close(): Promise<void> {
+    this.localModels.close()
     this.stopping = true
     // Graceful shutdown preserves selected profile and outstanding run bindings for restart.
     await this.serialize(async () => { await this.dispatcher?.stop(this.options.config.shutdownTimeoutMs); this.dispatcher = undefined })

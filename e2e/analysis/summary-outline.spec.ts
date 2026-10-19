@@ -107,6 +107,10 @@ test('上传中刷新仅恢复相同原文分片', async ({ page, request }) => 
   await expect.poll(() => uploads).toBeGreaterThanOrEqual(2)
   const id = await taskId(page)
   await reopen(page)
+  // 重开只读：不得自动续传，须显式确认后继续上传相同原文分片
+  await expect(panel(page)).toContainText('本次打开只读取已有任务')
+  expect(uploads).toBe(2)
+  await panel(page).getByRole('button', { name: '继续提交并生成（使用模型额度）' }).click()
   await expect(panel(page)).toContainText('任务：分析完成', { timeout: 30_000 })
   expect(await taskId(page)).toBe(id)
   expect((await diagnostic(request, id)).run.coverage.input).toBe(1)

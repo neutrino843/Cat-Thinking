@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PersonalAnalysisRuntime } from '../src/personal/personalRuntime.js'
 import { PersonalProfileConflictError, PersonalProfileUnavailableError } from '../src/personal/profileStore.js'
 import { InMemoryJobStore } from '../src/infrastructure/memoryJobStore.js'
@@ -37,6 +37,31 @@ const startPublicSummary = async (runtime: PersonalAnalysisRuntime, profileId: s
 }
 
 describe('personal authorization and immutable provider settings', () => {
+  it('does not send cloud chat if settings change while the original snapshot is being read', async () => {
+    const fetcher = vi.fn<FetchImplementation>()
+    const { runtime, profiles } = fixture(() => fetcher)
+    const settings = { ...personalFixtureSettings(), providerId: 'mobilecloud', networkMode: 'public' as const, baseUrl: 'https://zhenze-huhehaote.cmecloud.cn/v1/', modelId: 'deepseek-v4-flash-0731' }
+    await profiles.save(0, settings); await profiles.setCheck(1, 'ready'); await profiles.setEnabled(2, true)
+    const readSnapshot = profiles.getSnapshot.bind(profiles)
+    vi.spyOn(profiles, 'getSnapshot').mockImplementationOnce(async (id) => {
+      const original = await readSnapshot(id)
+      await profiles.save(3, { ...settings, modelId: 'another-model' }); await profiles.setCheck(4, 'ready'); await profiles.setEnabled(5, true)
+      return original
+    })
+    await expect(runtime.chat({ question: '解释', context: '公开原文', expectedRevision: 3 })).rejects.toThrow()
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it('requires the displayed revision for cloud chat and rejects legacy local clients and stale forms before sending', async () => {
+    const fetcher = vi.fn<FetchImplementation>().mockResolvedValue(new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '公开合成回答' } }] })))
+    const { runtime, profiles } = fixture(() => fetcher)
+    await profiles.save(0, { ...personalFixtureSettings(), providerId: 'mobilecloud', networkMode: 'public', baseUrl: 'https://zhenze-huhehaote.cmecloud.cn/v1/', modelId: 'deepseek-v4-flash-0731' })
+    await profiles.setCheck(1, 'ready'); await profiles.setEnabled(2, true)
+    await expect(runtime.chat({ question: '解释', context: '' })).rejects.toThrow()
+    await expect(runtime.chat({ question: '解释', context: '', expectedRevision: 2 })).rejects.toBeInstanceOf(PersonalProfileConflictError)
+    expect(fetcher).not.toHaveBeenCalled()
+    await expect(runtime.chat({ question: '解释', context: '', expectedRevision: 3 })).resolves.toMatchObject({ local: false })
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
   it('verifies an enabled saved profile without dispatching, cancelling, changing settings or calling a provider', async () => {
     const { store, profiles, transport, config } = fixture()
     await profiles.save(0, personalFixtureSettings())

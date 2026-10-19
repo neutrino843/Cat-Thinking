@@ -115,13 +115,29 @@ for (const remove of [false, true]) test(`创建响应丢失且原文${remove ? 
   await expect(panel(page)).toContainText('创建结果尚未确认')
   expect((await binding(page))?.runId).toBeUndefined()
   await changeSource(page, remove); await control(request, false)
-  await panel(page).getByRole('button', { name: '恢复查看' }).click()
+  // held 状态（创建未确认、无 runId）主按钮为显式续传确认；点击后仅只读找回并绑定已接受的 run
+  await panel(page).getByRole('button', { name: '继续提交并生成（使用模型额度）' }).click()
   await expect.poll(async () => (await binding(page))?.runId).toBe(acceptedRunId)
   await expect(panel(page)).toContainText('原文已改变')
   expect((await (await request.get(`/api/analysis/v1/runs/${acceptedRunId}/usage`)).json()).invocationCount).toBe(0)
   await panel(page).getByRole('button', { name: '删除分析内容' }).click()
   await panel(page).getByRole('button', { name: '确认删除', exact: true }).click()
   await expect.poll(() => binding(page)).toBeUndefined()
+})
+test('用量读取被限流(429)时呈现中性提示，恢复后成功状态与用量正常送达', async ({ page }) => {
+  await importAndOpen(page)
+  let limitedReads = 0
+  await page.route('**/api/analysis/v1/runs/*/usage', (route) => limitedReads++ < 2
+    ? route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ version: 1, error: { version: 1, code: 'rate_limited', category: 'rate-limit', messageKey: 'analysis.rate_limit.exceeded', retryable: true } }) })
+    : route.continue())
+  await panel(page).getByRole('button', { name: '生成摘要与大纲' }).click()
+  await expect(panel(page)).toContainText('状态同步稍慢', { timeout: 20_000 })
+  await expect(panel(page)).not.toContainText('操作被服务拒绝')
+  await expect(panel(page)).toContainText('任务：分析完成', { timeout: 25_000 })
+  await expect(panel(page).getByRole('region', { name: '摘要结果' })).toContainText('合成摘要：')
+  await expect(panel(page)).toContainText('已知使用量', { timeout: 15_000 })
+  await expect(panel(page)).not.toContainText('状态同步稍慢')
+  expect(limitedReads).toBeGreaterThanOrEqual(2)
 })
 test('持久放弃未确认创建后拒绝同 key 的迟到 POST，允许新的明确创建', async ({ page, request }) => {
   await importAndOpen(page)

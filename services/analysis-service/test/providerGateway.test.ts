@@ -74,6 +74,13 @@ afterEach(() => {
 })
 
 describe('OpenAI-compatible provider adapter', () => {
+  it('counts schema instructions against the input cap even when a prompt-only gateway profile retains json_schema', async () => {
+    const fetchImplementation = vi.fn<FetchImplementation>()
+    const provider = new OpenAICompatibleProvider({ ...baseOptions, apiStyle: 'chat-completions',
+      structuredOutput: 'json_schema', promptOnlyJson: true, maxInputCharacters: 1000, fetchImplementation })
+    await expect(provider.generate({ ...request, userPrompt: 'x'.repeat(850) }, new AbortController().signal)).rejects.toThrow('character limit')
+    expect(fetchImplementation).not.toHaveBeenCalled()
+  })
   it('sends a bounded Responses request and aggregates output safely', async () => {
     let capturedInput: Parameters<FetchImplementation>[0] | undefined
     let capturedInit: Parameters<FetchImplementation>[1]
@@ -379,11 +386,14 @@ describe('OpenAI-compatible provider adapter', () => {
 })
 
 describe('provider gateway support components', () => {
-  it('decodes only strict schema-valid JSON and never echoes invalid output', () => {
+  it('decodes syntax-tolerant JSON and never echoes invalid output', () => {
     const schema = z.object({ answer: z.string() }).strict()
     expect(decodeStructuredOutput('{"answer":"ok"}', schema, 1_000)).toEqual({ answer: 'ok' })
+    // C1 语法级容错：围栏/尾逗号/BOM 包装在完整 schema 校验前剥离
+    expect(decodeStructuredOutput('```json\n{"answer":"ok"}\n```', schema, 1_000)).toEqual({ answer: 'ok' })
+    expect(decodeStructuredOutput('{"answer":"ok",}', schema, 1_000)).toEqual({ answer: 'ok' })
     expect(() => decodeStructuredOutput('```json\n{}\n```', schema, 1_000)).toThrowError(
-      expect.objectContaining({ code: 'invalid_json' }),
+      expect.objectContaining({ code: 'schema_invalid' }),
     )
     expect(() => decodeStructuredOutput('{"answer":1}', schema, 1_000)).toThrowError(
       expect.objectContaining({ code: 'schema_invalid', issueCount: 1 }),

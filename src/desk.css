@@ -9,8 +9,8 @@ html, body { overflow-x: clip; }
 .question-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; }
 .question-heading h4 { margin: 8px 0 20px; font: 500 clamp(1.1rem, 2vw, 1.4rem)/1.65 var(--font-body); overflow-wrap: anywhere; min-width: 0; }
 .question-heading .question-cat-place { width: 96px; margin: 0; padding: 0; }
-.question-heading:has(.isis-dialogue) { grid-template-columns: minmax(0, 1fr); }
-.question-cat-place:has(.isis-dialogue) { width: 100%; }
+.question-heading:has(.isis-dialogue), .question-heading:has(.isis-bubble) { grid-template-columns: minmax(0, 1fr); }
+.question-cat-place:has(.isis-dialogue), .question-cat-place:has(.isis-bubble) { width: 100%; }
 .question-picker, .question-tools, .question-confidence { margin: 12px 0; color: var(--color-muted); font-size: var(--text-sm); }
 .question-tools > summary, .question-picker > summary, .question-confidence > summary { cursor: pointer; padding: 8px 0; }
 .focused-question fieldset { margin: 8px 0 20px; }
@@ -20,6 +20,18 @@ html, body { overflow-x: clip; }
 .related-passage { background: var(--color-study-soft); border-left: 3px solid var(--color-study-action); padding: 16px; margin-top: 12px; }
 .related-passage h4 { margin-top: 0; font: inherit; }
 .related-passage blockquote { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; }
+/* 答题区分步卡片（①题目 ②作答 ③反馈 ④原文依据） */
+.focused-question .qstep { border: 1px solid var(--color-rule); border-radius: var(--radius-card); padding: 16px 18px; margin-bottom: 12px; background: var(--color-paper); animation: qstep-in .2s ease-out; }
+.focused-question .qstep-active { border-color: var(--color-study-action); box-shadow: 0 0 0 1px var(--color-study-action); }
+.focused-question .qstep-dim { opacity: .62; }
+.focused-question .qstep-tag { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--color-muted); font-size: var(--text-xs); }
+.focused-question .qstep-num { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--color-rule); font-size: 12px; }
+.focused-question .qstep-active .qstep-num { background: var(--color-study-action); border-color: var(--color-study-action); color: #fff; }
+.focused-question .learning-feedback.qstep { border-color: var(--color-study-action); }
+.focused-question .qstep-gate p { margin: 4px 0 10px; color: var(--color-muted); }
+.focused-question .qstep-gate .tbtn { min-height: 44px; }
+@keyframes qstep-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .focused-question .qstep { animation: none; } }
 .immersive-body:has([data-task-perch]) > .focus-perch { display: none; }
 .focus-study:has([data-task-perch]) > .focus-perch:not([data-task-perch]) { display: none; }
 .focus-study-card .guide-task-cat { float: right; width: 96px; min-height: 90px; margin: 0 0 12px 16px; padding: 0; }
@@ -51,7 +63,7 @@ html, body { overflow-x: clip; }
  .reading-scene { border-radius: 0; }.reading-scene > header, .reader-toolbar, .reader-body, .reading-scene > footer { padding: 12px; }
  .reading-scene > header { flex-wrap: wrap; }.reader-body article { font-size: 16px; }
  .question-heading { gap: 8px; }.question-heading .question-cat-place { width: 72px; }
- .question-cat-place:has(.isis-dialogue) { width: 100%; }.desk-more-menu { grid-template-columns: minmax(0, 1fr); }
+ .question-cat-place:has(.isis-dialogue), .question-cat-place:has(.isis-bubble) { width: 100%; }.desk-more-menu { grid-template-columns: minmax(0, 1fr); }
  .related-passage { padding: 12px; }
 }
 

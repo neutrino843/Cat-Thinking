@@ -121,6 +121,7 @@ interface VerificationConfiguration {
   readonly learning: boolean
   readonly title?: string
   readonly qualityProfile?: 'standard' | 'high-quality'
+  readonly localOnly?: boolean
 }
 
 const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex')
@@ -177,6 +178,15 @@ export const verifyPersonalQualitySample = async (options: PersonalLearningVerif
   const receipt = await verifyBoundedPersonalSample(options, { sample: sample.text, title: sample.title,
     maximumRequests: 8, maximumDeadlineMs: PERSONAL_LEARNING_VERIFICATION_LIMITS.deadlineMs,
     kinds, learning: true, qualityProfile: 'high-quality' })
+  return { ...receipt, kind: 'personal-learning-pipeline-verification', limit: options.requestLimit ?? 8 }
+}
+
+/** CPU inference needs a separate local-only clock; cloud/release checks keep their existing bounds. */
+export const verifyLocalQualitySample = async (options: Omit<PersonalLearningVerificationOptions, 'createProvider'>, sampleId: string): Promise<PersonalLearningVerificationResult> => {
+  const sample = qualitySample(sampleId)
+  const receipt = await verifyBoundedPersonalSample(options, { sample: sample.text, title: sample.title,
+    maximumRequests: 8, maximumDeadlineMs: 2_700_000, kinds: ARTIFACT_KINDS,
+    learning: true, qualityProfile: 'high-quality', localOnly: true })
   return { ...receipt, kind: 'personal-learning-pipeline-verification', limit: options.requestLimit ?? 8 }
 }
 
@@ -245,6 +255,8 @@ const verifyBoundedPersonalSample = async (
       privateValues = [snapshot.settings.apiKey, snapshot.settings.baseUrl].filter((value): value is string => !!value)
     }
     if (!snapshot || snapshot.revoked || !await canInvoke()) { reason = 'provider_unavailable'; return await finish() }
+    if (configuration.localOnly && (snapshot.settings.networkMode !== 'local-loopback'
+      || /cloud/iu.test(snapshot.settings.modelId ?? ''))) { reason = 'provider_unavailable'; return await finish() }
     const provider = options.createProvider ? options.createProvider(snapshot)
       : createPersonalModelProvider(snapshot.settings, snapshot.id)
     if (!provider.isReady() || provider.profileVersion !== snapshot.id || provider.modelId !== snapshot.settings.modelId) {

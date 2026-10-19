@@ -170,7 +170,7 @@ test('save-to-course entry captures verified source and results then opens the c
   const dialog = page.locator('[data-test-learning-dialog]')
   await dialog.getByRole('textbox', { name: '新课程名称', exact: true }).fill('从结果保存的课程')
   await dialog.getByRole('button', { name: '保存到课程', exact: true }).click()
-  await expect(dialog.getByText('学习资料已归档。', { exact: false })).toBeVisible()
+  await expect(dialog.getByText('学习资料已保存到课程。', { exact: false })).toBeVisible()
   const stored = await page.evaluate(async () => {
     const { listCourses, loadCourseSnapshot } = await import('/src/learning/repository.ts')
     const course = (await listCourses())[0]
@@ -218,7 +218,7 @@ test('an archived question issue disables live submission before CAS and preserv
   const dialog = page.locator('[data-test-learning-dialog]')
   await dialog.getByRole('textbox', { name: '新课程名称', exact: true }).fill('题目疑问课程')
   await dialog.getByRole('button', { name: '保存到课程', exact: true }).click()
-  await expect(dialog.getByText('学习资料已归档。', { exact: false })).toBeVisible()
+  await expect(dialog.getByText('学习资料已保存到课程。', { exact: false })).toBeVisible()
   const question = dialog.locator('[data-quiz-question-id="choice"]')
   await question.getByRole('radio', { name: '正确项', exact: true }).check()
   await expect(dialog.getByText('正在保存作答…')).toHaveCount(0)

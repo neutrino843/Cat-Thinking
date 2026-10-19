@@ -1,0 +1,30 @@
+/* Hallmark · pre-emit critique: P4 H4 E4 S5 R5 V4 */
+.node-learning { color: var(--color-ink); min-width: 0; }
+.node-learning-head { display: flex; align-items: start; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-md); }
+.node-learning-head h2 { font-family: var(--font-study-display); }
+.node-layout { display: grid; grid-template-columns: minmax(180px, 250px) minmax(0, 1fr); gap: var(--space-md); align-items: start; }
+.node-outline { background: var(--color-study-rail); padding: var(--space-sm); border: 1px solid var(--color-study-rule); border-radius: var(--radius-study); position: sticky; top: var(--space-xs); max-height: 75vh; overflow-y: auto; }
+.node-outline-item { display: block; width: 100%; min-height: 44px; text-align: left; padding: var(--space-xs); border: 0; border-radius: var(--radius-study); background: transparent; color: var(--color-ink); cursor: pointer; }
+.node-outline-item[aria-pressed=true] { background: var(--color-study-soft); font-weight: 700; }
+.node-outline-item:hover { background: var(--color-study-paper); }
+.node-outline-item:focus-visible { outline: 2px solid var(--color-focus); }
+.node-learning button:active { transform: translateY(1px); }
+.node-learning button:disabled { cursor: default; opacity: .55; }
+.node-main { min-width: 0; }
+.node-learning label { display: grid; gap: var(--space-3xs); margin-bottom: var(--space-xs); }
+.node-learning .learning-option { display: flex; align-items: center; }
+.node-learning input:not([type=checkbox]), .node-learning textarea, .node-learning select { box-sizing: border-box; width: 100%; min-width: 0; padding: var(--space-2xs); font: inherit; color: var(--color-ink); background: var(--color-study-surface); border: 1px solid var(--color-study-rule); border-radius: var(--radius-study); }
+.node-learning input:focus-visible, .node-learning textarea:focus-visible, .node-learning select:focus-visible { outline: 2px solid var(--color-focus); }
+.node-learning textarea { resize: vertical; min-height: 85px; }
+.node-learning .node-draft { min-height: 180px; }
+.node-learning h3, .node-learning h4 { font-style: normal; overflow-wrap: anywhere; }
+.node-learning details, .node-learning .node-hint, .node-relations article { margin-block: var(--space-sm); padding-block: var(--space-xs); border-top: 1px solid var(--color-study-rule); }
+.node-learning summary { cursor: pointer; min-height: 44px; display: list-item; padding-top: var(--space-xs); font-weight: 600; }
+.node-sources pre, .node-note-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.node-sources pre { max-height: 50vh; overflow: auto; font: inherit; padding: var(--space-sm); background: var(--color-study-rail); }
+.node-formula { display: inline-block; max-width: 100%; overflow-x: auto; vertical-align: middle; padding: var(--space-3xs); }
+.node-learning [role=alert] { color: var(--color-error); white-space: pre-wrap; }
+.node-learning [role=status] { color: var(--color-muted); }
+.node-learning .learning-actions { flex-wrap: wrap; }
+.node-learning button { min-height: 44px; white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+@media (max-width: 768px) { .node-layout { grid-template-columns: minmax(0, 1fr); } .node-outline { position: static; max-height: 300px; } .node-learning-head { display: block; } }

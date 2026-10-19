@@ -566,7 +566,7 @@ export async function exportCurrent(kind: 'json' | 'svg' | 'png' | 'pdf' | 'md' 
   if (kind === 'csv') {
     download(
       `${sanitizeFileName('猫思之-' + doc.title + '-甘特')}.csv`,
-      new Blob([toGanttCSV(doc)], { type: 'text/csv;charset=utf-8' }),
+      new Blob([toGanttCSV(doc, 'tasks')], { type: 'text/csv;charset=utf-8' }),
     )
     return
   }

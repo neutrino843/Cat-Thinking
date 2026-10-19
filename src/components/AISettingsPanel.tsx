@@ -12,6 +12,7 @@ import {
   type ProviderStructuredOutput,
 } from '@cat-thinking/analysis-contracts'
 import { canReuseSavedProviderKey, HttpProviderSettingsClient, isTextModelSuggestion, providerSettingsErrorText } from '../analysis/providerSettingsClient'
+import LocalModelSetup from './LocalModelSetup'
 
 interface ConnectionForm {
   providerId: string
@@ -28,6 +29,12 @@ const initialForm: ConnectionForm = {
   modelId: initialPreset.models[0]?.id ?? '', protocol: initialPreset.protocol,
   structuredOutput: initialPreset.structuredOutput, networkMode: initialPreset.networkMode,
 }
+
+const chatReply = { parse(value: unknown) {
+  const reply = value as { answer?: unknown; model?: unknown; local?: unknown }
+  if (typeof reply?.answer !== 'string' || !reply.answer.trim() || reply.answer.length > 16000 || typeof reply.model !== 'string' || typeof reply.local !== 'boolean') throw new Error('invalid_chat_reply')
+  return { answer: reply.answer, model: reply.model, local: reply.local }
+} }
 
 const statusLabel = (status?: PersonalProviderStatus): string => {
   if (!status) return '正在读取连接'
@@ -49,10 +56,14 @@ const statusMessage = (status: PersonalProviderStatus): string => {
 }
 
 /** Secrets live only in this mounted input and the transient request body. */
-export default function AISettingsPanel({ onClose, onConnected }: { onClose: () => void; onConnected: () => void }) {
+export default function AISettingsPanel({ onClose, onConnected, initialProvider }: { onClose: () => void; onConnected: () => void; initialProvider?: 'mobilecloud' }) {
   const [client] = useState(() => new HttpProviderSettingsClient())
   const [status, setStatus] = useState<PersonalProviderStatus>()
-  const [form, setForm] = useState<ConnectionForm>(initialForm)
+  const [form, setForm] = useState<ConnectionForm>(() => {
+    const requested = initialProvider ? getProviderPreset(initialProvider) : undefined
+    return requested ? { providerId: requested.id, baseUrl: `${requested.baseUrl.replace(/\/+$/u, '')}/`, modelId: requested.models[0]?.id ?? '',
+      protocol: requested.protocol, structuredOutput: requested.structuredOutput, networkMode: requested.networkMode } : initialForm
+  })
   const [apiKey, setApiKey] = useState('')
   const [models, setModels] = useState<PersonalProviderModel[]>([])
   const [modelSource, setModelSource] = useState<'provider' | 'catalog'>('catalog')
@@ -62,6 +73,7 @@ export default function AISettingsPanel({ onClose, onConnected }: { onClose: () 
   const [confirmForget, setConfirmForget] = useState(false)
   const dialog = useRef<HTMLDialogElement>(null)
   const providerSelect = useRef<HTMLSelectElement>(null)
+  const apiKeyInput = useRef<HTMLInputElement>(null)
   const operation = useRef<AbortController>()
   const alive = useRef(false)
   const previousFocus = useRef<HTMLElement | null>(null)
@@ -90,7 +102,12 @@ export default function AISettingsPanel({ onClose, onConnected }: { onClose: () 
     const controller = new AbortController()
     operation.current = controller
     void client.status(controller.signal).then((next) => {
-      if (alive.current && !controller.signal.aborted) adopt(next, true)
+      if (alive.current && !controller.signal.aborted) {
+        adopt(next, !initialProvider)
+        if (initialProvider === 'mobilecloud') {
+          setNotice('移动云地址与模型已填好。填写移动云 API Key 后，点击「保存并连接」，再测试简短问答。')
+        }
+      }
     }).catch((reason) => {
       if (alive.current && !controller.signal.aborted) setError(providerSettingsErrorText(reason))
     }).finally(() => {
@@ -103,14 +120,15 @@ export default function AISettingsPanel({ onClose, onConnected }: { onClose: () 
       element?.close()
       if (previousFocus.current?.isConnected) previousFocus.current.focus()
     }
-  }, [client])
+  }, [client, initialProvider])
 
   useEffect(() => {
     if (!busy && status?.available && !initialFocusDone.current) {
       initialFocusDone.current = true
-      providerSelect.current?.focus()
+      if (initialProvider === 'mobilecloud') apiKeyInput.current?.focus()
+      else providerSelect.current?.focus()
     }
-  }, [busy, status?.available])
+  }, [busy, status?.available, initialProvider])
 
   const run = async (label: string, task: (signal: AbortSignal) => Promise<void>) => {
     if (operation.current) return
@@ -127,7 +145,13 @@ export default function AISettingsPanel({ onClose, onConnected }: { onClose: () 
 
   const readStatus = () => void run('正在重新连接本地服务…', async (signal) => {
     const next = await client.status(signal)
-    if (alive.current && !signal.aborted) { adopt(next, true); setApiKey('') }
+    // Keep an explicitly requested provider and its draft together. Ordinary
+    // reconnect still restores the saved configuration after a revision conflict,
+    // clearing the draft key before the form can move to a different provider.
+    if (alive.current && !signal.aborted) {
+      adopt(next, !initialProvider)
+      if (!initialProvider) setApiKey('')
+    }
   })
 
   const selectProvider = (id: string) => {
@@ -241,6 +265,14 @@ export default function AISettingsPanel({ onClose, onConnected }: { onClose: () 
   const savedKey = canReuseSavedProviderKey(status, form)
   const isCustom = form.providerId === 'custom'
   const draftChanged = Boolean(status?.configured && (apiKey || status.providerId !== form.providerId || status.baseUrl !== form.baseUrl || status.modelId !== form.modelId || status.protocol !== form.protocol || status.structuredOutput !== form.structuredOutput || status.networkMode !== form.networkMode))
+  const testConnection = () => {
+    if (!status?.enabled || status.protocol !== 'chat-completions' || draftChanged) return
+    void run('正在请求一次简短回答…', async (signal) => {
+      const reply = await new HttpProviderSettingsClient(undefined, 125000).localOperation('/chat', 'POST', chatReply, signal,
+        { question: '请只回复：连接测试成功。', context: '', expectedRevision: status.revision })
+      if (alive.current && !signal.aborted) setNotice(`已收到${reply.local ? '本机' : '互联网'}模型 ${reply.model} 的实际回答：${reply.answer.slice(0, 500)}。这次只验证简短问答，整篇分析和出题仍需单独验证。`)
+    })
+  }
   const onSubmit = (event: FormEvent) => { event.preventDefault(); save(true) }
   const trapTab = (event: KeyboardEvent<HTMLDialogElement>) => {
     if (event.key !== 'Tab') return
@@ -257,18 +289,23 @@ export default function AISettingsPanel({ onClose, onConnected }: { onClose: () 
       const rect = event.currentTarget.getBoundingClientRect()
       if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) onClose()
     } }}>
-    <header className="modal-head"><div><h2 id="ai-settings-title">连接你的 AI</h2><p>选服务、填密钥、选模型，然后回到文档。</p></div>
+    <header className="modal-head"><div><h2 id="ai-settings-title">{form.providerId === 'mobilecloud' ? '连接移动云 DeepSeek' : '连接你的 AI'}</h2><p>{form.providerId === 'mobilecloud' ? '地址和模型已填好，只需输入移动云 API Key。' : '选服务、填密钥、选模型，然后回到文档。'}</p></div>
       <button className="tbtn" onClick={onClose} aria-label="关闭 AI 设置">✕</button></header>
     <div className="ai-settings-body">
+      {status?.available && form.providerId === 'ollama' && <LocalModelSetup onChoose={(modelId) => { setForm({ providerId: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', modelId, protocol: 'chat-completions', structuredOutput: 'json_object', networkMode: 'local-loopback' }); setApiKey('') }}/>}
       <section className="ai-connection-status" data-state={error ? 'error' : status?.enabled && status.acceptsRuns ? 'success' : 'default'} aria-label="AI 连接状态">
         <strong>{!status && error ? '暂时无法连接 AI 服务' : statusLabel(status)}</strong>
         {status && <p>{statusMessage(status)}</p>}
         {status?.configured && <p>已保存模型：{status.modelId}</p>}
+        {status?.baseUrl && <p className="ai-guardrail-note">已保存服务：{new URL(status.baseUrl).host}</p>}
+        {status?.providerId === 'deepseek' && <p className="ai-guardrail-note">这是 DeepSeek 官网连接。移动云 Token 请使用下方「移动云 MoMA」配置。</p>}
+        {status?.providerId === 'deepseek' && <button className="tbtn" disabled={Boolean(busy)} onClick={() => { selectProvider('mobilecloud'); setNotice('移动云地址与模型已填好。请在下方 API 密钥框填写移动云 Token，再保存并连接。'); requestAnimationFrame(() => apiKeyInput.current?.focus()) }}>改用移动云 MoMA</button>}
         {draftChanged && <p>表单有未保存的修改。保存后需重新连接，新的分析才会使用这些设置。</p>}
         {busy && <p role="status">{busy}</p>}
         {error && <p role="alert" className="analysis-error">{error}</p>}
         {notice && <p role="status">{notice}</p>}
         <button className="tbtn" disabled={Boolean(busy)} onClick={readStatus}>重新连接</button>
+        {status?.enabled && status.protocol === 'chat-completions' && <><button className="tbtn" disabled={Boolean(busy) || draftChanged} onClick={testConnection}>测试问答（使用额度）</button><small>只发送一句公开测试文字，不发送课件；使用已保存服务。修改表单后请先保存并连接。</small></>}
         {status?.configured && status.messageKey === 'analysis.personal.models_not_supported' && !draftChanged && !status.enabled && <button className="tbtn primary ai-manual-connect" disabled={Boolean(busy)} onClick={connectManualModel}>使用手填模型连接</button>}
       </section>
       {!unavailable && <form onSubmit={onSubmit} autoComplete="off">
@@ -281,7 +318,7 @@ export default function AISettingsPanel({ onClose, onConnected }: { onClose: () 
             placeholder="https://你的服务地址/v1" maxLength={2048} onChange={(event) => changeBaseUrl(event.target.value)} />
             <small>{form.networkMode === 'local-loopback' ? '已识别为本机地址。连接只会发往当前电脑。' : '可填基础地址，也可粘贴完整接口地址；会自动识别接口格式。'}</small></label>}
           <label className="ai-field"><span>API 密钥{savedKey ? ' · 已保存在本地服务' : preset?.requiresApiKey === false ? ' · 可留空' : ''}</span>
-            <input type="password" name="cat-thinking-ai-key" aria-label="API 密钥" value={apiKey} autoComplete="new-password" spellCheck={false}
+            <input ref={apiKeyInput} type="password" name="cat-thinking-ai-key" aria-label="API 密钥" value={apiKey} autoComplete="new-password" spellCheck={false}
               maxLength={4096} placeholder={savedKey ? '留空继续使用已保存的密钥' : '粘贴服务商提供的 API 密钥'}
               onChange={(event) => setApiKey(event.target.value)} aria-describedby="ai-key-help" />
             <small id="ai-key-help">密钥由本地 AI 服务保管，浏览器文档和备份不含密钥。</small>
@@ -302,7 +339,7 @@ export default function AISettingsPanel({ onClose, onConnected }: { onClose: () 
             <div className="ai-settings-grid">
               <label className="ai-field"><span>接口格式</span><select aria-label="接口格式" value={form.protocol} onChange={(event) => setForm({ ...form, protocol: event.target.value as ProviderProtocol })}>
                 <option value="chat-completions">聊天接口（广泛兼容）</option><option value="responses">Responses 接口</option></select></label>
-              <label className="ai-field"><span>结果格式</span><select aria-label="结果格式" value={form.structuredOutput} onChange={(event) => setForm({ ...form, structuredOutput: event.target.value as ProviderStructuredOutput })}>
+              <label className="ai-field"><span>结果格式</span><select aria-label="结果格式" disabled={preset?.promptOnlyJson} value={form.structuredOutput} onChange={(event) => setForm({ ...form, structuredOutput: event.target.value as ProviderStructuredOutput })}>
                 <option value="json_schema">严格格式</option><option value="json_object">兼容格式</option></select></label>
             </div>
             <label className="ai-field"><span>服务位置</span><select aria-label="服务位置" value={form.networkMode} onChange={(event) => setForm({ ...form, networkMode: event.target.value as ProviderNetworkMode })}>

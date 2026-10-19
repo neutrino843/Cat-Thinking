@@ -542,7 +542,7 @@ export const useDoc = create<DocState>((set, get) => {
       if (next.milestone) {
         next = {
           milestone: true,
-          start: next.start ?? cur.start,
+          start: Object.prototype.hasOwnProperty.call(patch, 'start') ? next.start : next.start ?? cur.start,
           progress: next.progress,
           deps: next.deps,
           priority: next.priority,
@@ -557,7 +557,7 @@ export const useDoc = create<DocState>((set, get) => {
         }
       }
       next.progress = next.progress === undefined ? undefined : Math.min(1, Math.max(0, next.progress))
-      const empty = !next.start && !next.milestone && !next.priority && !next.owner && !next.note
+      const empty = !next.start && !next.milestone && !next.priority && !next.owner && !next.note && next.progress === undefined && !next.deps?.length
       upd(
         { ...s.doc.nodes, [id]: { ...n, ...(empty ? { task: undefined } : { task: next }) } },
         {},

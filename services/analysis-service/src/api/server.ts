@@ -152,10 +152,14 @@ export const buildAnalysisServer = async (
     strictPreflight: true,
   })
 
+  // Read-only GET/HEAD traffic (run snapshots, usage, artifacts, SSE events) gets its own
+  // bucket at 4× the base limit so a watching UI cannot starve mutations; writes keep the
+  // configured ceiling unchanged. Buckets are keyed per-IP per-class, never per-route alone.
   await server.register(rateLimit, {
     global: true,
-    max: config.rateLimitMax,
+    max: (request) => (request.method === 'GET' || request.method === 'HEAD' ? config.rateLimitMax * 4 : config.rateLimitMax),
     timeWindow: config.rateLimitWindowMs,
+    keyGenerator: (request) => `${request.ip}:${request.method === 'GET' || request.method === 'HEAD' ? 'read' : 'write'}`,
     ipv6Subnet: 64,
     errorResponseBuilder: () => ({ statusCode: 429, code: 'CAT_RATE_LIMITED' }),
   })

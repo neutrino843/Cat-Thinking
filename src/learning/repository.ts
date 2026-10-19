@@ -5,6 +5,8 @@ import { artifactContentHash, prepareArtifactIdentity, verifyPreparedArtifactIde
 import { deriveKnowledgePracticeLinks } from '../analysis/knowledgePracticeLinks'
 import { sha256Hex } from '../analysis/fingerprint'
 import type { QuizPracticeRecord } from '../analysis/quizPractice'
+import type { NodeLearningState } from './nodeTypes'
+import { assertNodeSupportArchive } from './nodeContracts'
 import { prerequisiteCycle, questionRefKey } from './knowledgeGraph'
 import { archiveHashPayload, parseLearningEntity, parseSourceDocument, validateLearningArchive } from './archiveValidation'
 import {
@@ -15,6 +17,13 @@ import {
 } from './model'
 
 const immutable = new Set<LearningKind>(['archive', 'attempt', 'assessment', 'merge'])
+function protectNodeHistory(next: NodeLearningState, previous?: NodeLearningState): void {
+  for (const source of previous?.sources ?? []) if (canonicalizeJson(next.sources.find((s) => s.id === source.id) ?? null) !== canonicalizeJson(source)) throw new LearningError('invalid', '原文快照只能追加，不能覆盖。')
+  for (const key of ['notes', 'events', 'supports'] as const) for (const old of previous?.[key] ?? []) {
+    const value = next[key].find((item) => item.id === old.id)
+    if (!value || JSON.stringify({ ...value, archiveId: undefined }) !== JSON.stringify({ ...old, archiveId: undefined }) || key === 'supports' && 'archiveId' in old && old.archiveId !== undefined && (!('archiveId' in value) || value.archiveId !== old.archiveId)) throw new LearningError('invalid', '节点学习历史只能追加，不能覆盖。')
+  }
+}
 function conflict(): never { throw new LearningError('conflict', '记录已在其他页面更新或删除，请重新载入后再保存。') }
 export async function getEntity<K extends LearningKind>(id: string, kind: K): Promise<EntityOf<K> | undefined> {
   const row = await db.learningRecords.get(id); if (!row) return undefined
@@ -48,6 +57,24 @@ async function requireQuestion(courseId: string, ref: QuestionRef): Promise<void
 /** Only IndexedDB operations inside transactions; archived crypto checks happen at creation/read/export. */
 async function requireReferences(entity: LearningEntity): Promise<void> {
   if (entity.kind !== 'course') await requireCourse(entity.courseId)
+  if (entity.kind === 'node-workspace') {
+    const others = await listEntities(entity.courseId, 'node-workspace')
+    if (others.some((item) => item.id !== entity.id)) conflict()
+    for (const binding of entity.bindings) await requirePoint(entity.courseId, binding.pointId)
+    for (const support of entity.supports) {
+      if (!support.restored && !await db.docs.get(support.docId)) throw new LearningError('missing', '节点提示准备资料不存在。')
+      if (support.archiveId) assertNodeSupportArchive(entity, support, await getEntity(support.archiveId, 'archive'))
+    }
+    const previous = others.find((item) => item.id === entity.id)
+    for (const source of previous?.sources ?? []) {
+      const next = entity.sources.find((item) => item.id === source.id)
+      if (!next || canonicalizeJson(next) !== canonicalizeJson(source)) throw new LearningError('invalid', '原文快照只能追加，不能覆盖。')
+    }
+    for (const key of ['notes', 'events', 'supports'] as const) for (const old of previous?.[key] ?? []) {
+      const next = entity[key].find((item) => item.id === old.id)
+      if (!next || JSON.stringify({ ...next, archiveId: undefined }) !== JSON.stringify({ ...old, archiveId: undefined })) throw new LearningError('invalid', '节点学习历史只能追加，不能覆盖。')
+    }
+  }
   if (entity.kind === 'course') for (const goal of entity.goals ?? []) for (const pointId of goal.pointIds) await requirePoint(entity.courseId, pointId)
   if (entity.kind === 'journey') {
     if (entity.questionRef) await requireQuestion(entity.courseId, entity.questionRef)
@@ -142,6 +169,7 @@ export async function saveEntity<T extends LearningEntity>(input: T, expectedRev
     if (await db.learningEntityTombstones.get(entity.id)) conflict()
     const current = await db.learningRecords.get(entity.id)
     if ((current?.revision ?? null) !== expectedRevision || current && (current.kind !== entity.kind || current.courseId !== entity.courseId)) conflict()
+    if (entity.kind === 'node-workspace') protectNodeHistory(entity, current?.kind === 'node-workspace' ? current : undefined)
     await requireReferences(entity)
     const previousGoals = entity.kind === 'point' ? await goalScope(entity.courseId) : undefined
     if (entity.kind === 'document') {
@@ -154,9 +182,9 @@ export async function saveEntity<T extends LearningEntity>(input: T, expectedRev
     await db.learningRecords.put(saved); if (previousGoals) await recordGoalScopeChange(entity.courseId, previousGoals); return saved
   })
 }
-export async function createCourse(input: { name: string; goal?: string; timeZone?: string; dailyMinutes?: number; dailyQuestionLimit?: number; examDate?: string }): Promise<Course> {
+export async function createCourse(input: { name: string; goal?: string; timeZone?: string; dailyMinutes?: number; dailyQuestionLimit?: number; examDate?: string; learningMode?: 'nodes' | 'legacy' }): Promise<Course> {
   const id = newLearningId()
-  return saveEntity({ ...learningBase(id, id), kind: 'course', name: input.name.trim(), goal: input.goal ?? '', timeZone: input.timeZone ?? 'Asia/Shanghai', dailyMinutes: input.dailyMinutes ?? 30, dailyQuestionLimit: input.dailyQuestionLimit ?? 20, goalVersion: 1, automaticReviews: false, ...(input.examDate ? { examDate: input.examDate } : {}) }, null)
+  return saveEntity({ ...learningBase(id, id), kind: 'course', name: input.name.trim(), goal: input.goal ?? '', timeZone: input.timeZone ?? 'Asia/Shanghai', dailyMinutes: input.dailyMinutes ?? 30, dailyQuestionLimit: input.dailyQuestionLimit ?? 20, goalVersion: 1, automaticReviews: false, ...(input.examDate ? { examDate: input.examDate } : {}), ...(input.learningMode ? { learningMode: input.learningMode } : {}) }, null)
 }
 export async function updateCourse(course: Course, expectedRevision = course.revision): Promise<Course> { return saveEntity(course, expectedRevision) }
 export async function attachDocument(courseId: string, docId: string, chapter = '') {
@@ -177,7 +205,7 @@ export async function loadCourseSnapshot(courseId: string): Promise<CourseSnapsh
     const rows = <K extends LearningKind>(kind: K) => records.filter((r): r is EntityOf<K> => r.kind === kind)
     const documents = rows('document'); const docs = []
     for (const membership of documents) { const doc = await db.docs.get(membership.docId); if (doc) docs.push({ id: doc.id, title: doc.title, createdAt: doc.createdAt, updatedAt: doc.updatedAt }) }
-    return { course, documents, docs, points: rows('point'), archives: rows('archive'), attempts: rows('attempt').sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), drafts: rows('draft'), assessments: rows('assessment').sort((a, b) => a.attemptId === b.attemptId && a.sequence !== undefined && b.sequence !== undefined ? a.sequence - b.sequence : a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)), schedules: rows('schedule'), relations: rows('relation'), merges: rows('merge'), sessions: rows('session'), applicationTasks: rows('application'), issues: rows('issue'), bindings: rows('binding'), supports: rows('support'), journeys: rows('journey') }
+    return { course, documents, docs, points: rows('point'), archives: rows('archive'), attempts: rows('attempt').sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)), drafts: rows('draft'), assessments: rows('assessment').sort((a, b) => a.attemptId === b.attemptId && a.sequence !== undefined && b.sequence !== undefined ? a.sequence - b.sequence : a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)), schedules: rows('schedule'), relations: rows('relation'), merges: rows('merge'), sessions: rows('session'), applicationTasks: rows('application'), issues: rows('issue'), bindings: rows('binding'), supports: rows('support'), journeys: rows('journey'), nodeWorkspace: rows('node-workspace')[0] }
   })
   await Promise.all(snapshot.archives.map(validateLearningArchive))
   await Promise.all(snapshot.journeys.filter((item) => item.mode === 'reading').map(async (item) => {
@@ -187,6 +215,20 @@ export async function loadCourseSnapshot(courseId: string): Promise<CourseSnapsh
   return snapshot
 }
 export async function loadLearningArchive(id: string): Promise<LearningArchive | undefined> { const row = await getEntity(id, 'archive'); return row ? validateLearningArchive(row) : undefined }
+
+/** 查询有终态 run 但尚未归档到任何课程的分析任务（A5：首页「去保存分析结果」） */
+export async function listUnarchivedAnalyses(): Promise<{ docId: string; runId: string; title: string; updatedAt: number }[]> {
+  const tasks = await db.analysisTasks.toArray()
+  const archives = (await db.learningRecords.where('kind').equals('archive').toArray()).map((r) => parseLearningEntity(r) as LearningArchive)
+  const archivedRunIds = new Set(archives.map((a) => a.runId))
+  const results: { docId: string; runId: string; title: string; updatedAt: number }[] = []
+  for (const task of tasks) {
+    if (!task.runId || archivedRunIds.has(task.runId)) continue
+    const doc = await db.docs.get(task.docId)
+    if (doc) results.push({ docId: task.docId, runId: task.runId, title: doc.title, updatedAt: task.updatedAt })
+  }
+  return results.sort((a, b) => b.updatedAt - a.updatedAt)
+}
 export function listArchiveQuestions(archive: LearningArchive) {
   return archive.artifacts.flatMap((artifact) => artifact.kind === 'quiz' ? artifact.payload.questions.map((question) => ({ question, ref: { archiveId: archive.id, artifactId: artifact.id, questionId: question.id, confirmed: false } as QuestionRef })) : [])
 }
@@ -360,6 +402,7 @@ export async function saveLearningBatch(changes: LearningChange[], deletions: Le
       if (entity.kind === 'archive' || entity.kind === 'course' || entity.kind === 'document') throw new LearningError('invalid', '此批次不允许修改课程、文档归属或归档。')
       if (immutable.has(entity.kind) && current && sameImmutable(current, entity)) continue
       if ((current?.revision ?? null) !== expectedRevision || current && (current.courseId !== entity.courseId || current.kind !== entity.kind || immutable.has(entity.kind))) conflict()
+      if (entity.kind === 'node-workspace') protectNodeHistory(entity, current?.kind === 'node-workspace' ? current : undefined)
     }
     const saved: LearningEntity[] = []
     for (const { entity } of parsed) {

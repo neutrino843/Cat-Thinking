@@ -6,8 +6,9 @@ import { liveQuery } from 'dexie'
 import type { PersonalProviderStatus } from '@cat-thinking/analysis-contracts'
 import type { DocMeta } from '../../types'
 import type { CourseSnapshot } from '../../learning/model'
-import { attachDocument, createCourse, listCourses, loadCourseSnapshot, saveEntity } from '../../learning/repository'
+import { attachDocument, createCourse, listCourses, listUnarchivedAnalyses, loadCourseSnapshot, saveEntity } from '../../learning/repository'
 import { buildLearningHome, type HomeTask } from '../../learning/homeView'
+import { decideHomePrimary } from '../../learning/decideHomePrimary'
 import { safeLearningMessage, visibleQuestions } from '../../learning/workspaceView'
 import { HttpProviderSettingsClient } from '../../analysis/providerSettingsClient'
 import { db, listDocs, saveDocumentBundle } from '../../store/db'
@@ -20,6 +21,8 @@ import { importQueue, type ImportTask } from '../../lib/importQueue'
 import DocumentImportDialog from '../DocumentImportDialog'
 import PostImportChoice from './PostImportChoice'
 import { guideImportProblem, guidePreview, guideRead, guideSaved, resumeGuide, startGuide, useGuide } from '../../onboarding/guide'
+import { migrateFromGuideV1, onboardingDone, useOnboarding } from '../../onboarding/onboarding'
+import OnboardingChecklist from '../../onboarding/OnboardingChecklist'
 import GuideStudy from '../../onboarding/GuideStudy'
 import { focusTask } from '../../learning/focusHome'
 import { EXPERIENCE_KEY, refreshExperience, saveExperience, START_CHOICES, useExperience } from '../../learning/experiencePreferences'
@@ -56,6 +59,7 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
   const now = useLearningClock()
   const { preferences: experience, error: preferenceError } = useExperience()
   const guideProgress = useGuide((state) => state.progress)
+  useOnboarding((state) => state.progress) // subscribe to onboarding store
   const [budgetOpen, setBudgetOpen] = useState(false)
   const [achievementsOpen, setAchievementsOpen] = useState(false)
   const [preferencesOpen, setPreferencesOpen] = useState(false)
@@ -69,6 +73,7 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
   useEffect(() => { useAchievementShelf.setState({ resting: !!learningAchievements(snapshots).find((item) => item.id === 'return')?.evidence }) }, [snapshots])
   const [docs, setDocs] = useState<DocMeta[]>([])
   const [sourceDocIds, setSourceDocIds] = useState<string[]>([])
+  const [unarchivedAnalyses, setUnarchivedAnalyses] = useState<{ docId: string; runId: string; title: string; updatedAt: number }[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
@@ -114,8 +119,8 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
     let live = true
     const subscription = liveQuery(async () => {
       const courses = await listCourses()
-      return { snapshots: await Promise.all(courses.map((course) => loadCourseSnapshot(course.id))), docs: await listDocs(), sourceDocIds: (await db.sources.toArray()).filter((source) => source.text.trim()).map((source) => source.docId) }
-    }).subscribe({ next: (value) => { if (live) { setSnapshots(value.snapshots); setDocs(value.docs); setSourceDocIds(value.sourceDocIds); setLoading(false) } },
+      return { snapshots: await Promise.all(courses.map((course) => loadCourseSnapshot(course.id))), docs: await listDocs(), sourceDocIds: (await db.sources.toArray()).filter((source) => source.text.trim()).map((source) => source.docId), unarchived: await listUnarchivedAnalyses() }
+    }).subscribe({ next: (value) => { if (live) { setSnapshots(value.snapshots); setDocs(value.docs); setSourceDocIds(value.sourceDocIds); setUnarchivedAnalyses(value.unarchived); setLoading(false) } },
       error: (reason: unknown) => { if (live) { setError(safeLearningMessage(reason)); setLoading(false) } } })
     return () => { live = false; subscription.unsubscribe() }
   }, [])
@@ -165,9 +170,26 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
   const latestJourney = personalSnapshots.flatMap((snapshot) => (snapshot.journeys ?? []).filter((journey) => journey.status !== 'completed' && !journey.blockedReason).map((journey) => ({ snapshot, journey }))).sort((a, b) => b.journey.updatedAt - a.journey.updatedAt)[0]
   const visibleDocs = docs.filter((doc) => !query.trim() || doc.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const currentDoc = docs.find((doc) => doc.id === currentDocId)
+  // B4：旧版 guide v1 数据迁移到 onboarding v2
+  useEffect(() => {
+    migrateFromGuideV1(guideProgress.status, guideProgress.step)
+  }, [guideProgress.status, guideProgress.step])
+  // onboarding 任务完成联动
+  useEffect(() => {
+    if (guideProgress.status === 'completed') onboardingDone('first-question')
+  }, [guideProgress.status])
+  useEffect(() => {
+    if (unarchivedAnalyses.length === 0 && personalSnapshots.some((s) => s.archives.length > 0)) onboardingDone('save-practice')
+  }, [unarchivedAnalyses.length, personalSnapshots])
+  const handleOnboardingAction = (target: string) => {
+    if (target === 'import') input.current?.click()
+    else if (target === 'guide') { startGuide(); setStudyClosed(''); setDestination('home') }
+    else if (target === 'analysis') onAnalysis()
+    else if (target === 'practice') open('practice')
+  }
   const open = (view: LearningView, id = courseId, extra: LearningTarget = {}) => {
     setMenuOpen(false)
-    setTarget({ courseId: id || undefined, view, ...extra }); setDestination(view === 'prepare' ? 'materials' : view === 'today' || view === 'application' ? 'knowledge' : view)
+    setTarget({ courseId: id || undefined, view, ...extra }); setDestination(view === 'prepare' ? 'materials' : view === 'today' || view === 'application' || view === 'nodes' ? 'knowledge' : view)
   }
   const startTask = async (task: HomeTask) => {
     if (task.targetId?.startsWith('journey:')) {
@@ -215,7 +237,7 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
       const doc = docs.find((item) => item.id === docId)
       const selected = snapshots.find((item) => item.course.id === requestedCourseId)?.course
         ?? snapshots.find((item) => item.documents.some((document) => document.docId === docId))?.course
-        ?? await createCourse({ name: doc?.title.slice(0, 120) || '我的课程' })
+        ?? await createCourse({ name: doc?.title.slice(0, 120) || '我的课程', learningMode: 'nodes' })
       await attachDocument(selected.id, docId)
       const sourceHash = await sha256Hex(source.text)
       startGuide()
@@ -251,7 +273,7 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
     const sourceHash = guidingImport ? await sha256Hex(draft.source.text) : ''
     await saveDocumentBundle(draft.doc, [draft.source]); useDoc.getState().openDoc(draft.doc)
     const selected = snapshots.find((snapshot) => snapshot.course.id === courseId)?.course
-      ?? await createCourse({ name: draft.doc.title.slice(0, 120) || '我的第一门课程' })
+      ?? await createCourse({ name: draft.doc.title.slice(0, 120) || '我的第一门课程', learningMode: 'nodes' })
     await attachDocument(selected.id, draft.doc.id)
     emitDocsChanged(); setCourseId(selected.id)
     setPendingDocId(draft.doc.id)
@@ -321,11 +343,27 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
   const pendingDoc = experience.start === 'review' && home.reviewCount > 0 ? undefined : visibleDocs.find((doc) => doc.id === pendingDocId && (!courseId || snapshots.some((snapshot) => snapshot.course.id === courseId && snapshot.documents.some((item) => item.docId === doc.id))))
   const availableDoc = pendingDoc ?? visibleDocs.find((doc) => sourceDocIds.includes(doc.id) && (!courseId || snapshots.some((snapshot) => snapshot.course.id === courseId && snapshot.documents.some((item) => item.docId === doc.id))))
   const chooseFirst = experience.start === 'course' && !courseId
+  const archivedWithin24h = personalSnapshots.some((snapshot) => snapshot.archives.some((archive) => Date.now() - archive.createdAt < 24 * 3600_000))
+  const hasPracticeQuestions = personalSnapshots.some((snapshot) => snapshot.points.some((point) => point.status === 'active' && visibleQuestions(snapshot, point.id).length > 0))
+  const decision = decideHomePrimary({
+    chooseFirst, guideCanResume, guideProgress, resume, latestJourney,
+    pendingDoc, availableDoc, firstTask, personalSnapshots,
+    unarchivedCount: unarchivedAnalyses.length, archivedWithin24h, hasPracticeQuestions,
+  })
+  const { headline, primary } = decision
   const resumeGuideFirst = guideCanResume && (!resume || guideProgress.stepAt >= resume.session.updatedAt)
   const journeyFirst = !!latestJourney && latestJourney.journey.updatedAt >= Math.max(resume?.session.updatedAt ?? 0, guideCanResume ? guideProgress.stepAt : 0)
   const recommendedResume = !chooseFirst && (experience.start !== 'review' || !home.reviewCount) && (resumeGuideFirst || !!resume || !!latestJourney)
-  const headline = chooseFirst ? '今天想学哪门课？' : recommendedResume ? '从上次停下的地方继续。' : pendingDoc ? `从「${pendingDoc.title}」开始。` : firstTask ? firstTask.title : availableDoc ? '从你已有的资料开始。' : personalSnapshots.length ? '为今天选一点学习内容。' : '带一份资料，开始学习。'
-  const primary = chooseFirst ? '选择课程' : recommendedResume ? '继续学习' : pendingDoc || (!firstTask && availableDoc) ? '开始原文入门练习' : firstTask ? '开始这次学习' : '导入第一份资料'
+  const mutedLabel = chooseFirst ? '你来决定' : recommendedResume ? '继续上次学习' : pendingDoc ? '新资料已保存' : decision.kind === 'save-analysis' ? '分析结果待保存' : decision.kind === 'start-practice' ? '准备开始练习' : firstTask?.courseName || '学习，从自己的资料开始'
+  const heroDescription = decision.kind === 'save-analysis'
+    ? `${unarchivedAnalyses.length} 份分析结果已生成，保存到课程后可以开始练习。`
+    : decision.kind === 'start-practice'
+      ? '分析结果已保存，来做几道题检验掌握程度。'
+      : chooseFirst ? '选定课程后，这里只推荐一个下一步。'
+        : recommendedResume ? (journeyFirst ? `${latestJourney?.journey.title} · 阅读位置、修正笔记和重试记录会一起恢复。` : resumeGuideFirst ? '伊希斯保留了你的入门练习，接着完成第一道题。' : `${resume?.session.title} · ${resume?.reason || '已保存的步骤和文字会一起恢复。'}`)
+          : pendingDoc || (!firstTask && availableDoc) ? '先读一小段，做一道原文入门题。不用先连接 AI。'
+            : firstTask ? `${experience.start === 'review' && !home.reviewCount ? '今天没有安排到期复习，可先学这一项。' : ''}${firstTask.recommendationReason}`
+              : capacity.minutes === 0 || capacity.questions === 0 ? '今天的学习容量有限，可展开完整安排调整，或先阅读已有资料。' : '导入讲义或笔记，读一点，再试着回忆。'
   const chooseContent = () => { setChoosingContent(true); requestAnimationFrame(() => { contentChoice.current?.scrollIntoView({ block: 'start' }); contentChoice.current?.focus() }) }
   const resumeLast = () => {
     if (journeyFirst && latestJourney) { open('today', latestJourney.snapshot.course.id, { journeyId: latestJourney.journey.id }); return }
@@ -335,6 +373,8 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
   const beginPrimary = () => {
     if (chooseFirst) { chooseContent(); return }
     if (recommendedResume) { resumeLast(); return }
+    if (decision.kind === 'save-analysis') { onAnalysis(); return }
+    if (decision.kind === 'start-practice') { open('practice'); return }
     if (pendingDoc) { void beginDocument(pendingDoc.id, courseId); return }
     if (firstTask) { void startTask(firstTask); return }
     if (availableDoc) { void beginDocument(availableDoc.id, courseId); return }
@@ -343,7 +383,7 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
   return <div className="study-shell focus-shell" data-study-home>
     <header className="focus-nav">
       <a className="study-brand" href="#home" onClick={() => setDestination('home')}><svg width="32" height="32" viewBox="0 0 40 40" aria-hidden="true"><path d="M8 28V8l9 7h6l9-7v20q-12 12-24 0Z" fill="none" stroke="currentColor" strokeWidth="2"/><path d="M14 23h2m8 0h2m-8 5 2 2 2-2" stroke="currentColor" strokeWidth="2" fill="none"/></svg><span>猫思之</span></a>
-      <nav aria-label="学习主导航"><button className="study-text-button" aria-current={destination === 'home' ? 'page' : undefined} onClick={() => setDestination('home')}>学习</button><button className="study-text-button" aria-current={destination === 'materials' ? 'page' : undefined} onClick={() => open('materials')}>资料</button><div className="focus-more"><button className="study-text-button" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}>更多</button>{menuOpen && <StudyDialog title="更多功能" onClose={() => setMenuOpen(false)}><div className="desk-more-menu"><button onClick={() => { setMenuOpen(false); setPreferencesOpen(true) }}>学习偏好</button><button onClick={() => open('practice')}>练习与复习</button><button onClick={() => open('knowledge')}>知识结构</button><button onClick={() => open('exam')}>备考</button><button onClick={() => open('application')}>应用任务</button><button onClick={() => open('records')}>学习记录</button><button onClick={() => { setMenuOpen(false); setAchievementsOpen(true) }}>我的学习纪念</button><button onClick={() => { setMenuOpen(false); onEditor(currentDoc?.id) }}>思维导图与甘特图</button><button onClick={() => { setMenuOpen(false); void openTutorialFromHome() }}>使用教程</button><button onClick={() => { setMenuOpen(false); startGuide() }}>重玩新手引导</button><button onClick={() => open('backup')}>资料与备份</button><button onClick={onAnalysis}>AI 分析</button><button onClick={onSettings}>AI 设置</button><button onClick={toggleDark}>{dark ? '切换亮色' : '切换深色'}</button><small>{provider?.enabled ? `模型已连接 · ${provider.modelId}` : '本地阅读与练习无需 AI 连接'}</small></div></StudyDialog>}</div></nav>
+      <nav aria-label="学习主导航"><button className="study-text-button" aria-current={destination === 'home' ? 'page' : undefined} onClick={() => setDestination('home')}>学习</button><button className="study-text-button" aria-current={destination === 'materials' ? 'page' : undefined} onClick={() => open('materials')}>资料</button><div className="focus-more"><button className="study-text-button" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}>更多</button>{menuOpen && <StudyDialog title="更多功能" onClose={() => setMenuOpen(false)}><div className="desk-more-menu"><button onClick={() => { setMenuOpen(false); setPreferencesOpen(true) }}>学习偏好</button><button onClick={() => open('practice')}>练习与复习</button><button onClick={() => open('knowledge')}>知识结构</button><button onClick={() => open('exam')}>备考</button><button onClick={() => open('application')}>应用任务</button><button onClick={() => open('records')}>学习记录</button><button onClick={() => { setMenuOpen(false); setAchievementsOpen(true) }}>我的学习纪念</button><button onClick={() => { setMenuOpen(false); onEditor(currentDoc?.id) }}>思维导图与甘特图</button><button onClick={() => { setMenuOpen(false); void openTutorialFromHome() }}>使用教程</button><button onClick={() => { setMenuOpen(false); startGuide(); setStudyClosed(''); setDestination('home') }}>新手任务清单</button><button onClick={() => open('backup')}>资料与备份</button><button onClick={onAnalysis}>AI 分析</button><button onClick={onSettings}>AI 设置</button><button onClick={toggleDark}>{dark ? '切换亮色' : '切换深色'}</button><small>{provider?.enabled ? `模型已连接 · ${provider.modelId}` : '本地阅读与练习无需 AI 连接'}</small></div></StudyDialog>}</div></nav>
     </header>
     <div className="study-page focus-page">
       {destination === 'home' && centralGuide ? <GuideStudy onClose={() => setStudyClosed(guideProgress.sessionId)} onMaterials={() => { setStudyClosed(guideProgress.sessionId); open('prepare', guideProgress.binding?.courseId, { documentId: guideProgress.binding?.docId }) }} onReplace={() => { setStudyClosed(guideProgress.sessionId); startGuide(); input.current?.click() }}/>
@@ -353,12 +393,13 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
           {tutorialHintId && <div className="study-hint" role="status" data-tutorial-hint><span>使用教程已准备好。</span><button className="study-text-button" onClick={() => { const id = tutorialHintId; setTutorialHintId(''); onEditor(id) }}>查看教程导图</button><button className="study-text-button" onClick={() => setTutorialHintId('')}>稍后</button></div>}
           <div className="focus-start-modes" role="group" aria-label="首页开始方式">{Object.entries(START_CHOICES).map(([value, label]) => <button key={value} aria-pressed={experience.start === value} onClick={() => saveExperience({ start: value as typeof experience.start })}>{label}</button>)}</div>
           {loading ? <p role="status">正在读取课程与学习记录…</p> : <section className="focus-hero" aria-label="今天的下一步">
-            <p className="focus-muted">{chooseFirst ? '你来决定' : recommendedResume ? '继续上次学习' : pendingDoc ? '新资料已保存' : firstTask?.courseName || '学习，从自己的资料开始'}</p><h1>{headline}</h1>
-            <p className="focus-hero-description">{chooseFirst ? '选定课程后，这里只推荐一个下一步。' : recommendedResume ? (journeyFirst ? `${latestJourney?.journey.title} · 阅读位置、修正笔记和重试记录会一起恢复。` : resumeGuideFirst ? '伊希斯保留了你的入门练习，接着完成第一道题。' : `${resume?.session.title} · ${resume?.reason || '已保存的步骤和文字会一起恢复。'}`) : pendingDoc || (!firstTask && availableDoc) ? '先读一小段，做一道原文入门题。不用先连接 AI。' : firstTask ? `${experience.start === 'review' && !home.reviewCount ? '今天没有安排到期复习，可先学这一项。' : ''}${firstTask.recommendationReason}` : capacity.minutes === 0 || capacity.questions === 0 ? '今天的学习容量有限，可展开完整安排调整，或先阅读已有资料。' : '导入讲义或笔记，读一点，再试着回忆。'}</p>
+            <p className="focus-muted">{mutedLabel}</p><h1>{headline}</h1>
+            <p className="focus-hero-description">{heroDescription}</p>
             <StudyModeChoice/>
-            <div className="focus-actions"><button className="study-button study-button-primary" disabled={importing || documentImporting} data-guide={!availableDoc && !firstTask && !recommendedResume && !chooseFirst ? 'import' : undefined} onClick={beginPrimary}>{documentImporting ? documentImportLabel || '正在解析资料…' : importing ? '正在准备学习…' : primary}<span aria-hidden="true">→</span></button><button className="study-text-button" onClick={chooseContent}>换个内容学</button></div>
+            <div className="focus-actions"><button className="study-button study-button-primary" disabled={importing || documentImporting} data-guide={!availableDoc && !firstTask && !recommendedResume && !chooseFirst ? 'import' : undefined} onClick={beginPrimary}>{documentImporting ? documentImportLabel || '正在解析资料…' : importing ? '正在准备学习…' : primary}</button><button className="study-text-button" onClick={chooseContent}>换个内容学</button></div>
             {!personalSnapshots.length && !welcomeDismissed && <div className="focus-first-use" data-welcome-card aria-label="欢迎引导"><button className="study-text-button" onClick={() => { dismissWelcome(); startGuide(); input.current?.click() }}>开始使用 · 伊希斯带我完成第一题</button><button className="study-text-button" onClick={() => void experienceExample()}>先体验示例课程</button></div>}
           </section>}
+          {!loading && !personalSnapshots.length && <OnboardingChecklist onAction={handleOnboardingAction}/>}
           <div className="focus-perch" data-isis-perch/>
           <section className="focus-choices" ref={contentChoice} tabIndex={-1} hidden={!choosingContent && !(experience.start === 'course' && !courseId)} aria-label="选择学习内容"><div className="study-section-head"><h2>今天学什么</h2><button className="study-text-button" onClick={() => setChoosingContent(false)}>收起</button></div><label>课程<select aria-label="选择学习课程" value={courseId} onChange={(event) => setCourseId(event.target.value)}><option value="">全部课程</option>{personalSnapshots.map((snapshot) => <option key={snapshot.course.id} value={snapshot.course.id}>{snapshot.course.name}</option>)}</select></label><label>查找内容<input aria-label="搜索课程或学习任务" ref={search} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="课程或任务名称"/></label>
             <div className="focus-content-list">{home.tasks.slice(0, 8).map((task) => <button key={`${task.courseId}:${task.id}`} onClick={() => void startTask(task)}><strong>{task.title}</strong><small>{task.courseName} · {TASK_NAMES[task.type]}</small></button>)}{visibleDocs.filter((doc) => !courseId || snapshots.some((snapshot) => snapshot.course.id === courseId && snapshot.documents.some((item) => item.docId === doc.id))).slice(0, 8).map((doc) => <div key={doc.id}><button onClick={() => void beginDocument(doc.id, courseId)}><strong>{doc.title}</strong><small>原文入门练习 · 无需 AI</small></button><button className="study-text-button" onClick={() => onEditor(doc.id)}>阅读导图</button></div>)}</div>
@@ -386,7 +427,7 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
               {home.deferred > 0 && capacity.minutes > 0 && <p>单看容量，积压内容约需 {Math.ceil(home.backlog.filter((task) => task.deferredBecause === 'time-capacity' || task.deferredBecause === 'question-capacity').reduce((sum, task) => sum + task.estimatedMinutes, 0) / capacity.minutes)} 天的额度；还需结合题数、到期日和来源检查调整。</p>}
             </section>
             <section className="study-courses" aria-label="我的课程概览"><div className="study-section-head"><h2>我的课程</h2><button className="study-text-button" onClick={() => open('materials')}>管理课程</button></div>
-              {home.courses.length ? <div className="study-course-list">{home.courses.map((row) => <button className="study-course-row" key={row.course.id} onClick={() => open('knowledge', row.course.id)}><span className="study-course-mark"><Icon name="book"/></span><span><strong>{row.course.name}</strong><small>{row.course.goal || '从已保存资料继续学习'}</small></span><span className="study-course-count">{row.archiveCount} 份学习资料 · {row.confirmedPoints} 个已确认知识点</span></button>)}</div>
+              {home.courses.length ? <div className="study-course-list">{home.courses.map((row) => <button className="study-course-row" key={row.course.id} onClick={() => open(row.course.learningMode === 'nodes' ? 'nodes' : 'knowledge', row.course.id)}><span className="study-course-mark"><Icon name="book"/></span><span><strong>{row.course.name}</strong><small>{row.course.goal || '从已保存资料继续学习'}</small></span><span className="study-course-count">{row.archiveCount} 份学习资料 · {row.confirmedPoints} 个已确认知识点</span></button>)}</div>
                 : <div className="study-empty-row"><Icon name="book"/><div><h3>{query ? '没有匹配的课程' : '先创建你的第一门课程'}</h3><p>一门课程可以收纳多份资料、知识结构与历次练习。</p></div><button className="study-button" onClick={() => open('materials')}>创建课程</button></div>}
             </section>
 

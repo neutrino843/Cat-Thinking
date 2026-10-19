@@ -163,7 +163,7 @@ test('暂停和忘记密钥使用当前配置版本，文档保持原样', async
 test('两处配置冲突不会覆盖更新或自动重新发起连接', async ({ page, context }) => {
   const fixture = await settingsFixture(context)
   const second = await context.newPage()
-  await page.goto('/#mindmap'); await second.goto('/')
+  await page.goto('/#mindmap'); await second.goto('/#mindmap')
   await openSettings(page); await openSettings(second)
   await panel(page).getByLabel('API 密钥', { exact: true }).fill(fakeKey)
   await panel(page).getByRole('button', { name: '只保存，暂不分析' }).click()
