@@ -39,7 +39,7 @@ export function collectLocalSourceReferences(doc: Pick<DocData, 'relations'>, no
 }
 
 /** Local copy inspection has no dependency on the origin document or a remote run. */
-export async function resolveLocalSourceReference(docId: string, reference: LocalSourceReference): Promise<CitationView> {
+export async function resolveLocalSourceReference(docId: string, reference: LocalSourceReference, options: { offset?: number; full?: boolean } = {}): Promise<CitationView> {
   const source = await db.sources.get(reference.sourceId)
   if (!source || !await db.docs.get(docId) || source.docId !== docId || source.text.length !== source.charCount
     || !Number.isInteger(reference.start) || !Number.isInteger(reference.end) || reference.start < 0
@@ -51,8 +51,11 @@ export async function resolveLocalSourceReference(docId: string, reference: Loca
   if (!current || current.text !== source.text || current.docId !== docId || !await db.docs.get(docId)) {
     throw new Error('本地原文在读取期间发生变化。')
   }
-  const visibleEnd = Math.min(reference.end, reference.start + 4_000)
+  const offset = options.offset ?? 0
+  if (!Number.isInteger(offset) || offset < 0 || offset >= reference.end - reference.start) throw new Error('原文阅读位置无效。')
+  const visibleStart = reference.start + offset
+  const visibleEnd = options.full ? reference.end : Math.min(reference.end, visibleStart + 4_000)
   return { name: source.name, location: `${reference.page ? `第 ${reference.page} 页 · ` : ''}${reference.locator ?? ''} 字符 ${reference.start}–${reference.end}`,
-    before: source.text.slice(Math.max(0, reference.start - 240), reference.start), quote: source.text.slice(reference.start, visibleEnd),
-    after: source.text.slice(reference.end, reference.end + 240), truncated: visibleEnd < reference.end }
+    before: offset ? '' : source.text.slice(Math.max(0, reference.start - 240), reference.start), quote: source.text.slice(visibleStart, visibleEnd),
+    after: visibleEnd === reference.end ? source.text.slice(reference.end, reference.end + 240) : '', truncated: visibleEnd < reference.end }
 }

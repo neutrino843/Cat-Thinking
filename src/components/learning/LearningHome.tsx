@@ -11,7 +11,7 @@ import { buildLearningHome, type HomeTask } from '../../learning/homeView'
 import { decideHomePrimary } from '../../learning/decideHomePrimary'
 import { safeLearningMessage, visibleQuestions } from '../../learning/workspaceView'
 import { HttpProviderSettingsClient } from '../../analysis/providerSettingsClient'
-import { db, listDocs, saveDocumentBundle } from '../../store/db'
+import { db, listDocs } from '../../store/db'
 import { useDoc } from '../../store/docStore'
 import { useSettings } from '../../store/settings'
 import { emitDocsChanged } from '../../lib/tabs'
@@ -19,6 +19,7 @@ import { openLatestTutorial } from '../../lib/tutorial'
 import type { DocumentImportDraft } from '../../lib/documentImport'
 import { importQueue, type ImportTask } from '../../lib/importQueue'
 import DocumentImportDialog from '../DocumentImportDialog'
+import { importCourseDocument } from '../../learning/importDocument'
 import PostImportChoice from './PostImportChoice'
 import { guideImportProblem, guidePreview, guideRead, guideSaved, resumeGuide, startGuide, useGuide } from '../../onboarding/guide'
 import { migrateFromGuideV1, onboardingDone, useOnboarding } from '../../onboarding/onboarding'
@@ -265,16 +266,13 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
       onFailure: (name, message) => { setError(`${name}：${message}`); guideImportProblem() },
     })
   }
-  const confirmImport = async () => {
-    const draft = drafts[0]
+  const confirmImport = async (draft: DocumentImportDraft, courseName?: string) => {
     if (!draft) return
     const guide = useGuide.getState().progress
     const guidingImport = (guide.status === 'active' && ['import', 'preview'].includes(guide.step)) || (guide.status === 'paused' && guide.step === 'preview')
     const sourceHash = guidingImport ? await sha256Hex(draft.source.text) : ''
-    await saveDocumentBundle(draft.doc, [draft.source]); useDoc.getState().openDoc(draft.doc)
-    const selected = snapshots.find((snapshot) => snapshot.course.id === courseId)?.course
-      ?? await createCourse({ name: draft.doc.title.slice(0, 120) || '我的第一门课程', learningMode: 'nodes' })
-    await attachDocument(selected.id, draft.doc.id)
+    const selected = await importCourseDocument(draft, { courseId: courseId || undefined, courseName })
+    useDoc.getState().openDoc(draft.doc)
     emitDocsChanged(); setCourseId(selected.id)
     setPendingDocId(draft.doc.id)
     try { localStorage.setItem('msz.learning.pending-document.v1', draft.doc.id) } catch { setError('资料已保存，首页的待学习提示暂时无法记住。') }
@@ -437,7 +435,7 @@ export default function LearningHome({ onEditor, onAnalysis, onSettings }: { onE
       {destination === 'home' && mindMapBar && <div className="study-mindmap-bar" role="region" aria-label="思维导图入口" data-mindmap-entry><span>《{mindMapBar.title}》导图已生成</span><button className="study-button" onClick={openMindMapFromBar}>打开思维导图</button><button className="study-text-button" aria-label="关闭导图入口" onClick={() => setMindMapBar(null)}>关闭</button></div>}
     </div>
     <input className="sr-only" ref={input} type="file" multiple={!guideImportActive} accept=".txt,.md,.markdown,.docx,.pdf,.pptx" aria-label="导入课程资料" onChange={(event) => { prepareFiles(Array.from(event.target.files ?? [])); event.target.value = '' }}/>
-    {drafts.length > 0 && drafts[0] && <DocumentImportDialog key={drafts[0].source.id} draft={drafts[0]} onClose={() => { setDrafts((prev) => prev.slice(1)); guideImportProblem(true) }} onConfirm={confirmImport}/>}
+    {drafts.length > 0 && drafts[0] && <DocumentImportDialog key={drafts[0].source.id} draft={drafts[0]} course={{ name: snapshots.find((item) => item.course.id === courseId)?.course.name ?? '', existing: !!courseId }} onClose={() => { setDrafts((prev) => prev.slice(1)); guideImportProblem(true) }} onConfirm={confirmImport}/>}
     {postImport && !importQueue.active && <PostImportChoice docTitle={postImport.title} onOpenMindMap={() => choosePostImport('mindmap')} onStartLearning={() => choosePostImport('learning')} onStayHome={() => choosePostImport('home')}/>}
     {budgetOpen && <StudyDialog title="今天的分量" onClose={() => setBudgetOpen(false)}><p>这是所有课程共享的安排预算，不是倒计时。中途也能调整；已经完成的记录仍保留。</p><div className="focus-actions">{[10, 20, 40].map((value) => <button className="study-button" key={value} onClick={() => setMinutes(value)}>{value} 分钟</button>)}</div><form onSubmit={(e) => { e.preventDefault(); try { savePersonalCapacity({ minutes, questions }); setBudgetOpen(false) } catch { setError('分量暂时无法保存，请重试。') } }}><label>今天共安排多少分钟<input aria-label="今天共安排多少分钟" type="number" min={0} max={1440} value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}/></label><label>最多多少道题<input aria-label="最多多少道题" type="number" min={0} max={1000} value={questions} onChange={(e) => setQuestions(Number(e.target.value))}/></label><button className="study-button study-button-primary">保存今天的分量</button></form></StudyDialog>}{achievementsOpen && <AchievementDesk snapshots={snapshots} onClose={() => setAchievementsOpen(false)} onRecords={(id) => open('records', id)} />}{preferencesOpen && <ExperienceSettings onClose={() => setPreferencesOpen(false)}/>}
     {replacement && <StudyDialog title="换一份资料学习" onClose={() => setReplacement(null)}><p>当前入门练习尚未完成。开启新一轮会替换这轮引导步骤和回答，课程资料仍然保留。</p><div className="focus-actions"><button className="study-button" onClick={() => { setReplacement(null); if (guideProgress.status === 'paused') resumeGuide(); setStudyClosed(''); setDestination('home') }}>继续原来的练习</button><button className="study-button study-button-primary" onClick={() => { const choice = replacement; setReplacement(null); void beginDocument(choice.docId, choice.courseId, true) }}>确认开启新一轮</button></div></StudyDialog>}

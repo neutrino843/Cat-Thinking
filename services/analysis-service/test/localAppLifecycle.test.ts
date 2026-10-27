@@ -6,9 +6,26 @@ import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
-const { assertLoopbackPortsAvailable, chooseLocalAppPorts, chooseLocalDatabasePort, isLocalDatabasePort, probeLoopbackPort, stopOwnedService } = await import(pathToFileURL(resolve('scripts/local-app-lifecycle.mjs')).href)
+const { assertLoopbackPortsAvailable, chooseLocalAppPorts, chooseLocalDatabasePort, isLocalDatabasePort, probeLoopbackPort, stopOwnedService, waitForLocalReadiness } = await import(pathToFileURL(resolve('scripts/local-app-lifecycle.mjs')).href)
 
 describe('local application lifecycle', () => {
+  it('allows cold startup beyond five seconds while preserving a hard deadline', async () => {
+    let elapsed = 0
+    const probe = vi.fn(async () => elapsed >= 6000)
+    const result = await waitForLocalReadiness({ probe, hasExited: () => false, shouldStop: () => false,
+      timeoutMs: 10000, now: () => elapsed, delay: async (ms: number) => { elapsed += ms } })
+    expect(result).toBe('ready'); expect(probe.mock.calls.length).toBeGreaterThan(50)
+    elapsed = 0
+    expect(await waitForLocalReadiness({ probe: async () => false, hasExited: () => false, shouldStop: () => false,
+      timeoutMs: 500, now: () => elapsed, delay: async (ms: number) => { elapsed += ms } })).toBe('timeout')
+    expect(elapsed).toBe(500)
+  })
+  it('stops probing immediately if its child exits or shutdown is requested', async () => {
+    const probe = vi.fn(async () => true)
+    expect(await waitForLocalReadiness({ probe, hasExited: () => true, shouldStop: () => false })).toBe('exited')
+    expect(await waitForLocalReadiness({ probe, hasExited: () => false, shouldStop: () => true })).toBe('stopped')
+    expect(probe).not.toHaveBeenCalled()
+  })
   it('initializes a new database on a free port without taking over an existing listener', async () => {
     const listener = createServer()
     await new Promise<void>((done) => listener.listen(0, '127.0.0.1', done))

@@ -1,33 +1,45 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { useDoc } from '../store/docStore'
 import { useT } from '../i18n'
+import { executeNodeCommand, nodeCommandForKey } from '../lib/nodeKeyboard'
 
 type DropPos = 'before' | 'after' | 'inside'
 
-function Row({ id, depth }: { id: string; depth: number }) {
+const Row = memo(function OutlineRow({ id, depth }: { id: string; depth: number }) {
   const n = useDoc((s) => s.doc.nodes[id])
   const selected = useDoc((s) => s.selection.includes(id))
+  const isRoot = useDoc((s) => id === s.doc.rootId)
+  const canOutdent = useDoc((s) => {
+    const parent = s.doc.nodes[id]?.parent
+    return id !== s.doc.rootId && !!parent && parent !== s.doc.rootId
+  })
+  const canIndent = useDoc((s) => {
+    const parent = s.doc.nodes[id]?.parent
+    return id !== s.doc.rootId && !!parent && (s.doc.nodes[parent]?.children.indexOf(id) ?? -1) > 0
+  })
   const tr = useT()
   const [drop, setDrop] = useState<DropPos | null>(null)
   if (!n) return null
   const st = useDoc.getState()
-  const isRoot = id === st.doc.rootId
   const p = n.parent
-  const outdentDisabled = isRoot || !p || p === st.doc.rootId
-  const sibs = p ? st.doc.nodes[p].children : []
-  const indentDisabled = isRoot || !p || sibs.indexOf(id) <= 0
 
   const onOutdent = () => {
-    if (outdentDisabled) return
-    const grandpa = p ? st.doc.nodes[p].parent : null
-    if (grandpa) st.reparent(id, grandpa)
+    const current = useDoc.getState()
+    const parent = current.doc.nodes[id]?.parent
+    if (id === current.doc.rootId || !parent || parent === current.doc.rootId) return
+    const grandpa = current.doc.nodes[parent]?.parent
+    if (grandpa) current.reparent(id, grandpa)
   }
   const onIndent = () => {
-    if (indentDisabled || !p) return
+    const current = useDoc.getState()
+    const parent = current.doc.nodes[id]?.parent
+    if (id === current.doc.rootId || !parent) return
+    const sibs = current.doc.nodes[parent]?.children ?? []
     const idx = sibs.indexOf(id)
+    if (idx <= 0) return
     const prev = sibs[idx - 1]
-    if (st.doc.nodes[prev].collapsed) st.toggleCollapse(prev)
-    st.reparent(id, prev)
+    if (current.doc.nodes[prev]?.collapsed) current.toggleCollapse(prev)
+    current.reparent(id, prev)
   }
 
   /* ---------------- M12：大纲内拖拽排序 ---------------- */
@@ -108,25 +120,26 @@ function Row({ id, depth }: { id: string; depth: number }) {
         >
           {n.children.length ? (n.collapsed ? '▸' : '▾') : '·'}
         </button>
-        <input
+        <textarea
+          rows={Math.min(8, n.text.split('\n').length)}
           data-oid={id}
           value={n.text}
           placeholder={tr('outline.placeholder')}
           onChange={(e) => st.setText(id, e.target.value)}
           onFocus={() => {
-            const s = st
+            const s = useDoc.getState()
             if (s.editing?.id !== id) s.beginEdit()
             s.select([id])
           }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault()
-              st.addSibling(id, 'outline')
-            } else if (e.key === 'Tab') {
-              e.preventDefault()
-              st.addChild(id, 'outline')
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
+            if (e.repeat && ['Enter', 'Tab'].includes(e.key)) { e.preventDefault(); return }
+            const command = nodeCommandForKey(e.nativeEvent)
+            if (command) {
+              e.preventDefault(); e.stopPropagation()
+              executeNodeCommand(command, id, 'outline')
             } else if (e.key === 'Escape') {
-              ;(e.target as HTMLInputElement).blur()
+              ;(e.target as HTMLTextAreaElement).blur()
             }
           }}
         />
@@ -134,7 +147,7 @@ function Row({ id, depth }: { id: string; depth: number }) {
           className="ob act indent"
           title={tr('outline.outdent')}
           aria-label={tr('outline.outdent')}
-          disabled={outdentDisabled}
+          disabled={!canOutdent}
           onClick={onOutdent}
         >
           ‹
@@ -146,7 +159,7 @@ function Row({ id, depth }: { id: string; depth: number }) {
           className="ob act outdent"
           title={tr('outline.indent')}
           aria-label={tr('outline.indent')}
-          disabled={indentDisabled}
+          disabled={!canIndent}
           onClick={onIndent}
         >
           ›
@@ -163,7 +176,7 @@ function Row({ id, depth }: { id: string; depth: number }) {
       {!n.collapsed && n.children.map((c) => <Row key={c} id={c} depth={depth + 1} />)}
     </>
   )
-}
+})
 
 export default function Outline() {
   const rootId = useDoc((s) => s.doc.rootId)
@@ -173,7 +186,7 @@ export default function Outline() {
   useEffect(() => {
     if (editing?.source === 'outline') {
       const safe = editing.id.replace(/["\\]/g, (m) => '\\' + m)
-      const el = document.querySelector<HTMLInputElement>(`input[data-oid="${safe}"]`)
+      const el = document.querySelector<HTMLTextAreaElement>(`textarea[data-oid="${safe}"]`)
       if (el) {
         el.focus()
         el.select()

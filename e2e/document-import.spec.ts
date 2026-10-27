@@ -41,7 +41,7 @@ test('TXT 文档预检后生成可编辑导图并持久化来源', async ({ page
   const dialog = page.getByRole('dialog', { name: '从文档生成可编辑导图' })
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('计算机网络.txt')
-  await expect(dialog).toContainText('第一章 网络基础')
+  await expect(dialog.getByLabel('讲义名称', { exact: true })).toHaveValue('第一章 网络基础')
   await dialog.getByRole('button', { name: '创建可编辑导图' }).click()
 
   await expect(dialog).toBeHidden()
@@ -82,7 +82,7 @@ test('DOCX 在浏览器本地提取标题与正文并生成导图', async ({ pag
 
   const dialog = page.getByRole('dialog', { name: '从文档生成可编辑导图' })
   await expect(dialog).toContainText('DOCX')
-  await expect(dialog).toContainText(expected.structuredDocx.title)
+  await expect(dialog.getByLabel('讲义名称', { exact: true })).toHaveValue(expected.structuredDocx.title)
   await dialog.getByRole('button', { name: '创建可编辑导图' }).click()
   await expect(page.locator('input.doc-title')).toHaveValue(expected.structuredDocx.title)
   await expect(page.locator('svg.canvas-svg')).toContainText('第一章 来源与引用')
@@ -116,7 +116,7 @@ test('文本型 PDF 在浏览器本地提取并记录页码锚点', async ({ pag
 
   const dialog = page.getByRole('dialog', { name: '从文档生成可编辑导图' })
   await expect(dialog).toContainText('PDF')
-  await expect(dialog).toContainText(expected.structuredPdf.title)
+  await expect(dialog.getByLabel('讲义名称', { exact: true })).toHaveValue(expected.structuredPdf.title)
   await dialog.getByRole('button', { name: '创建可编辑导图' }).click()
   await expect(page.locator('input.doc-title')).toHaveValue(expected.structuredPdf.title)
 
@@ -170,7 +170,7 @@ test('PPTX 在浏览器本地提取幻灯片标题、正文与页锚点', async 
 
   const dialog = page.getByRole('dialog', { name: '从文档生成可编辑导图' })
   await expect(dialog).toContainText('PPTX')
-  await expect(dialog).toContainText(expected.structuredPptx.title)
+  await expect(dialog.getByLabel('讲义名称', { exact: true })).toHaveValue(expected.structuredPptx.title)
   await dialog.getByRole('button', { name: '创建可编辑导图' }).click()
   await expect(page.locator('input.doc-title')).toHaveValue(expected.structuredPptx.title)
   await expect(page.locator('svg.canvas-svg')).toContainText('第二章 可编辑导图')

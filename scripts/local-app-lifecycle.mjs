@@ -68,6 +68,25 @@ export const assertLoopbackPortsAvailable = async (ports = [8787, 5173]) => {
   }
 }
 
+/** Cold Windows startup can exceed five seconds; readiness is deadline based. */
+export const waitForLocalReadiness = async ({ probe, hasExited, shouldStop,
+  timeoutMs = 30_000, now = () => performance.now(), delay = (ms) => new Promise((done) => setTimeout(done, ms)) }) => {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) throw new Error('local_app_startup_timeout_invalid')
+  const deadline = now() + timeoutMs
+  while (now() < deadline) {
+    if (shouldStop()) return 'stopped'
+    if (hasExited()) return 'exited'
+    let ready = false
+    try { ready = await probe() } catch { /* A bounded read may fail before the listener exists. */ }
+    if (shouldStop()) return 'stopped'
+    if (hasExited()) return 'exited'
+    if (ready) return 'ready'
+    const remaining = deadline - now()
+    if (remaining > 0) await delay(Math.min(100, remaining))
+  }
+  return 'timeout'
+}
+
 // Windows terminates Node immediately on child.kill(). An owned IPC channel
 // lets the service finish its dispatcher drain before the bounded fallback.
 export const stopOwnedService = (child, timeoutMs = 12_000) => new Promise((resolve) => {

@@ -693,7 +693,7 @@ html[data-reduce-motion='1'] .file-toast {
   cursor: grabbing;
 }
 
-.outline-row input {
+.outline-row textarea {
   flex: 1;
   min-width: 0;
   font-size: 13px;
@@ -706,11 +706,11 @@ html[data-reduce-motion='1'] .file-toast {
   outline: none;
 }
 
-.outline-row input:hover {
+.outline-row textarea:hover {
   border-color: var(--line);
 }
 
-.outline-row input:focus {
+.outline-row textarea:focus {
   border-color: var(--accent);
   background: var(--paper);
 }
@@ -2684,3 +2684,16 @@ html[data-reduce-motion='1'] dialog[open] {
 }
 .gantt-companion-perch { flex: 0 0 auto; min-height: 90px; padding: var(--space-2xs); border-top: 1px solid var(--line); }
 .task-editor { z-index: 1000; }
+.document-import-field { display: grid; gap: 6px; margin: 12px 0; }
+.document-import-field input { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px 10px; font: inherit; color: inherit; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; }
+.document-import-preview { overflow-wrap: anywhere; }
+.document-import-preview ul { padding-left: 20px; }
+.document-import-preview summary { cursor: pointer; }
+.node-source-panel { flex: 0 0 320px; width: 320px; max-width: 32vw; overflow: auto; padding: 16px; border-left: 1px solid var(--line); box-sizing: border-box; background: var(--paper); }
+.node-source-panel h3 { margin: 0 0 8px; overflow-wrap: anywhere; }
+.node-source-panel section { margin-top: 20px; }
+.node-source-panel select { display: block; width: 100%; margin: 8px 0; font: inherit; }
+.node-source-caption { font-size: 12px; opacity: .75; overflow-wrap: anywhere; }
+.node-source-original { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; }
+.node-source-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+@media (max-width: 900px) { .node-source-panel { flex-basis: 260px; max-width: 40vw; } }

@@ -37,7 +37,7 @@ test('无课程：五个标签逐个切换均渲染对应空态，不再卡在�
   }
 })
 
-test('无课程：空态主按钮聚焦建课表单；建课后停留当前标签并进入练习面板', async ({ page }) => {
+test('无课程：空态主按钮聚焦建课表单；新课程进入节点主线且原练习仍可达', async ({ page }) => {
   await page.getByRole('button', { name: '练习', exact: true }).click()
   await expect(page.locator('.learning-empty')).toHaveAttribute('data-empty-view', 'practice')
 
@@ -47,9 +47,12 @@ test('无课程：空态主按钮聚焦建课表单；建课后停留当前标�
   await page.locator('#new-learning-course').fill('标签练习课')
   await page.getByRole('button', { name: '创建课程', exact: true }).click()
 
-  // 空态消失、课程已选中、仍停留在练习标签且练习面板已挂载
+  // 空态消失并选中新课程；先进入节点主线，再确认旧练习可达
   await expect(page.locator('.learning-empty')).toHaveCount(0)
   await expect(page.getByLabel('当前课程')).toHaveValue(/.+/)
-  await expect(page.getByRole('button', { name: '练习', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  // D3=B: new courses default to node learning; existing courses keep their path.
+  await expect(page.getByRole('button', { name: '节点学习', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('button', { name: '建立章节框架', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '练习', exact: true }).click()
   await expect(page.getByRole('heading', { name: '课程题库' })).toBeVisible()
 })

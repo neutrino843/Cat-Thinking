@@ -23,12 +23,12 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 /** Mounted with key=docId. Results cannot leak across document tabs. */
-export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings, learningPreparation = false }: { docId: string; onClose: () => void; onOpenSettings?: () => void; learningPreparation?: boolean }) {
+export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings, learningPreparation = false, conceptMap = false }: { docId: string; onClose: () => void; onOpenSettings?: () => void; learningPreparation?: boolean; conceptMap?: boolean }) {
   const [controller] = useState(() => new AnalysisTaskController(docId, new HttpAnalysisEngineClient(), analysisTaskRepository))
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
   const [selected, setSelected] = useState<string[]>()
   const [rangeInputs, setRangeInputs] = useState<Record<string, { start: string; end: string }>>({})
-  const [kinds, setKinds] = useState<ArtifactKind[]>(learningPreparation ? ['mindmap', 'quiz'] : ['summary', 'outline'])
+  const [kinds, setKinds] = useState<ArtifactKind[]>(conceptMap ? ['outline', 'mindmap'] : learningPreparation ? ['mindmap', 'quiz'] : ['summary', 'outline'])
   const [quizQuestionCount, setQuizQuestionCount] = useState<number>(5)
   const [citationView, setCitationView] = useState<CitationView>()
   const [citationError, setCitationError] = useState('')
@@ -105,8 +105,9 @@ export default function AnalysisResultsPanel({ docId, onClose, onOpenSettings, l
     setTimeout(() => URL.revokeObjectURL(url), 1_000)
   }
   return <dialog className="analysis-panel" ref={dialog} aria-labelledby="analysis-title" data-analysis-panel onCancel={onClose}>
-    <header className="modal-head"><h2 id="analysis-title">AI 学习分析</h2><button className="tbtn" onClick={onClose} aria-label="关闭 AI 分析">✕</button></header>
+    <header className="modal-head"><h2 id="analysis-title">{conceptMap ? '概念关系图整理' : 'AI 学习分析'}</h2><button className="tbtn" onClick={onClose} aria-label="关闭 AI 分析">✕</button></header>
     <div className="analysis-body">
+      {conceptMap && <p className="analysis-notice">讲义结构图会保留。请选择原文范围，再开始整理概念及其关系；这会使用你配置的模型。结果先预览，采用时创建独立导图，不覆盖原图、笔记或旧节点的学习记录。</p>}
       <p>理清知识，测出疑问，回到原文。先选学习目标，再选择需要的内容；生成结果会保留原文引用。</p>
       <p className="analysis-source-caption">生成时，所选原文会发给你连接的模型服务并使用其额度。查看已有结果、作答与复习清单不新增生成调用。</p>
       {synthetic && <p className="analysis-notice" role="status">合成测试环境 · fake Provider 输出，仅用于流程验收</p>}

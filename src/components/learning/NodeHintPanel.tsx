@@ -4,20 +4,24 @@ import { AnalysisTaskController, isAnalysisTerminal } from '../../analysis/taskC
 import { HttpAnalysisEngineClient } from '../../analysis/engineClient'
 import { analysisTaskRepository } from '../../analysis/taskPersistence'
 import { DEFAULT_ANALYSIS_OPTIONS } from '../../analysis/artifactRegistry'
-import { createLearningArchive } from '../../learning/repository'
-import { bindNodeHintArchive, recordNodeHintViewed } from '../../learning/nodeLearning'
+import { recordNodeHintViewed } from '../../learning/nodeLearning'
 import type { CourseSnapshot } from '../../learning/model'
 import type { NodeSupport } from '../../learning/nodeTypes'
 import type { LearningAction } from './CourseOverview'
 import GroundedArtifactResults from '../analysis/GroundedArtifactResults'
+import { useNodeHintArchive } from './useNodeHintArchive'
 
 export default function NodeHintPanel({ support, snapshot, action, busy }: { support: NodeSupport; snapshot: CourseSnapshot; action: LearningAction; busy: boolean }) {
   const controller = useMemo(() => new AnalysisTaskController(support.docId, new HttpAnalysisEngineClient(), analysisTaskRepository), [support.docId])
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
-  useEffect(() => support.restored ? undefined : controller.connect(), [controller, support.restored])
+  useEffect(() => support.restored || support.archiveId ? undefined : controller.connect(), [controller, support.restored, support.archiveId])
   const [citation, setCitation] = useState<SourceCitationV1>()
   const archived = snapshot.archives.find((a) => a.id === support.archiveId)
-  const artifacts = archived?.artifacts ?? Object.values(state.mirror?.artifacts ?? {}).filter((a): a is ArtifactEnvelopeV1 => !!a)
+  const generated = useMemo(() => Object.values(state.mirror?.artifacts ?? {}).filter((a): a is ArtifactEnvelopeV1 => !!a), [state.mirror?.artifacts])
+  const artifacts = archived?.artifacts ?? generated
+  // A terminal run can be published before its verified artifact identity is
+  // committed. Wait for the complete controller read/write cycle before archiving.
+  const persistence = useNodeHintArchive(snapshot.course.id, support, !state.busy && !state.loading && state.run && isAnalysisTerminal(state.run) ? state.run.id : undefined, generated)
   const visible = snapshot.nodeWorkspace?.events.some((e) => e.type === 'hint-viewed' && e.supportId === support.id)
   const statuses: Record<string, string> = { receiving: '提交原文中', queued: '等待处理', running: '正在整理提示', succeeded: '已完成', partial: '部分完成', failed: '生成失败', cancelled: '已停止', expired: '任务已过期' }
   const quoteIndex = citation ? support.sourceIds.indexOf(citation.sourceId) : -1
@@ -25,11 +29,7 @@ export default function NodeHintPanel({ support, snapshot, action, busy }: { sup
   const original = ref && snapshot.nodeWorkspace?.sources.find((s) => s.id === ref.snapshotId)
   const source = citation && (archived?.sources ?? state.sources).find((s) => s.id === citation.sourceId)
   const open = () => void action(async () => {
-    const run = state.run
-    if (!archived && (!run || !isAnalysisTerminal(run) || !artifacts.length)) return
-    const saved = archived ?? await createLearningArchive({ courseId: snapshot.course.id, docId: support.docId, runId: run?.id ?? '', artifacts, title: `节点提示 · ${support.question}`.slice(0, 200) })
-    // 归档身份先绑定到提示记录，再记录查看事件；缺一步都会让 recordNodeHintViewed 拒绝并打断查看
-    await bindNodeHintArchive(snapshot.course.id, support.id, saved.id)
+    if (!archived) return
     await recordNodeHintViewed(snapshot.course.id, support.id)
   })
   return <section className="node-hint" aria-label={`第 ${support.level} 级提示任务`}>
@@ -44,10 +44,14 @@ export default function NodeHintPanel({ support, snapshot, action, busy }: { sup
       <button className="tbtn" disabled={state.busy} onClick={() => void controller.resume()}>{!state.run || state.run.status === 'receiving' ? '恢复提交（可能继续生成）' : '恢复查看结果'}</button>
       {state.run && !isAnalysisTerminal(state.run) && <button className="tbtn" disabled={state.busy} onClick={() => void controller.cancel()}>停止任务</button>}</>}
     {state.error && <p role="alert">{state.error}</p>}
+    {persistence.error && <div role="alert"><p>{persistence.error}</p><button className="tbtn" onClick={persistence.retry}>重试本地保存（不调用模型）</button></div>}
+    {!archived && generated.length > 0 && !persistence.error && <p role="status">正在把提示结果保存在本机，保存后可查看或备份。</p>}
     {state.usage && <p>已记录 {state.usage.invocationCount} 次调用；输入 {state.usage.usage.inputTokens}、输出 {state.usage.usage.outputTokens} 词元。{state.usage.completeness !== 'complete' ? '仍有用量未知，实际费用以服务商账单为准。' : '费用以服务商账单为准。'}</p>}
-    {!visible && artifacts.length > 0 && <button className="tbtn" disabled={busy || state.busy || !archived && (!state.run || !isAnalysisTerminal(state.run))} onClick={open}>{support.level === 3 ? '查看完整解释并记录辅助' : '查看提示并记录辅助'}</button>}
+    {!visible && artifacts.length > 0 && <button className="tbtn" disabled={busy || !archived} onClick={open}>{support.level === 3 ? '查看完整解释并记录辅助' : '查看提示并记录辅助'}</button>}
     {visible && <>{artifacts.map((artifact) => <GroundedArtifactResults key={artifact.id} artifact={artifact} onOpen={setCitation} />)}
-      {citation && <blockquote><strong>{original?.name ?? source?.name ?? '原文定位不可用'}</strong><p>{original && ref && citation.end <= ref.end - ref.start ? original.text.slice(ref.start + citation.start, ref.start + citation.end) : source?.text.slice(citation.start, citation.end)}</p></blockquote>}
+      {citation && <blockquote>{original && ref && source && citation.start >= 0 && citation.end <= ref.end - ref.start && source.text === original.text.slice(ref.start, ref.end)
+        ? <><strong>{original.name}</strong><p>{original.text.slice(ref.start + citation.start, ref.start + citation.end)}</p></>
+        : <p role="alert">原文回链已失效，请回到课程资料核对，不能用其他片段替代此依据。</p>}</blockquote>}
       <p>请核对原文与推理。提示结果与自己的理解分别保存；使用过提示不代表独立掌握。</p></>}
   </section>
 }

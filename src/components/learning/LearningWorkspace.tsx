@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { liveQuery } from 'dexie'
-import type { Course, CourseSnapshot } from '../../learning/model'
+import { LearningError, type Course, type CourseSnapshot, type LearningJourney } from '../../learning/model'
 import { createCourse, listCourses, loadCourseSnapshot } from '../../learning/repository'
 import { safeLearningMessage } from '../../learning/workspaceView'
 import { resolveKnowledgePointId } from '../../learning/knowledgeGraph'
@@ -81,6 +81,10 @@ export default function LearningWorkspace({ initialTarget, onClose, inline = fal
   const [courses, setCourses] = useState<Course[]>([])
   const [courseId, setCourseId] = useState(initialTarget.courseId ?? '')
   const [snapshot, setSnapshot] = useState<CourseSnapshot>()
+  const [lastJourney, setLastJourney] = useState<LearningJourney>()
+  const [readError, setReadError] = useState('')
+  const [reloadEpoch, setReloadEpoch] = useState(0)
+  const readPaused = useRef(false)
   const [view, setView] = useState<View>(initialTarget.view ?? (initialTarget.archiveId || initialTarget.localNodeId ? 'knowledge' : 'today'))
   const [pointId, setPointId] = useState(initialTarget.pointId ?? '')
   const [questionId, setQuestionId] = useState(initialTarget.questionKey ?? '')
@@ -88,6 +92,9 @@ export default function LearningWorkspace({ initialTarget, onClose, inline = fal
   /** v2.1 需求3：沉浸式学习会话（首页续学/知识页发起）；退出后回到工作台摘要卡 */
   const [immersiveSessionId, setImmersiveSessionId] = useState(initialTarget.sessionId ?? '')
   const [journeyId, setJourneyId] = useState(initialTarget.journeyId ?? '')
+  const [deferredJourneyId, setDeferredJourneyId] = useState('')
+  const selectedJourneyId = useRef(initialTarget.journeyId ?? '')
+  const selectJourney = (id: string) => { selectedJourneyId.current = id; setDeferredJourneyId(''); const selected = snapshot?.journeys?.find((item) => item.id === id); if (selected) setLastJourney(selected); setJourneyId(id) }
   const [reportSessionId, setReportSessionId] = useState(initialTarget.reportSessionId ?? '')
   const study = useExperience((state) => state.preferences.study)
   const [name, setName] = useState('')
@@ -135,35 +142,57 @@ export default function LearningWorkspace({ initialTarget, onClose, inline = fal
   }, [courses, courseId, initialTarget])
   useEffect(() => {
     const token = ++generation.current
-    if (!courseId) return
+    if (!courseId) { readPaused.current = false; return }
     let live = true
+    let errored = false
+    let delivered = false
+    readPaused.current = true
     const subscription = liveQuery(async () => await loadCourseSnapshot(courseId)).subscribe({
-      next: (data) => { if (live && token === generation.current) { setSnapshot(data); setLoading(false) } },
-      error: (err: unknown) => { if (live && token === generation.current) { setSnapshot(undefined); setLoading(false); setError(safeLearningMessage(err)) } },
+      next: (data) => { if (live && !errored && token === generation.current) { delivered = true; setSnapshot(data); const selected = data.journeys?.find((item) => item.id === selectedJourneyId.current); if (selected) setLastJourney(selected); setLoading(false); readPaused.current = false } },
+      error: (err: unknown) => { if (live && token === generation.current) { errored = true; if (!delivered) setDeferredJourneyId(selectedJourneyId.current); readPaused.current = true; setLoading(false); setReadError(safeLearningMessage(err)) } },
     })
     return () => { live = false; subscription.unsubscribe() }
-  }, [courseId])
+  }, [courseId, reloadEpoch])
+
+  const reread = async () => {
+    const token = generation.current
+    readPaused.current = true
+    setLoading(true)
+    try {
+      const data = await loadCourseSnapshot(courseId)
+      if (token !== generation.current) throw new LearningError('conflict', '课程已切换，请在当前课程重新读取。')
+      setSnapshot(data); setReadError(''); setReloadEpoch((epoch) => epoch + 1)
+      return data
+    } catch (err) {
+      if (token === generation.current) setReadError(safeLearningMessage(err))
+      throw err
+    } finally { if (token === generation.current) setLoading(false) }
+  }
+  const canWrite = useCallback(() => !readPaused.current, [])
 
   const action = async (operation: () => Promise<unknown>) => {
     if (actionLock.current) return
+    if (readPaused.current) { setError('学习资料尚未核对，请先重新读取。'); return }
     actionLock.current = true
     const token = generation.current
     setBusy(true); setError('')
     try { await operation() } catch (err) { if (token === generation.current) setError(safeLearningMessage(err)) }
     finally { actionLock.current = false; setBusy(false) }
   }
-  const chooseCourse = (id: string) => { setView('today'); generation.current++; setBusy(false); setSnapshot(undefined); setLoading(true); setCourseId(id); setPointId(''); setQuestionId(''); setError('') }
+  const chooseCourse = (id: string) => { setView('today'); generation.current++; readPaused.current = true; setBusy(false); setSnapshot(undefined); setLastJourney(undefined); selectJourney(''); setImmersiveSessionId(''); setLoading(true); setCourseId(id); setPointId(''); setQuestionId(''); setError(''); setReadError('') }
   const practice = (point = '', question = '', session = '') => { setPointId(point); setQuestionId(question); setExamSessionId(session); setView('practice') }
   // 稳定引用：沉浸层 Esc 监听依赖该回调，避免父渲染反复重挂 window 监听
   const exitImmersive = useCallback(() => setImmersiveSessionId(''), [])
   const remediate = (attemptId: string, reportId?: string) => void action(async () => {
     if (!snapshot) return
     const journey = await startRemediationJourney(snapshot, attemptId, reportId)
-    setJourneyId(journey.id)
+    selectJourney(journey.id)
   })
-  const reading = (docId: string) => void action(async () => { if (snapshot) setJourneyId((await startReadingJourney(snapshot.course.id, docId)).id) })
+  const reading = (docId: string) => void action(async () => { if (snapshot) selectJourney((await startReadingJourney(snapshot.course.id, docId)).id) })
   const documentId = initialTarget.documentId ?? snapshot?.archives.find((item) => item.id === initialTarget.archiveId)?.originDocId ?? initialTarget.localDocId ?? ''
-  const journey = snapshot?.journeys?.find((item) => item.id === journeyId)
+  const savedJourney = snapshot?.journeys?.find((item) => item.id === journeyId)
+  const journey = savedJourney ?? (lastJourney?.id === journeyId && lastJourney.courseId === courseId ? lastJourney : undefined)
+  const readBlocked = loading || !!readError || !!(journeyId && snapshot && !savedJourney)
   const immersiveSession = snapshot?.sessions.find((item) => item.id === immersiveSessionId && item.purpose !== 'exam')
 
   const content = <>
@@ -176,11 +205,12 @@ export default function LearningWorkspace({ initialTarget, onClose, inline = fal
     <nav className="learning-tabs" aria-label="课程功能">{VIEWS.map((item) => <button key={item.id} disabled={nodeDirty} className="tbtn" aria-pressed={view === item.id} onClick={() => setView(item.id)}>{item.title}</button>)}<details className="learning-course-menu"><summary>课程操作</summary>{[{ id: 'application', title: '应用任务' }, { id: 'records', title: '记录' }, { id: 'backup', title: '备份' }].map((item) => <button key={item.id} disabled={nodeDirty} className="tbtn" onClick={() => setView(item.id as LearningView)}>{item.title}</button>)}</details></nav>
     <div className="learning-content">
       {error && <p role="alert" className="learning-error">{error}</p>}
+      {readError && <div role="alert" className="learning-error"><p>{readError}</p><p>{snapshot ? '最近读到的内容仍在本页。核对完成前暂停保存，请保留输入。' : '本次未能读取课程资料，请重新读取。'}</p><button className="tbtn" disabled={busy || loading} onClick={() => void reread().catch(() => undefined)}>重新读取学习资料</button></div>}
       {loading && <p role="status">正在读取学习资料…</p>}
       {!courses.length && !loading && <NoCoursePanel view={view} />}
-      {!courses.length && !loading && <LearningDataPanel action={action} busy={busy} onRestored={chooseCourse} />}
+      {!courses.length && !loading && <LearningDataPanel action={action} busy={busy || readBlocked} onRestored={chooseCourse} />}
       {snapshot && <div key={snapshot.course.id}>
-        {(view === 'nodes' || view === 'today' && snapshot.course.learningMode === 'nodes') && <NodeLearningWorkspace snapshot={snapshot} initialPointId={pointId} action={action} busy={busy} onDirtyChange={setNodeDirty} />}
+        {(view === 'nodes' || view === 'today' && snapshot.course.learningMode === 'nodes') && <NodeLearningWorkspace snapshot={snapshot} initialPointId={pointId} action={action} busy={busy || readBlocked} onDirtyChange={setNodeDirty} />}
         {snapshot.course.example && (snapshot.attempts.length > 0
           ? <section className="example-course-done" role="status" aria-label="示例课程完成">
               <h3>示例流程已完成</h3>
@@ -188,20 +218,20 @@ export default function LearningWorkspace({ initialTarget, onClose, inline = fal
               <button className="tbtn primary" onClick={onClose}>导入我的资料</button>
             </section>
           : <p className="learning-section" role="status">原创示例课程 · 不调用模型，不计入个人学习统计。完成「读 → 测 → 核对原文」后，这里会提示你开始正式学习。</p>)}
-        {view === 'prepare' && <LearningBridge snapshot={snapshot} documentId={documentId} archiveId={initialTarget.archiveId} action={action} busy={busy} onReading={() => reading(documentId)} onStart={(id) => void action(async () => setImmersiveSessionId((await startFormalSession(snapshot, id, study === 'practice')).id))} onTools={() => setView('knowledge')} onAnalysis={(fresh) => void action(async () => { const nextId = fresh ? (await prepareFreshAnalysis(snapshot.course.id, documentId, '')).id : documentId; await openDocById(nextId); window.dispatchEvent(new Event('msz:learning-close-for-analysis')) })} />}
-        {(view === 'exam' || view === 'today' && snapshot.course.learningMode !== 'nodes') && <ReviewDashboard snapshot={snapshot} exam={view === 'exam'} reportSessionId={reportSessionId} onRemediate={remediate} onJourney={(id) => setJourneyId(id)} onPractice={(point, question, session, reportId) => { if (reportId) setReportSessionId(reportId); if (question?.startsWith('journey:')) { const record = snapshot.journeys?.find((item) => item.id === question.slice(8)); if (record?.mode === 'reading' && record.source) reading(record.source.docId); else setJourneyId(question.slice(8)); return }; practice(point, question, session) }} onKnowledge={(id) => { setPointId(id); setView('knowledge') }} action={action} busy={busy} />}
-        {(view === 'knowledge' || view === 'application') && <KnowledgeWorkspace snapshot={snapshot} selectedPointId={pointId} selectedSessionId={initialTarget.sessionId} onSelectPoint={setPointId} onPractice={practice} action={action} busy={busy} applicationOnly={view === 'application'} onStartImmersive={setImmersiveSessionId} />}
+        {view === 'prepare' && <LearningBridge snapshot={snapshot} documentId={documentId} archiveId={initialTarget.archiveId} action={action} busy={busy || readBlocked} onReading={() => reading(documentId)} onStart={(id) => void action(async () => setImmersiveSessionId((await startFormalSession(snapshot, id, study === 'practice')).id))} onTools={() => setView('knowledge')} onAnalysis={(fresh) => void action(async () => { const nextId = fresh ? (await prepareFreshAnalysis(snapshot.course.id, documentId, '')).id : documentId; await openDocById(nextId); window.dispatchEvent(new Event('msz:learning-close-for-analysis')) })} />}
+        {(view === 'exam' || view === 'today' && snapshot.course.learningMode !== 'nodes') && <ReviewDashboard snapshot={snapshot} exam={view === 'exam'} reportSessionId={reportSessionId} onRemediate={remediate} onJourney={(id) => selectJourney(id)} onPractice={(point, question, session, reportId) => { if (reportId) setReportSessionId(reportId); if (question?.startsWith('journey:')) { const record = snapshot.journeys?.find((item) => item.id === question.slice(8)); if (record?.mode === 'reading' && record.source) reading(record.source.docId); else selectJourney(question.slice(8)); return }; practice(point, question, session) }} onKnowledge={(id) => { setPointId(id); setView('knowledge') }} action={action} busy={busy || readBlocked} />}
+        {(view === 'knowledge' || view === 'application') && <KnowledgeWorkspace snapshot={snapshot} selectedPointId={pointId} selectedSessionId={initialTarget.sessionId} onSelectPoint={setPointId} onPractice={practice} action={action} busy={busy || readBlocked} applicationOnly={view === 'application'} onStartImmersive={setImmersiveSessionId} />}
         {view === 'practice' && reportSessionId && <button className="tbtn" onClick={() => setView('exam')}>返回原报告</button>}
-        {view === 'practice' && <LearningPractice key={`${pointId}:${questionId}:${examSessionId}`} snapshot={snapshot} pointId={pointId} selectedQuestionKey={questionId} sessionId={examSessionId} action={action} busy={busy} onRemediate={remediate} onKnowledge={(id) => { setPointId(id); setView('knowledge') }} onGoToday={() => setView('today')} />}
-        {view === 'materials' && <CourseOverview snapshot={snapshot} action={action} busy={busy} onPrepare={(docId, archiveId) => window.dispatchEvent(new CustomEvent('msz:learning-open', { detail: { courseId: snapshot.course.id, documentId: docId, archiveId, view: 'prepare' } }))} onDeleted={() => { setCourseId(''); setSnapshot(undefined) }} />}
-        {view === 'records' && <LearningRecords snapshot={snapshot} action={action} busy={busy} onJourney={setJourneyId} onPractice={practice} />}
-        {view === 'backup' && <LearningDataPanel snapshot={snapshot} action={action} busy={busy} onRestored={(id) => chooseCourse(id)} />}
+        {view === 'practice' && <LearningPractice key={`${pointId}:${questionId}:${examSessionId}`} snapshot={snapshot} pointId={pointId} selectedQuestionKey={questionId} sessionId={examSessionId} action={action} busy={busy || readBlocked} onRemediate={remediate} onKnowledge={(id) => { setPointId(id); setView('knowledge') }} onGoToday={() => setView('today')} />}
+        {view === 'materials' && <CourseOverview snapshot={snapshot} action={action} busy={busy || readBlocked} onPrepare={(docId, archiveId) => window.dispatchEvent(new CustomEvent('msz:learning-open', { detail: { courseId: snapshot.course.id, documentId: docId, archiveId, view: 'prepare' } }))} onDeleted={() => { setCourseId(''); setSnapshot(undefined) }} />}
+        {view === 'records' && <LearningRecords snapshot={snapshot} action={action} busy={busy || readBlocked} onJourney={selectJourney} onPractice={practice} />}
+        {view === 'backup' && <LearningDataPanel snapshot={snapshot} action={action} busy={busy || readBlocked} onRestored={(id) => chooseCourse(id)} />}
       </div>}
     </div>
     <div className="focus-perch" data-isis-perch/>
     <footer className="learning-footer">学习资料与进度保存在当前浏览器。备份课程包可带走资料；重新生成需在 AI 分析里明确发起。</footer>
-    {immersiveSession && snapshot && <ImmersiveLearning key={immersiveSession.id} session={immersiveSession} snapshot={snapshot} action={action} busy={busy} onExit={exitImmersive} onRemediate={remediate} onSchedule={(key) => { setImmersiveSessionId(''); practice('', key) }} onTools={(view) => { setImmersiveSessionId(''); setView(view) }} />}
-    {snapshot && journey && <JourneyStudy key={journeyId} journey={journey} snapshot={snapshot} action={action} busy={busy} onExit={(reportId) => { setJourneyId(''); if (reportId) { setReportSessionId(reportId); setView('exam') } }} />}
+    {immersiveSession && snapshot && <ImmersiveLearning key={immersiveSession.id} session={immersiveSession} snapshot={snapshot} action={action} busy={busy || readBlocked} onExit={exitImmersive} onRemediate={remediate} onSchedule={(key) => { setImmersiveSessionId(''); practice('', key) }} onTools={(view) => { setImmersiveSessionId(''); setView(view) }} />}
+    {snapshot && journey && <JourneyStudy key={`${courseId}:${journeyId}`} journey={journey} snapshot={snapshot} autoResume={journeyId !== deferredJourneyId} action={action} busy={busy} readBlocked={readBlocked} canWrite={canWrite} onReload={reread} onExit={(reportId) => { selectJourney(''); setLastJourney(undefined); if (reportId) { setReportSessionId(reportId); setView('exam') } }} />}
   </>
   return inline ? <section className="learning-workspace learning-workspace-inline" data-learning-workspace role="region" aria-label="课程学习工作台">{content}</section>
     : <dialog ref={dialog} className="learning-workspace" data-learning-workspace aria-label="课程学习工作台" onCancel={(event) => { if (immersiveSession || journeyId || nodeDirty) { event.preventDefault(); return }; onClose() }}>{content}</dialog>

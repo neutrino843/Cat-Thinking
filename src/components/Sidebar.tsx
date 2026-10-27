@@ -263,8 +263,7 @@ export default function Sidebar() {
     })
   }
 
-  const confirmSourceDocument = async () => {
-    const draft = documentDrafts[0]
+  const confirmSourceDocument = async (draft: DocumentImportDraft) => {
     if (!draft) return
     await saveDocumentBundle(draft.doc, [draft.source])
     useDoc.getState().openDoc(draft.doc)

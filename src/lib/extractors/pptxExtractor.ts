@@ -12,6 +12,7 @@ const SLIDE_PATH_PATTERN = /^ppt\/slides\/slide(\d+)\.xml$/
 export interface PptxSlideContent {
   title: string | null
   lines: string[]
+  items: { text: string; level: number; list: boolean }[]
 }
 
 /** 解析 presentation rels，得到 rId → 幻灯片 ZIP 路径映射（Relationship 属性不带命名空间前缀）。 */
@@ -50,8 +51,8 @@ export function slideOrderFromPresentation(presentationXml: string, relsXml?: st
   }
 }
 
-function textBodyLines(textBody: Element): string[] {
-  const lines: string[] = []
+function textBodyLines(textBody: Element): PptxSlideContent['items'] {
+  const lines: PptxSlideContent['items'] = []
   for (const paragraph of elements(textBody, 'p')) {
     const parts: string[] = []
     const walk = (element: Element) => {
@@ -63,7 +64,11 @@ function textBodyLines(textBody: Element): string[] {
     walk(paragraph)
     for (const line of parts.join('').split('\n')) {
       const value = line.replace(/[ \t]+/g, ' ').trim()
-      if (value) lines.push(value)
+      const properties = elements(paragraph, 'pPr')[0]
+      const rawLevel = attribute(properties, 'lvl')
+      const level = /^\d$/.test(rawLevel) ? Math.min(8, Number(rawLevel)) : 0
+      const list = !elements(paragraph, 'buNone').length && (rawLevel !== '' || !!elements(paragraph, 'buChar').length || !!elements(paragraph, 'buAutoNum').length)
+      if (value) lines.push({ text: value, level, list })
     }
   }
   return lines
@@ -74,6 +79,7 @@ export function pptxSlideTexts(slideXml: string): PptxSlideContent {
   const slide = parseOoxmlXml(slideXml, 'PPTX slide')
   let title: string | null = null
   const lines: string[] = []
+  const items: PptxSlideContent['items'] = []
   for (const shape of elements(slide, 'sp')) {
     const textBody = elements(shape, 'txBody')[0]
     if (!textBody) continue
@@ -82,12 +88,13 @@ export function pptxSlideTexts(slideXml: string): PptxSlideContent {
     const placeholder = elements(shape, 'ph')[0]
     const placeholderType = attribute(placeholder, 'type')
     if ((placeholderType === 'title' || placeholderType === 'ctrTitle') && title === null) {
-      title = shapeLines.join(' ')
+      title = shapeLines.map((line) => line.text).join(' ')
     } else {
-      lines.push(...shapeLines)
+      lines.push(...shapeLines.map((line) => line.text))
+      items.push(...shapeLines.map((line) => ({ ...line, list: line.list || placeholderType === 'body' })))
     }
   }
-  return { title, lines }
+  return { title, lines, items }
 }
 
 export async function extractPptx(file: File, onProgress?: ImportProgressListener): Promise<ExtractedDocument> {
@@ -132,9 +139,11 @@ export async function extractPptx(file: File, onProgress?: ImportProgressListene
       emptySlides++
       continue
     }
-    const { title, lines } = pptxSlideTexts(strFromU8(slideBytes))
+    const { title, items } = pptxSlideTexts(strFromU8(slideBytes))
+    if (!title && !items.length) { emptySlides++; continue }
     if (title && firstTitle === undefined) firstTitle = title
-    const slideText = normalizeSourceText([...(title ? [`# ${title}`] : []), ...lines].join('\n\n'))
+    const slideText = normalizeSourceText([...(title ? [`${index === 0 ? '#' : '##'} ${title}`] : [`## 第 ${index + 1} 页`]),
+      ...items.map((item) => item.list ? `${'  '.repeat(item.level)}- ${item.text}` : item.text)].join('\n\n'))
     if (!slideText) {
       emptySlides++
       continue

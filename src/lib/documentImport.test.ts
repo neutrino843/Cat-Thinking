@@ -38,14 +38,15 @@ describe('文档导入与内容提取', () => {
     expect(scheduling.text).toBe('调度')
   })
 
-  it('纯文本按标题和段落生成草稿，长段落正文保存在备注', async () => {
+  it('长段落使用完整首句作标题，原文保存在来源且不占用个人备注', async () => {
     const long = '这是一个用于验证长段落处理的正文。'.repeat(12)
     const draft = await prepareDocumentImport(sourceFile('学习笔记.txt', `第一章 基础\n\n${long}`))
     const root = draft.doc.nodes[draft.doc.rootId]
     const paragraph = draft.doc.nodes[root.children[0]]
     expect(draft.doc.title).toBe('第一章 基础')
-    expect(paragraph.text.endsWith('…')).toBe(true)
-    expect(paragraph.note).toBe(long)
+    expect(paragraph.text).toBe('这是一个用于验证长段落处理的正文。')
+    expect(paragraph.note).toBeUndefined()
+    expect(draft.source.text).toContain(long)
   })
 
   it('连续编号标题保留概念父子层级与原文定位，不要求标题之间空行', async () => {
@@ -89,7 +90,7 @@ describe('文档导入与内容提取', () => {
     expect(draft.stats.paragraphCount).toBe(4)
     const markdown = await prepareDocumentImport(sourceFile('列表.md', '# 清单\n\n1. 第一项\n2. 第二项', 'text/markdown'))
     expect(markdown.stats.sectionCount).toBe(0)
-    expect(markdown.stats.paragraphCount).toBe(1)
+    expect(markdown.stats.paragraphCount).toBe(2)
   })
 
   it('无标题样式的DOCX仍识别明确编号，引用offset保持提取原文位置', async () => {

@@ -14,6 +14,7 @@ import { ReleaseGate } from './release/releaseGate.js'
 import { createExecutionReadiness } from './release/executionReadiness.js'
 import { PersonalAnalysisRuntime } from './personal/personalRuntime.js'
 import { PostgresPersonalProfileStore } from './infrastructure/postgres/postgresPersonalProfileStore.js'
+import { createServiceLifecycle } from './serviceLifecycle.js'
 
 const config = loadAnalysisServiceConfig()
 let jobStore: JobStore | undefined
@@ -63,87 +64,101 @@ const server = await buildAnalysisServer(config, {
   availability: personal ? () => personal.availability() : readiness.availability,
   personalRuntime: personal,
 })
-let cleanupRunning = false
 let cleanupTimer: NodeJS.Timeout | undefined
+let cleanupWork: Promise<void> | undefined
 
-const cleanupExpiredContent = async (): Promise<void> => {
-  if (!runService || cleanupRunning) return
-  cleanupRunning = true
-  try {
-    const result = await runService.cleanupExpired(config.cleanupBatchSize)
-    if (result.cleaned > 0) {
-      server.log.info({ event: 'analysis.content.cleaned', ...result }, 'expired analysis content cleaned')
+const cleanupExpiredContent = (): Promise<void> => {
+  if (!runService) return Promise.resolve()
+  return cleanupWork ??= (async () => {
+    try {
+      const result = await runService.cleanupExpired(config.cleanupBatchSize)
+      if (result.cleaned > 0) {
+        server.log.info({ event: 'analysis.content.cleaned', ...result }, 'expired analysis content cleaned')
+      }
+    } catch (error) {
+      server.log.error({
+        event: 'analysis.content.cleanup_failed',
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      }, 'expired analysis content cleanup failed')
+    } finally {
+      cleanupWork = undefined
     }
-  } catch (error) {
-    server.log.error({
-      event: 'analysis.content.cleanup_failed',
-      errorName: error instanceof Error ? error.name : 'UnknownError',
-    }, 'expired analysis content cleanup failed')
-  } finally {
-    cleanupRunning = false
-  }
+  })()
 }
 
-let shutdownPromise: Promise<void> | undefined
-const shutdown = (signal: NodeJS.Signals | 'parent-ipc'): Promise<void> => shutdownPromise ??= (async () => {
-  shuttingDown = true
-  if (cleanupTimer) clearInterval(cleanupTimer)
-  server.log.info({ event: 'analysis.service.shutdown', signal }, 'analysis service shutting down')
-  const forcedExit = setTimeout(() => {
-    server.log.fatal({ event: 'analysis.service.shutdown_timeout', signal }, 'analysis service shutdown timed out')
-    process.exit(1)
-  }, config.shutdownTimeoutMs)
-  forcedExit.unref()
-  let drained = true
-  try {
-    await dispatcher?.stop(config.shutdownTimeoutMs)
-    await personal?.close()
-  } catch {
-    drained = false
-    process.exitCode = 1
-  } finally {
+let forcedExit: NodeJS.Timeout | undefined
+const lifecycle = createServiceLifecycle({
+  onStopRequested(signal) {
+    shuttingDown = true
+    if (cleanupTimer) clearInterval(cleanupTimer)
+    server.log.info({ event: 'analysis.service.shutdown', signal }, 'analysis service shutting down')
+    forcedExit = setTimeout(() => {
+      server.log.fatal({ event: 'analysis.service.shutdown_timeout', signal }, 'analysis service shutdown timed out')
+      process.exit(1)
+    }, config.shutdownTimeoutMs)
+    forcedExit.unref()
+  },
+  async stop() {
+    let drained = true
     try {
-      await server.close()
-      if (drained) await jobStore?.close()
+      await cleanupWork
+      await dispatcher?.stop(config.shutdownTimeoutMs)
+      await personal?.close()
+    } catch {
+      drained = false
+      process.exitCode = 1
     } finally {
-      if (drained) clearTimeout(forcedExit)
-      if (process.connected) process.disconnect()
+      try {
+        try { await server.close() }
+        finally { if (drained) await jobStore?.close() }
+      } finally {
+        if (drained) clearTimeout(forcedExit)
+        if (process.connected) process.disconnect()
+      }
     }
-  }
-})()
+  },
+  async start(isStopping) {
+    await server.listen({ host: config.host, port: config.port })
+    if (isStopping()) return
+    await personal?.initialize()
+    if (isStopping()) return
+    if (await canExecute()) {
+      if (isStopping()) return
+      await dispatcher?.start()
+    }
+    if (isStopping()) return
+    if (runService && !config.personalReadOnly) {
+      await cleanupExpiredContent()
+      if (isStopping()) return
+      cleanupTimer = setInterval(() => void cleanupExpiredContent(), config.cleanupIntervalMs)
+      cleanupTimer.unref()
+    }
+    server.log.info({ event: 'analysis.service.started', host: config.host, port: config.port,
+      version: config.serviceVersion }, 'analysis service started')
+  },
+})
+const requestShutdown = (signal: NodeJS.Signals | 'parent-ipc') => {
+  void lifecycle.shutdown(signal).catch((error: unknown) => {
+    process.exitCode = 1
+    server.log.error({ event: 'analysis.service.shutdown_failed', errorName: error instanceof Error ? error.name : 'UnknownError' }, 'analysis service shutdown failed')
+  })
+}
 
-process.once('SIGINT', () => void shutdown('SIGINT'))
-process.once('SIGTERM', () => void shutdown('SIGTERM'))
+process.once('SIGINT', () => requestShutdown('SIGINT'))
+process.once('SIGTERM', () => requestShutdown('SIGTERM'))
 process.on('message', (message: unknown) => {
   if (message && typeof message === 'object' && 'type' in message && message.type === 'cat.analysis.shutdown') {
-    void shutdown('parent-ipc')
+    requestShutdown('parent-ipc')
   }
 })
 
 try {
-  await server.listen({ host: config.host, port: config.port })
-  await personal?.initialize()
-  if (await canExecute()) await dispatcher?.start()
-  if (runService && !config.personalReadOnly) {
-    await cleanupExpiredContent()
-    cleanupTimer = setInterval(() => void cleanupExpiredContent(), config.cleanupIntervalMs)
-    cleanupTimer.unref()
-  }
-  server.log.info({
-    event: 'analysis.service.started',
-    host: config.host,
-    port: config.port,
-    version: config.serviceVersion,
-  }, 'analysis service started')
+  await lifecycle.start()
 } catch (error) {
   server.log.fatal({
     event: 'analysis.service.start_failed',
     errorName: error instanceof Error ? error.name : 'UnknownError',
   }, 'analysis service failed to start')
   process.exitCode = 1
-  await dispatcher?.stop(config.shutdownTimeoutMs)
-  await personal?.close()
-  await server.close()
-  await jobStore?.close()
-  if (process.connected) process.disconnect()
+  await lifecycle.shutdown('startup-failure').catch(() => { process.exitCode = 1 })
 }

@@ -1,5 +1,5 @@
 import type { DocData, NodeImage } from '../types'
-import { measureText } from './measure'
+import { layoutNodeText, type NodeTextLayout } from './nodeTextLayout'
 import type { BoundaryBox, Relation, Summary } from '../types'
 
 export interface LaidNode {
@@ -20,6 +20,8 @@ export interface LaidNode {
   fontSize: number
   /** M7-P3：节点图片占用的高度（文本区以下），无图片为 0 */
   imgH: number
+  textLines?: readonly string[]
+  lineHeight?: number
 }
 
 export interface LaidEdge {
@@ -128,12 +130,15 @@ interface WT {
   w: number
   h: number
   fs: number
+  textLayout: NodeTextLayout
   imgH: number
   kids: WT[]
   /** 子树总高（含兄弟间距） */
   subH: number
   /** M7-P4 org：子树总宽（含兄弟间距） */
   subW: number
+  chainW: number
+  maxH: number
   hidden: number
 }
 
@@ -161,17 +166,18 @@ function imagesExtraH(images: NodeImage[] | undefined): number {
 
 function measure(text: string, level: number, hasNote: boolean, images?: NodeImage[]) {
   const fs = level === 0 ? 24 : level === 1 ? 16 : 14
-  const tw = measureText(text, fs) + (hasNote ? 18 : 0)
+  const textLayout = layoutNodeText(text, fs, level === 0)
+  const tw = textLayout.width + (hasNote ? 18 : 0)
   const w = Math.max(level === 0 ? 100 : 60, tw + PADX * 2)
   const imgH = imagesExtraH(images)
-  const h = (level === 0 ? 52 : fs + PADY * 2) + imgH
-  return { w, h, fs, imgH }
+  const h = Math.max(level === 0 ? 52 : 0, textLayout.height + PADY * 2) + imgH
+  return { w, h, fs, imgH, textLayout }
 }
 
 function build(doc: DocData, id: string, level: number): WT | null {
   const n = doc.nodes[id]
   if (!n) return null
-  const { w, h, fs, imgH } = measure(n.text, level, !!n.note, n.images)
+  const { w, h, fs, imgH, textLayout } = measure(n.text, level, !!n.note, n.images)
   const kids: WT[] = n.collapsed ? [] : (n.children.map((c) => build(doc, c, level + 1)).filter(Boolean) as WT[])
   const subH = kids.length
     ? Math.max(h, kids.reduce((s, k) => s + k.subH, 0) + GY * (kids.length - 1))
@@ -181,7 +187,9 @@ function build(doc: DocData, id: string, level: number): WT | null {
     ? Math.max(w, kids.reduce((s, k) => s + k.subW, 0) + GY * (kids.length - 1))
     : w
   const hidden = n.collapsed ? countAll(doc.nodes, id) : kids.reduce((s, k) => s + k.hidden, 0)
-  return { id, w, h, fs, imgH, kids, subH, subW, hidden }
+  const chainW = w + kids.reduce((sum, child) => sum + FISH_STEP + child.chainW, 0)
+  const maxH = Math.max(h, ...kids.map((child) => child.maxH))
+  return { id, w, h, fs, imgH, textLayout, kids, subH, subW, chainW, maxH, hidden }
 }
 
 /** M7-P4：bounds 计算，5 个分支函数共用。 */
@@ -218,6 +226,7 @@ function placeLogicOrTree(
     side, level, color, collapsed: !!n?.collapsed,
     hasChildren: (n?.children.length ?? 0) > 0,
     hidden: wt.hidden, fontSize: wt.fs, imgH: wt.imgH,
+    textLines: wt.textLayout.lines, lineHeight: wt.textLayout.lineHeight,
   })
   if (!wt.kids.length) return
   const totalH = wt.kids.reduce((s, k) => s + k.subH, 0) + GY * (wt.kids.length - 1)
@@ -249,6 +258,7 @@ function layoutLogic(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, edges
     side: 1, level: 0, color: '', collapsed: false,
     hasChildren: (doc.nodes[doc.rootId]?.children.length ?? 0) > 0,
     hidden: rootWt.hidden, fontSize: rootWt.fs, imgH: rootWt.imgH,
+    textLines: rootWt.textLayout.lines, lineHeight: rootWt.textLayout.lineHeight,
   })
   const kids = rootWt.kids
   const colorOf = new Map<string, string>()
@@ -286,6 +296,7 @@ function layoutTree(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, edges:
     side: 1, level: 0, color: '', collapsed: false,
     hasChildren: (doc.nodes[doc.rootId]?.children.length ?? 0) > 0,
     hidden: rootWt.hidden, fontSize: rootWt.fs, imgH: rootWt.imgH,
+    textLines: rootWt.textLayout.lines, lineHeight: rootWt.textLayout.lineHeight,
   })
   // 按累计子树高贪心分左右，保持各侧内部顺序
   const right: WT[] = []
@@ -352,6 +363,7 @@ function placeOrg(
     side: 1, level, color, collapsed: !!n?.collapsed,
     hasChildren: (n?.children.length ?? 0) > 0,
     hidden: wt.hidden, fontSize: wt.fs, imgH: wt.imgH,
+    textLines: wt.textLayout.lines, lineHeight: wt.textLayout.lineHeight,
   })
   if (!wt.kids.length) return
   const totalW = wt.kids.reduce((s, k) => s + k.subW, 0) + GY * (wt.kids.length - 1)
@@ -407,6 +419,7 @@ function placeFish(
     side: dir > 0 ? 1 : -1, level, color, collapsed: !!n?.collapsed,
     hasChildren: (n?.children.length ?? 0) > 0,
     hidden: wt.hidden, fontSize: wt.fs, imgH: wt.imgH,
+    textLines: wt.textLayout.lines, lineHeight: wt.textLayout.lineHeight,
   })
   if (!wt.kids.length) return
   let curX = bx + wt.w
@@ -421,7 +434,7 @@ function placeFish(
       color: '', level: level + 1,
     })
     placeFish(doc, c, nx, by, dir, level + 1, doc.nodes[c.id]?.color || color, out, edges)
-    curX = nx + c.w
+    curX = nx + c.chainW
   }
 }
 
@@ -436,16 +449,19 @@ function layoutFishbone(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, ed
     side: 1, level: 0, color: '', collapsed: false,
     hasChildren: (doc.nodes[doc.rootId]?.children.length ?? 0) > 0,
     hidden: rootWt.hidden, fontSize: rootWt.fs, imgH: rootWt.imgH,
+    textLines: rootWt.textLayout.lines, lineHeight: rootWt.textLayout.lineHeight,
   })
   // 一级分支：上下交替（dir=-1 上 / +1 下），向右展开
+  let nextBranchX = rootWt.w + GX
   for (let i = 0; i < kids.length; i++) {
     const k = kids[i]
     const dir: 1 | -1 = i % 2 === 0 ? -1 : 1
-    const branchX = rootWt.w + GX + i * FISH_LEVEL1_GAP
-    const branchY = SPINE_Y + dir * (rootWt.h / 2 + GY)
+    const branchX = nextBranchX
+    const branchY = dir < 0 ? -GY - k.maxH : rootWt.h + GY
+    nextBranchX += k.chainW + FISH_LEVEL1_GAP
     const color = doc.nodes[k.id]?.color || colorOf.get(k.id) || ''
     // root 脊线点 → 分支节点（斜线贝塞尔）
-    const spineX = rootWt.w + i * FISH_LEVEL1_GAP
+    const spineX = branchX - GX
     edges.push({
       from: doc.rootId, to: k.id,
       points: [
@@ -475,6 +491,7 @@ function layoutTimeline(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, ed
     side: 1, level: 0, color: '', collapsed: false,
     hasChildren: (doc.nodes[doc.rootId]?.children.length ?? 0) > 0,
     hidden: rootWt.hidden, fontSize: rootWt.fs, imgH: rootWt.imgH,
+    textLines: rootWt.textLayout.lines, lineHeight: rootWt.textLayout.lineHeight,
   })
 
   // 先序 DFS 收集所有可见非根节点（带 parentId 与 dfsIdx）
@@ -503,6 +520,7 @@ function layoutTimeline(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, ed
   // 第一遍：落位
   const stack = new Map<string, number>()
   const baseX = rootWt.w + GX
+  let nextColumnX = baseX
   for (let i = 0; i < flat.length; i++) {
     const { wt } = flat[i]
     const n = doc.nodes[wt.id]
@@ -510,13 +528,15 @@ function layoutTimeline(doc: DocData, rootWt: WT, out: Map<string, LaidNode>, ed
     const dateKey = n?.task?.start ?? '__dfs__' + flat[i].dfsIdx
     const stackCount = stack.get(dateKey) ?? 0
     stack.set(dateKey, stackCount + 1)
-    const x = baseX + i * TIMELINE_COL_GAP
-    const y = AXIS_Y + side * (TIMELINE_ROW_H * (stackCount + 1)) - wt.h / 2
+    const x = nextColumnX
+    nextColumnX += Math.max(TIMELINE_COL_GAP, wt.w + GX)
+    const y = side > 0 ? AXIS_Y + TIMELINE_ROW_H * (stackCount + 1) : AXIS_Y - TIMELINE_ROW_H * (stackCount + 1) - wt.h
     out.set(wt.id, {
       id: wt.id, x, y, w: wt.w, h: wt.h,
       side, level: 1, color: n?.color || '', collapsed: !!n?.collapsed,
       hasChildren: (n?.children.length ?? 0) > 0,
       hidden: wt.hidden, fontSize: wt.fs, imgH: wt.imgH,
+    textLines: wt.textLayout.lines, lineHeight: wt.textLayout.lineHeight,
     })
   }
 

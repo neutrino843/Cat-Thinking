@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { Pool } from 'pg'
-import { chooseLocalAppPorts, chooseLocalDatabasePort, isLocalDatabasePort, stopOwnedService } from './local-app-lifecycle.mjs'
+import { chooseLocalAppPorts, chooseLocalDatabasePort, isLocalDatabasePort, stopOwnedService, waitForLocalReadiness } from './local-app-lifecycle.mjs'
 import { assertPostgresTestEvidence } from './postgres-test-evidence.mjs'
 
 const exec = promisify(execFile)
@@ -282,27 +282,25 @@ const startApp = async (verifyOnly, personal = false) => {
   }
   process.once('SIGINT', stopChildren); process.once('SIGTERM', stopChildren)
   try {
-    let ready = false
-    for (let attempt = 0; attempt < 50; attempt++) {
-      if (stopping) return
-      if (service.exitCode !== null) throw new Error('local_service_exited_unsuccessfully')
-      try { ready = (await fetch(`${serviceUrl}/ready`, { signal: AbortSignal.timeout(1000) })).ok } catch { /* bounded startup polling */ }
-      if (ready) break
-      await new Promise((done) => setTimeout(done, 100))
-    }
-    if (!ready) throw new Error('local_service_startup_timeout')
+    const ready = await waitForLocalReadiness({
+      probe: async () => (await fetch(`${serviceUrl}/ready`, { signal: AbortSignal.timeout(1000) })).ok,
+      hasExited: () => service.exitCode !== null || service.signalCode !== null,
+      shouldStop: () => stopping,
+    })
+    if (ready === 'stopped') return
+    if (ready === 'exited') throw new Error('local_service_exited_unsuccessfully')
+    if (ready !== 'ready') throw new Error('local_service_startup_timeout')
     frontend = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', String(frontendPort), '--strictPort'], { cwd: root, env: environment, stdio: 'inherit', windowsHide: true, shell: false })
     frontendExit = observeExit(frontend)
     {
-      let frontendReady = false
-      for (let attempt = 0; attempt < 50; attempt++) {
-        if (stopping) return
-        if (frontend.exitCode !== null || service.exitCode !== null) throw new Error('local_app_exited_unsuccessfully')
-        try { frontendReady = (await fetch(`${frontendUrl}/`, { signal: AbortSignal.timeout(1000) })).ok } catch { /* bounded startup polling */ }
-        if (frontendReady) break
-        await new Promise((done) => setTimeout(done, 100))
-      }
-      if (!frontendReady) throw new Error('local_frontend_startup_timeout')
+      const frontendReady = await waitForLocalReadiness({
+        probe: async () => (await fetch(`${frontendUrl}/`, { signal: AbortSignal.timeout(1000) })).ok,
+        hasExited: () => frontend.exitCode !== null || frontend.signalCode !== null || service.exitCode !== null || service.signalCode !== null,
+        shouldStop: () => stopping, timeoutMs: 15_000,
+      })
+      if (frontendReady === 'stopped') return
+      if (frontendReady === 'exited') throw new Error('local_app_exited_unsuccessfully')
+      if (frontendReady !== 'ready') throw new Error('local_frontend_startup_timeout')
     }
     console.log(personal
       ? `CatThinking 已启动：${frontendUrl} 。点击「AI 设置」，选择服务商、填写密钥和模型，然后保存并连接。按 Ctrl+C 可正常停止应用；文档和已保存连接会保留。`

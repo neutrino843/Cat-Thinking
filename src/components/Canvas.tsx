@@ -1,4 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { getTextMeasurementRevision, subscribeTextMeasurements } from '../lib/measure'
 import type { DocData, NodeImage, NodeLink, NodeTag } from '../types'
 import { useDoc } from '../store/docStore'
 import { useSettings } from '../store/settings'
@@ -14,6 +15,7 @@ import { applyFilter } from '../lib/filter'
 import { pinchFactor, wheelFactor, zoomAt, type View } from '../lib/viewport'
 import { computeSnap, type GuideLine } from '../lib/snap'
 import FilterBar from './FilterBar'
+import { executeNodeCommand, nodeCommandForKey } from '../lib/nodeKeyboard'
 
 /** M7-P3：节点图片最大显示宽度（与 layout.ts 一致） */
 const IMG_MAX_W = 140
@@ -325,13 +327,13 @@ const NodeView = memo(function NodeView({
           />
         )}
         <text
-          x={n.x + 13} y={centerY} dominantBaseline="central"
+          x={n.x + 13} y={centerY - ((n.textLines?.length ?? 1) - 1) * (n.lineHeight ?? n.fontSize) / 2} dominantBaseline="central"
           fontSize={n.fontSize}
           fontFamily={n.level === 0 ? FONT_HAND : FONT_BODY}
           fill={n.level === 0 ? theme.rootText : theme.ink}
           style={{ userSelect: 'none', pointerEvents: 'none' }}
         >
-          {text || ' '}
+          {(n.textLines ?? [text || ' ']).map((line, index) => <tspan key={index} x={n.x + 13} dy={index ? n.lineHeight : 0}>{line}</tspan>)}
         </text>
         {/* M7-P2：备注或富备注 ✎ 指示符（在节点右缘） */}
         {(note || links) && (
@@ -541,7 +543,10 @@ export default function Canvas({ query }: { query: string }) {
     [presenting, doc, slide, slides.length, viewDoc],
   )
 
-  const layoutRes = useMemo(() => computeLayout(renderDoc), [renderDoc])
+  const measurementRevision = useSyncExternalStore(subscribeTextMeasurements, getTextMeasurementRevision, getTextMeasurementRevision)
+  // Font loading invalidates geometry independently of document identity.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const layoutRes = useMemo(() => computeLayout(renderDoc), [renderDoc, measurementRevision])
   const layoutRef = useRef(layoutRes)
   // 修审计 M-3：同上，渲染期只读不写 ref
   useEffect(() => {
@@ -681,6 +686,31 @@ export default function Canvas({ query }: { query: string }) {
     window.addEventListener('msz:fit', h)
     return () => window.removeEventListener('msz:fit', h)
   }, [fitView])
+
+  useEffect(() => {
+    const id = editing?.source === 'canvas' ? editing.id : selection.length === 1 ? selection[0] : undefined
+    if (!id || presenting) return
+    const raf = requestAnimationFrame(() => {
+      const el = wrapRef.current
+      const node = layoutRef.current.nodes.get(id)
+      if (!el || !node) return
+      const current = viewRef.current
+      const left = node.x * current.k + current.tx
+      const top = node.y * current.k + current.ty
+      const right = left + node.w * current.k
+      const bottom = top + node.h * current.k
+      const dx = node.w * current.k > el.clientWidth - 40 || left < 20 ? 20 - left : right > el.clientWidth - 20 ? el.clientWidth - 20 - right : 0
+      const dy = node.h * current.k > el.clientHeight - 40 || top < 20 ? 20 - top : bottom > el.clientHeight - 20 ? el.clientHeight - 20 - bottom : 0
+      if (dx || dy) setView((view) => ({ ...view, tx: view.tx + dx, ty: view.ty + dy }))
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [editing?.id, editing?.source, selection, presenting, wrapSize.w, wrapSize.h])
+
+  useEffect(() => {
+    if (editing || selection.length !== 1 || !document.activeElement?.closest('.canvas-wrap')) return
+    const raf = requestAnimationFrame(() => document.querySelector<SVGGElement>(`[data-node-id="${CSS.escape(selection[0])}"]`)?.focus({ preventScroll: true }))
+    return () => cancelAnimationFrame(raf)
+  }, [selection, editing])
 
   /* M11：过滤条件变化后可见树大幅裁剪，双层 rAF 等 layoutRef 刷新后自动适应 */
   useEffect(() => {
@@ -861,15 +891,14 @@ export default function Canvas({ query }: { query: string }) {
         if (moved) {
           if (target) useDoc.getState().reparent(id, target)
         } else if (!additive) {
-          // 修 F-6：additive 选择不进入编辑
-          const s2 = useDoc.getState()
-          if (s2.selection.length === 1 && s2.selection[0] === id) beginEditAt(id)
+          // Selection and inspection are separate from double-click/F2 editing.
+          document.querySelector<SVGGElement>(`[data-node-id="${CSS.escape(id)}"]`)?.focus()
         }
       }
       window.addEventListener('pointermove', onMove)
       window.addEventListener('pointerup', onUp)
     },
-    [beginEditAt, toWorld],
+    [toWorld],
   )
 
   const editingNode = editing && editing.source === 'canvas' ? layoutRes.nodes.get(editing.id) : null
@@ -989,7 +1018,7 @@ export default function Canvas({ query }: { query: string }) {
 /**
  * 画布内联文本编辑器（修审计 M-4）。
  * 以 key=editing.id 重挂载获得干净初值，替代旧实现「effect 里同步 setState 初始化 editVal」
- * 的级联渲染模式。Enter 提交 / Shift+Enter 换行（实际换行会在提交时归一为空格）/ Esc 取消。
+ * 的级联渲染模式。Enter 提交，Shift+Enter 换行，Tab 提交后建子节点。
  */
 function NodeTextEditor({
   id,
@@ -1003,27 +1032,54 @@ function NodeTextEditor({
   theme: Theme
 }) {
   const [val, setVal] = useState(() => useDoc.getState().doc.nodes[id]?.text ?? '')
+  const finished = useRef(false)
+  const input = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => { input.current?.focus({ preventScroll: true }); input.current?.select() }, [])
   // liveValue 取事件发生时 textarea 的 DOM 真值：输入事件的 React state 刷新与
   // Enter/blur 提交之间理论上存在调度窗口，直接读 DOM 可杜绝「键已敲入但提交了旧值」。
-  const commit = (cancel: boolean, liveValue?: string) => {
+  const commit = (cancel: boolean, liveValue?: string, restoreFocus = false) => {
     const s = useDoc.getState()
-    if (!cancel) s.setText(id, (liveValue ?? val).replace(/\n+/g, ' '))
+    if (finished.current || s.editing?.id !== id || s.editing.source !== 'canvas') return
+    finished.current = true
+    if (!cancel) s.setText(id, liveValue ?? val)
     s.setEditing(null)
+    if (restoreFocus) {
+      const docId = s.doc.id
+      requestAnimationFrame(() => {
+        const state = useDoc.getState()
+        if (state.doc.id === docId && !state.editing && state.selection.includes(id)
+          && !document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]')) {
+          document.querySelector<SVGGElement>(`[data-node-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true })
+        }
+      })
+    }
   }
   return (
     <textarea
       className="node-editor"
-      autoFocus
+      ref={input}
       value={val}
       onChange={(e) => setVal(e.target.value)}
       onBlur={(e) => commit(false, e.currentTarget.value)}
       onKeyDown={(e) => {
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
+        if (e.repeat && ['Tab', 'Enter'].includes(e.key)) { e.preventDefault(); return }
+        const command = nodeCommandForKey(e.nativeEvent, true)
+        if (command) {
+          e.preventDefault(); e.stopPropagation()
+          const nodes = useDoc.getState().doc.nodes
+          const parentId = nodes[id]?.parent
+          if (command === 'outdent' && (!parentId || !nodes[parentId]?.parent)) return
+          commit(false, e.currentTarget.value)
+          executeNodeCommand(command, id)
+          return
+        }
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault()
-          commit(false, e.currentTarget.value)
+          commit(false, e.currentTarget.value, true)
         } else if (e.key === 'Escape') {
           e.preventDefault()
-          commit(true)
+          commit(true, undefined, true)
         }
       }}
       style={{
@@ -1032,6 +1088,7 @@ function NodeTextEditor({
         width: Math.max(80, laid.w * view.k),
         height: Math.max(30, laid.h * view.k),
         fontSize: laid.fontSize * view.k,
+        lineHeight: `${(laid.lineHeight ?? laid.fontSize * 1.4) * view.k}px`,
         color: theme.ink,
         background: theme.nodeFill,
         borderColor: theme.selStroke,

@@ -48,7 +48,7 @@ async function addRootChild(page: import('@playwright/test').Page, text: string)
 
 /** 取大纲中第 n 行 input 的 value */
 function rowInput(page: import('@playwright/test').Page, n: number) {
-  return page.locator('.outline-row').nth(n).locator('input[data-oid]')
+  return page.locator('.outline-row').nth(n).locator('textarea[data-oid]')
 }
 
 test('大纲内拖拽：拖到另一节点内部成为其子节点', async ({ page }) => {

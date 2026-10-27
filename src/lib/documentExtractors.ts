@@ -31,6 +31,18 @@ export interface ExtractedDocument {
   titleHint?: string
   pageSpans: SourcePageSpan[]
   warnings: string[]
+  /** Ranges refer to this exact normalized text, never to a rewritten copy. */
+  blocks?: SourceStructureBlock[]
+}
+
+export interface SourceStructureBlock {
+  kind: 'heading' | 'paragraph' | 'list'
+  level: number
+  start: number
+  end: number
+  label?: string
+  edge?: 'top' | 'bottom'
+  position?: number
 }
 
 type Extractor = (file: File, onProgress?: ImportProgressListener) => Promise<ExtractedDocument>

@@ -1,9 +1,12 @@
 import { ANALYSIS_LIMITS } from '@cat-thinking/analysis-contracts'
 import type { DocData, MindNodeData, SourceDocument } from '../types'
+import { documentTitleFallback, isDocumentMetadata } from './importTitles'
+import { explicitPlainHeading, numberedHeadingContext, type PlainHeading } from './importHeadings'
 import {
   extractDocument,
   type ImportProgressListener,
   type SourcePageSpan,
+  type SourceStructureBlock,
 } from './documentExtractors'
 
 export {
@@ -14,10 +17,9 @@ export {
 export type { ImportProgress, ImportProgressListener } from './documentExtractors'
 export const MAX_DRAFT_NODES = 400
 export const MAX_SOURCE_LOCATORS = ANALYSIS_LIMITS.maxSourceLocators
-const NODE_LABEL_MAX = 120
 
 interface SourceEntry {
-  kind: 'heading' | 'paragraph'
+  kind: 'heading' | 'paragraph' | 'list'
   level: number
   text: string
   start: number
@@ -46,11 +48,6 @@ const uid = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2) + Date.now().toString(36)
 
-function fileStem(name: string): string {
-  const base = name.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '').trim()
-  return base || '未命名文档'
-}
-
 interface LineInfo {
   text: string
   start: number
@@ -70,6 +67,7 @@ function indexedLines(text: string): LineInfo[] {
 
 function looksLikePlainHeading(text: string): boolean {
   const value = text.trim()
+  if (isDocumentMetadata(value)) return false
   if (!value || value.length > 60 || value.includes('\n') || /[。！？.!?；;：:]$/.test(value)) return false
   // Explicit numeric headings are handled with their document context before this fallback.
   if (/^\d/.test(value)) return false
@@ -79,50 +77,11 @@ function looksLikePlainHeading(text: string): boolean {
   return value.length <= 32 && !/[。！？.!?；;：:]$/.test(value)
 }
 
-interface PlainHeading { level: number; headingKey?: string; parentHeadingKey?: string }
-
-function chapterNumber(value: string): string | undefined {
-  if (/^\d+$/.test(value)) return String(Number(value))
-  const digits: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
-  if (digits[value]) return String(digits[value])
-  if (/^[一二三四五六七八九]?十[一二三四五六七八九]?$/.test(value)) {
-    const [tens, units] = value.split('十')
-    return String((digits[tens] ?? 1) * 10 + (digits[units] ?? 0))
-  }
-  return undefined
-}
-
-/** Explicit numbering can survive missing DOCX styles. Ordinary sentences remain paragraphs. */
-function explicitPlainHeading(text: string): PlainHeading | null {
-  const value = text.trim()
-  if (!value || value.length > 60 || /[。！？.!?；;：:]$/.test(value)) return null
-  const chapter = value.match(/^第([0-9一二三四五六七八九十百千]+)([章节篇部卷])(?:\s|[^0-9])/)
-  if (chapter) return {
-    level: chapter[2] === '节' ? 2 : 1,
-    ...(chapter[2] === '章' && chapterNumber(chapter[1]) ? { headingKey: chapterNumber(chapter[1]) } : {}),
-  }
-  const numbered = value.match(/^([1-9][0-9]{0,2}(?:[.．][1-9][0-9]{0,2}){0,5})[.．、)）]?[ \t\u3000]+\S/)
-  if (!numbered) return null
-  const parts = numbered[1].split(/[.．]/)
-  return { level: parts.length, headingKey: parts.join('.'),
-    ...(parts.length > 1 ? { parentHeadingKey: parts.slice(0, -1).join('.') } : {}) }
-}
-
 function parseEntries(text: string, structure: 'text' | 'markdown', inferPlainHeadings: boolean): SourceEntry[] {
   const lines = indexedLines(text)
   const numberedCandidates = inferPlainHeadings ? lines.map(({ text: value }) =>
     explicitPlainHeading(value.replace(/^\s*#{1,6}\s+/, ''))).filter((heading): heading is PlainHeading => heading !== null) : []
-  const headingKeys = new Set(numberedCandidates.map(({ headingKey }) => headingKey).filter(Boolean))
-  const childrenByHeading = new Map<string, Set<string>>()
-  for (const heading of numberedCandidates) if (heading.parentHeadingKey && heading.headingKey) {
-    const children = childrenByHeading.get(heading.parentHeadingKey) ?? new Set<string>()
-    children.add(heading.headingKey)
-    childrenByHeading.set(heading.parentHeadingKey, children)
-  }
-  const hasNumberingContext = (heading: PlainHeading): boolean => !heading.parentHeadingKey
-    || headingKeys.has(heading.parentHeadingKey)
-    || (childrenByHeading.get(heading.parentHeadingKey)?.size ?? 0) > 1
-    || (heading.headingKey !== undefined && (childrenByHeading.get(heading.headingKey)?.size ?? 0) > 0)
+  const hasNumberingContext = numberedHeadingContext(numberedCandidates)
   const entries: SourceEntry[] = []
   let paragraph: LineInfo[] = []
   let inFence = false
@@ -167,6 +126,13 @@ function parseEntries(text: string, structure: 'text' | 'markdown', inferPlainHe
         continue
       }
     }
+    const list = !inFence ? line.text.match(/^(\s*)(?:[-+*•◦▪]|\d+[.)、])\s+(.+)$/) : null
+    if (list && !(inferPlainHeadings && /^\s*\d/.test(line.text) && explicitPlainHeading(line.text))) {
+      flush()
+      entries.push({ kind: 'list', level: Math.min(12, Math.floor(list[1].replace(/\t/g, '    ').length / 2)),
+        text: list[2], start: line.start, end: line.end })
+      continue
+    }
     const explicitHeading = inferPlainHeadings && !inFence ? explicitPlainHeading(line.text) : null
     if (explicitHeading && hasNumberingContext(explicitHeading)) {
       flush()
@@ -187,23 +153,25 @@ function plainLabel(value: string): string {
     .replace(/^\s*>\s?/gm, '')
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/[*_~`#]/g, '')
+    .replace(/(\*\*|__)(.+?)\1/g, '$2')
+    .replace(/`([^`]+)`/g, '$1')
     .replace(/\s+/g, ' ')
     .trim()
 }
 
-function labelForParagraph(value: string): string {
+function labelForParagraph(value: string, index: number): string {
   const clean = plainLabel(value) || '未命名段落'
-  if (clean.length <= NODE_LABEL_MAX) return clean
-  return clean.slice(0, NODE_LABEL_MAX - 1).trimEnd() + '…'
+  if (clean.length <= 80) return clean
+  const firstSentence = clean.match(/^(.{4,80}?[。！？.!?])/)?.[1]
+  return firstSentence || `原文段落 ${index + 1}`
 }
 
 function deriveTitle(entries: SourceEntry[], fallback: string, structure: 'text' | 'markdown'): string {
   if (structure === 'markdown') {
-    const h1 = entries.find((entry) => entry.kind === 'heading' && entry.level === 1)
+    const h1 = entries.find((entry) => entry.kind === 'heading' && entry.level === 1 && !isDocumentMetadata(entry.text))
     if (h1?.text.trim()) return plainLabel(h1.text)
   }
-  const first = entries[0]
+  const first = entries.find((entry) => !isDocumentMetadata(entry.text))
   if (first?.kind === 'heading' && first.text.trim()) return plainLabel(first.text)
   return fallback
 }
@@ -215,19 +183,34 @@ function buildDraft(
   pageSpans: SourcePageSpan[],
   titleHint?: string,
   inferPlainHeadings = structure === 'text',
+  blocks?: SourceStructureBlock[],
 ): Omit<DocumentImportDraft, 'source'> & {
   sourceId: string
   anchors: SourceDocument['anchors']
   locators: NonNullable<SourceDocument['locators']>
 } {
-  const entries = parseEntries(text, structure, inferPlainHeadings)
+  const entries: SourceEntry[] = blocks?.length ? blocks.map((block) => {
+    if (!Number.isInteger(block.start) || !Number.isInteger(block.end) || block.start < 0 || block.end > text.length || block.end <= block.start) throw new Error('文档结构的原文定位无效')
+    const value = block.label ?? text.slice(block.start, block.end)
+    const numbered = block.kind === 'heading' ? explicitPlainHeading(value) : null
+    return { ...block, text: value, ...(numbered?.headingKey ? { headingKey: numbered.headingKey, parentHeadingKey: numbered.parentHeadingKey } : {}) }
+  }) : parseEntries(text, structure, inferPlainHeadings)
+  if (blocks?.length) {
+    const candidates = entries.map((entry) => explicitPlainHeading(entry.text)).filter((heading): heading is PlainHeading => !!heading)
+    const context = numberedHeadingContext(candidates)
+    for (const entry of entries) {
+      const heading = explicitPlainHeading(entry.text)
+      if (entry.kind !== 'list' && heading && context(heading)) Object.assign(entry, heading, { kind: 'heading' })
+    }
+  }
   if (!entries.length) throw new Error('文档中没有可提取的文本内容')
 
   const now = Date.now()
   const docId = uid()
   const rootId = uid()
   const sourceId = uid()
-  const title = deriveTitle(entries, titleHint?.trim() || fileStem(file.name), structure) || fileStem(file.name)
+  const hint = titleHint?.trim()
+  const title = hint && !isDocumentMetadata(hint) ? plainLabel(hint) : deriveTitle(entries, documentTitleFallback(file.name), structure)
   const root: MindNodeData = { id: rootId, parent: null, children: [], text: title }
   const nodes: Record<string, MindNodeData> = { [rootId]: root }
   const anchors: SourceDocument['anchors'] = []
@@ -236,6 +219,7 @@ function buildDraft(
   let sectionCount = 0
   let paragraphCount = 0
   let truncated = false
+  const listStack: { level: number; id: string; path?: string }[] = []
 
   const pageForOffset = (offset: number): number | undefined => {
     if (!pageSpans.length) return undefined
@@ -278,13 +262,11 @@ function buildDraft(
       return null
     }
     const id = uid()
-    const note = entry.kind === 'paragraph' && plainLabel(entry.text) !== label ? entry.text : undefined
     nodes[id] = {
       id,
       parent: parentId,
       children: [],
       text: label,
-      ...(note ? { note } : {}),
     }
     nodes[parentId].children.push(id)
     const page = pageForOffset(entry.start)
@@ -300,7 +282,9 @@ function buildDraft(
 
   for (const entry of entries) {
     if (truncated) break
+    if (isDocumentMetadata(entry.text)) continue
     if (entry.kind === 'heading') {
+      listStack.length = 0
       const headingText = plainLabel(entry.text) || '未命名章节'
       // Markdown 的首个 H1 通常就是文档标题，由根节点承载，避免重复一层。
       if (!stack.length && entry.level === 1 && headingText === title) {
@@ -329,8 +313,18 @@ function buildDraft(
       continue
     }
 
+    if (entry.kind === 'list') {
+      while (listStack.length && (listStack.at(-1)?.level ?? -1) >= entry.level) listStack.pop()
+      const parent = listStack.at(-1) ?? stack.at(-1)
+      const id = addNode(entry, parent?.id ?? rootId, labelForParagraph(entry.text, paragraphCount), parent?.path)
+      if (!id) break
+      listStack.push({ id, level: entry.level, path: parent?.path })
+      paragraphCount++
+      continue
+    }
+    listStack.length = 0
     const parent = stack[stack.length - 1]
-    const label = labelForParagraph(entry.text)
+    const label = labelForParagraph(entry.text, paragraphCount)
     const id = addNode(entry, parent?.id ?? rootId, label, parent?.path)
     if (!id) break
     paragraphCount++
@@ -343,7 +337,7 @@ function buildDraft(
   if (truncated) {
     warnings.push(`导图草稿最多生成 ${MAX_DRAFT_NODES} 个节点；完整原文仍已保存，可供后续分析使用`)
   }
-  if (!sectionCount) warnings.push('未识别到明确标题层级，已按段落生成一级节点')
+  if (!sectionCount) warnings.push('材料的标题层级线索较少，当前为本地结构草稿；请核对层级，必要时主动整理概念图。')
 
   const doc: DocData = {
     version: 3,
@@ -386,6 +380,7 @@ export async function prepareDocumentImport(
     extracted.pageSpans,
     extracted.titleHint,
     extracted.structure === 'text' || extracted.kind === 'docx' || extracted.kind === 'pptx',
+    extracted.blocks,
   )
   onProgress?.({ phase: 'structuring', ratio: 1 })
   const source: SourceDocument = {
@@ -411,4 +406,20 @@ export async function prepareDocumentImport(
     warnings: [...extracted.warnings, ...built.warnings],
     preview: built.preview,
   }
+}
+
+/** Rebuild from the saved immutable text; never claim to recover missing file layout. */
+export function prepareSavedSourceImport(source: SourceDocument): DocumentImportDraft {
+  if (!source.text.trim() || source.charCount !== source.text.length) throw new Error('保存的原文不完整，无法重新整理。')
+  const pages = new Map<number, SourcePageSpan>()
+  for (const locator of source.locators ?? source.anchors.map((anchor) => ({ ...anchor, titlePath: [] }))) {
+    if (!locator.page) continue
+    const previous = pages.get(locator.page)
+    pages.set(locator.page, { page: locator.page, start: Math.min(previous?.start ?? locator.start, locator.start), end: Math.max(previous?.end ?? locator.end, locator.end) })
+  }
+  const built = buildDraft(source.text, ['markdown', 'docx', 'pptx'].includes(source.kind) ? 'markdown' : 'text',
+    new File([], source.name), [...pages.values()].sort((a, b) => a.start - b.start), undefined, true)
+  return { ...built, source: { ...source, id: built.sourceId, docId: built.doc.id, anchors: built.anchors, locators: built.locators,
+    importedAt: Date.now(), extractor: `${source.extractor}:saved-text-v1` },
+    warnings: [...built.warnings, '仅整理已保存的文字；图示和版式请对照原课件。原图、个人笔记和学习记录保留，不自动迁移到新图。'] }
 }

@@ -15,12 +15,14 @@ import { quickSaveCurrent } from './lib/fileHandle'
 import { restoreTabIds } from './lib/tabs'
 import { openDocById } from './lib/tabs'
 import type { LearningTarget } from './components/learning/LearningWorkspace'
+import { executeNodeCommand, nodeCommandForKey } from './lib/nodeKeyboard'
 
 const Toolbar = lazy(() => import('./components/Toolbar'))
 const Sidebar = lazy(() => import('./components/Sidebar'))
 const Canvas = lazy(() => import('./components/Canvas'))
 const Gantt = lazy(() => import('./components/Gantt'))
 const Outline = lazy(() => import('./components/Outline'))
+const NodeSourcePanel = lazy(() => import('./components/NodeSourcePanel'))
 const Palette = lazy(() => import('./components/Palette'))
 const Tabs = lazy(() => import('./components/Tabs'))
 const LearningHome = lazy(() => import('./components/learning/LearningHome'))
@@ -54,6 +56,7 @@ const LearningWorkspace = lazy(() => import('./components/learning/LearningWorks
 let initPromise: Promise<void> | null = null
 
 export default function App() {
+  const [conceptMap, setConceptMap] = useState(false)
   const [screen, setScreen] = useState<'home' | 'editor'>(() => window.location.hash === '#mindmap' ? 'editor' : 'home')
   const [ready, setReady] = useState(false)
   const [query, setQuery] = useState('')
@@ -127,7 +130,7 @@ export default function App() {
     })
   }
   useEffect(() => {
-    const openAnalysis = () => { setLearningPreparation(true); setLearningOpen(false); setAISettingsOpen(false); setAnalysisOpen(true) }
+    const openAnalysis = () => { setConceptMap(false); setLearningPreparation(true); setLearningOpen(false); setAISettingsOpen(false); setAnalysisOpen(true) }
     window.addEventListener('msz:learning-close-for-analysis', openAnalysis)
     return () => window.removeEventListener('msz:learning-close-for-analysis', openAnalysis)
   }, [])
@@ -281,7 +284,8 @@ export default function App() {
 
       const t = e.target as HTMLElement | null
       if (screen !== 'editor') return
-      if (t?.closest('[data-analysis-panel], [data-learning-workspace]')) return
+      if (document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]')) return
+      if (t?.closest('[data-analysis-panel], [data-learning-workspace], [data-node-details], [role="dialog"], dialog, [contenteditable="true"]')) return
       const mod = e.ctrlKey || e.metaKey
       const s = useDoc.getState()
       const key = e.key.toLowerCase()
@@ -345,17 +349,13 @@ export default function App() {
       }
       if (!s.selection.length) return
       const id = s.selection[0]
+      // Structure keys belong to the focused graph, never toolbar buttons/forms.
+      if (!t?.closest('.canvas-wrap, .outline')) return
+      if (e.repeat && ['Tab', 'Enter'].includes(e.key)) { e.preventDefault(); return }
+      const command = nodeCommandForKey(e)
+      if (command) { e.preventDefault(); executeNodeCommand(command, id); return }
       const nodes = s.doc.nodes
       switch (e.key) {
-        case 'Tab':
-          e.preventDefault()
-          s.addChild(id)
-          break
-        case 'Enter':
-          e.preventDefault()
-          if (id === s.doc.rootId) s.addChild(id)
-          else s.addSibling(id)
-          break
         case 'Delete':
         case 'Backspace':
           e.preventDefault()
@@ -406,22 +406,23 @@ export default function App() {
 
   return (
     <div className={'app' + (screen === 'home' && !presenting ? ' study-app' : '') + (presenting ? ' presenting' : '')}>
-      {screen === 'home' && !presenting ? <Suspense fallback={<div className="loading">正在打开学习首页…</div>}><LearningHome onEditor={openEditor} onAnalysis={() => { setLearningPreparation(false); setAISettingsOpen(false); setAnalysisOpen(true) }} onSettings={openAISettings}/></Suspense>
+      {screen === 'home' && !presenting ? <Suspense fallback={<div className="loading">正在打开学习首页…</div>}><LearningHome onEditor={openEditor} onAnalysis={() => { setConceptMap(false); setLearningPreparation(false); setAISettingsOpen(false); setAnalysisOpen(true) }} onSettings={openAISettings}/></Suspense>
         : <Suspense fallback={<div className="loading">正在打开思维导图工具…</div>}>
-      {!presenting && <Toolbar query={query} setQuery={setQuery} onAnalysis={() => { setLearningPreparation(false); setAISettingsOpen(false); setAnalysisOpen(true) }} onAISettings={openAISettings} onHome={openHome} />}
+      {!presenting && <Toolbar query={query} setQuery={setQuery} onAnalysis={() => { setConceptMap(false); setLearningPreparation(false); setAISettingsOpen(false); setAnalysisOpen(true) }} onAISettings={openAISettings} onHome={openHome} />}
       {!presenting && <Tabs />}
       {!presenting && <BackupBanner />}
       <div className="main">
         {!presenting && sidebar && <Sidebar />}
         {presenting || view === 'mind' ? <Canvas query={query} /> : <Gantt />}
         {!presenting && view === 'mind' && outline && <Outline />}
+        {!presenting && view === 'mind' && <NodeSourcePanel onConceptMap={() => { setConceptMap(true); setLearningPreparation(false); setAISettingsOpen(false); setAnalysisOpen(true) }} />}
       </div>
       {!presenting && <Palette />}
       {presenting && <PresentOverlay />}
       </Suspense>}
       {!presenting && analysisOpen && (
         <Suspense fallback={<AnalysisLoadState onClose={() => setAnalysisOpen(false)} />}>
-          <AnalysisResultsPanel key={`${docId}:${learningPreparation}`} docId={docId} learningPreparation={learningPreparation} onClose={() => setAnalysisOpen(false)} onOpenSettings={openAISettings} />
+          <AnalysisResultsPanel key={`${docId}:${learningPreparation}:${conceptMap}`} docId={docId} learningPreparation={learningPreparation} conceptMap={conceptMap} onClose={() => { setAnalysisOpen(false); setConceptMap(false) }} onOpenSettings={openAISettings} />
         </Suspense>
       )}
       {!presenting && aiSettingsOpen && (

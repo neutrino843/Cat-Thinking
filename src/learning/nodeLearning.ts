@@ -81,6 +81,15 @@ export async function saveNodeDraft(state: NodeLearningState, roundId: string, q
   })
 }
 
+export async function selectNodePosition(state: NodeLearningState, pointId: string, roundId?: string) {
+  if (state.lastPointId === pointId && state.lastRoundId === roundId) return state
+  return updateNodeState(state, (next) => {
+    next.lastPointId = pointId
+    if (roundId) next.lastRoundId = roundId
+    else delete next.lastRoundId
+  })
+}
+
 export async function collectNodeNote(state: NodeLearningState, pointId: string, text: string, roundId?: string) {
   if (!text.trim()) throw new LearningError('invalid', '请先写下自己的理解。')
   return updateNodeState(state, (next) => {
@@ -99,8 +108,19 @@ export async function connectNodePoints(courseId: string, from: string, to: stri
 export async function prepareNodeHint(state: NodeLearningState, roundId: string, level: 1 | 2 | 3): Promise<NodeSupport> {
   const round = state.rounds.find((r) => r.id === roundId)
   if (!round?.question.trim() || !round.refs.length || round.refs.length > 20) throw new LearningError('invalid', '请填写问题并选择 1—20 处原文依据。')
-  const duplicate = state.supports.find((s) => (!s.restored || s.archiveId) && s.roundId === roundId && s.inputRevision === round.inputRevision && s.level === level)
-  if (duplicate) return duplicate
+  const duplicates = state.supports.filter((s) => (!s.restored || s.archiveId) && s.roundId === roundId && s.inputRevision === round.inputRevision && s.level === level)
+  const archived = duplicates.find((support) => support.archiveId)
+  if (archived) return archived
+  for (const duplicate of duplicates) {
+    const doc = await db.docs.get(duplicate.docId)
+    const sources = await Promise.all(duplicate.sourceIds.map((id) => db.sources.get(id)))
+    const usable = doc && sources.every((source, index) => {
+      const ref = duplicate.refs[index]
+      const original = state.sources.find((item) => item.id === ref.snapshotId)
+      return source?.docId === duplicate.docId && original && source.text === original.text.slice(ref.start, ref.end)
+    })
+    if (usable) return duplicate
+  }
   // Three preparations, each server-capped at eight invocations, bound the whole round to 24.
   if (state.supports.filter((s) => s.roundId === roundId && !s.restored).length >= 3) throw new LearningError('limit', '这轮已经准备过 3 次提示，请先整理现有结果；需要更多帮助时可主动另起一轮，不会自动继续调用。')
   const docId = newLearningId(); const at = Date.now(); const sources: SourceDocument[] = []

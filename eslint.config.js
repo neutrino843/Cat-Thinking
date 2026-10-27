@@ -10,6 +10,9 @@ export default tseslint.config(
       '**/dist/**',
       '**/.browser-test-runtime/**',
       'node_modules/**',
+      // Local validation captures include downloaded third-party bundles. They
+      // are not maintained application source and must not be linted as such.
+      '.local-ai-validation/**',
       'playwright-report/**',
       'test-results/**',
       'coverage/**',

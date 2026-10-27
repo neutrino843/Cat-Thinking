@@ -10,16 +10,30 @@
 export class LRUCache<V> {
   private readonly map = new Map<string, V>()
   private readonly capacity: number
+  private totalWeight = 0
 
-  constructor(capacity: number) {
+  /** Weighted values must keep a stable weight until replaced via set(). */
+  constructor(capacity: number, private readonly budget?: { maxWeight: number; weightOf: (key: string, value: V) => number }) {
     if (!Number.isInteger(capacity) || capacity < 1) {
       throw new Error('LRUCache capacity 必须为 >= 1 的整数')
+    }
+    if (budget && (!Number.isFinite(budget.maxWeight) || budget.maxWeight < 1)) {
+      throw new Error('LRUCache maxWeight 必须为 >= 1 的有限数')
     }
     this.capacity = capacity
   }
 
   get size(): number {
     return this.map.size
+  }
+
+  /** Logical weight, e.g. retained string characters; not a heap byte estimate. */
+  get weight(): number { return this.totalWeight }
+
+  private weightOf(key: string, value: V): number {
+    const weight = this.budget?.weightOf(key, value) ?? 1
+    if (!Number.isFinite(weight) || weight < 0) throw new Error('LRUCache weight 必须为非负有限数')
+    return weight
   }
 
   has(key: string): boolean {
@@ -36,19 +50,26 @@ export class LRUCache<V> {
   }
 
   set(key: string, value: V): void {
-    if (this.map.delete(key)) {
-      // 已存在：删旧插新即完成刷新
-      this.map.set(key, value)
-      return
+    const weight = this.weightOf(key, value)
+    const previous = this.map.get(key)
+    if (previous !== undefined) {
+      this.totalWeight -= this.weightOf(key, previous)
+      this.map.delete(key)
     }
-    if (this.map.size >= this.capacity) {
-      const oldest = this.map.keys().next().value
-      if (oldest !== undefined) this.map.delete(oldest)
+    // Oversized entries must not evict useful smaller entries.
+    if (this.budget && weight > this.budget.maxWeight) return
+    while (this.map.size >= this.capacity || (this.budget && this.totalWeight + weight > this.budget.maxWeight)) {
+      const oldest = this.map.entries().next().value
+      if (oldest === undefined) break
+      this.totalWeight -= this.weightOf(oldest[0], oldest[1])
+      this.map.delete(oldest[0])
     }
     this.map.set(key, value)
+    this.totalWeight += weight
   }
 
   clear(): void {
     this.map.clear()
+    this.totalWeight = 0
   }
 }

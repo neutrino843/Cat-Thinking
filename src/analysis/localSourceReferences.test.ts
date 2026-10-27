@@ -34,6 +34,12 @@ describe('local copy citation inspection', () => {
     vi.mocked(db.sources.get).mockImplementation(() => Dexie.Promise.resolve(long))
     const plain = await resolveLocalSourceReference(converted.doc.id, { ...reference, contentHash: undefined, start: 0, end: long.text.length })
     expect(plain.truncated).toBe(true); expect(plain.quote.length).toBe(4_000); expect(plain.quote).toContain('<script>')
+    const local = { ...reference, contentHash: undefined, start: 0, end: long.text.length }
+    const next = await resolveLocalSourceReference(converted.doc.id, local, { offset: 4000 })
+    expect(plain.quote + next.quote).toBe(long.text)
+    expect(next.truncated).toBe(false)
+    expect((await resolveLocalSourceReference(converted.doc.id, local, { full: true })).quote).toBe(long.text)
+    for (const offset of [-1, .5, long.text.length]) await expect(resolveLocalSourceReference(converted.doc.id, local, { offset })).rejects.toThrow('位置')
   })
 
   it('rejects late removal/change and malformed offsets without yielding stale excerpts', async () => {

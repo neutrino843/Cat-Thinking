@@ -10,6 +10,7 @@ import { LearningError, newLearningId, type Course, type LearningEntity, type Le
 import { sameQuestion } from './workspaceView'
 import { prerequisiteCycle, questionRefKey } from './knowledgeGraph'
 import { assertNodeSupportArchive } from './nodeContracts'
+import { archiveNodeHintsForBackup } from './nodeHintResults'
 
 export const COURSE_PACKAGE_LIMITS = Object.freeze({ maxFileBytes: 192 * 1024 * 1024, maxPayloadBytes: 128 * 1024 * 1024, maxBlobBytes: 64 * 1024 * 1024, maxRecords: 50_000, maxDocuments: 1000, maxNodes: 50_000 })
 const FORMAT = 'maosizhi-course'
@@ -177,7 +178,8 @@ export async function validateCoursePackagePayload(raw: unknown): Promise<Course
   if (await sha256Hex(canonicalizeJson(payloadForHash(input as unknown as CoursePackagePayload))) !== input.contentHash) throw new LearningError('corrupt', '课程包内容校验失败。')
   return payload
 }
-export async function exportCoursePackage(courseId: string, options: { password?: string } = {}): Promise<Blob> {
+export async function exportCoursePackage(courseId: string, options: { password?: string; allowIncompleteHints?: boolean } = {}): Promise<Blob> {
+  if (!options.allowIncompleteHints) await archiveNodeHintsForBackup(courseId)
   const captured = await db.transaction('r', [db.learningRecords, db.learningCourseTombstones, db.docs, db.sources, db.blobs, db.docVersions], async () => {
     if (await db.learningCourseTombstones.get(courseId)) invalid('课程已删除。')
     const course = await db.learningRecords.get(courseId); if (!course || course.kind !== 'course') invalid('课程不存在。')
@@ -222,6 +224,8 @@ export async function previewCoursePackage(file: Blob, options: { password?: str
   const payload = await validateCoursePackagePayload(raw)
   if (envelopeVersion !== undefined && payload.version !== envelopeVersion) invalid('加密封装和内容版本不一致。')
   const warnings = payload.missingDocumentIds.length ? [`${payload.missingDocumentIds.length} 份可编辑文档已经不存在；归档原文和学习记录仍会恢复，失效编辑关联会移除。`] : []
+  const missingHints = payload.records.flatMap((r) => r.kind === 'node-workspace' ? r.supports.filter((s) => !s.archiveId) : []).length
+  if (missingHints) warnings.push(`${missingHints} 次提示没有本机归档结果，只恢复原问题、尝试和来源；不会重启原后台任务。`)
   let historicalMissing = 0; let staleMappings = 0
   for (const bundle of payload.documents) {
     const available = new Set(bundle.blobs.map((b) => b.id)); const availableSources = new Set(bundle.sources.map((s) => s.id))

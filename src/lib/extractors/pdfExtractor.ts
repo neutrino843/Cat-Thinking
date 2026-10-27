@@ -1,6 +1,9 @@
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import type { ExtractedDocument, ImportProgressListener, SourcePageSpan } from '../documentExtractors'
 import { normalizeSourceText } from '../documentExtractors'
+import { excludeRepeatedPdfDecorations, pdfPageStructure } from './pdfStructure'
+import type { SourceStructureBlock } from '../documentExtractors'
+import { isDocumentMetadata } from '../importTitles'
 
 const MAX_PDF_PAGES = 200
 
@@ -61,6 +64,7 @@ export async function extractPdf(file: File, onProgress?: ImportProgressListener
     const pageCount = Math.min(pdf.numPages, MAX_PDF_PAGES)
     if (pdf.numPages > MAX_PDF_PAGES) warnings.push(`PDF 共 ${pdf.numPages} 页，当前只提取前 ${MAX_PDF_PAGES} 页`)
     const pageTexts: string[] = []
+    const pageBlocks: SourceStructureBlock[][] = []
     let emptyPages = 0
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
       onProgress?.({
@@ -71,21 +75,28 @@ export async function extractPdf(file: File, onProgress?: ImportProgressListener
       const page = await pdf.getPage(pageNumber)
       try {
         const content = await page.getTextContent()
-        const text = cleanPdfPageText(pdfItemsToText(content.items))
+        const structured = pdfPageStructure(content.items)
+        const text = structured.text
         if (!text) emptyPages++
         pageTexts.push(text)
+        pageBlocks.push(structured.blocks)
       } finally {
         page.cleanup()
       }
     }
 
     const pageSpans: SourcePageSpan[] = []
+    const titleHint = pageBlocks.flatMap((blocks, index) => blocks.filter((block) => block.kind === 'heading').map((block) => pageTexts[index].slice(block.start, block.end))).find((value) => !isDocumentMetadata(value))
+    const decorations = excludeRepeatedPdfDecorations(pageTexts.map((text, index) => ({ text, blocks: pageBlocks[index] })))
+    if (decorations.excluded) warnings.push(`${decorations.excluded} 处重复页眉/页脚保留在原文中，未生成知识节点。`)
     let text = ''
+    const blocks: SourceStructureBlock[] = []
     pageTexts.forEach((pageText, index) => {
       if (!pageText) return
       if (text) text += '\n\n'
       const start = text.length
       text += pageText
+      blocks.push(...decorations.blocks[index].map((block) => ({ ...block, start: start + block.start, end: start + block.end })))
       pageSpans.push({ page: index + 1, start, end: text.length })
     })
     text = normalizeSourceText(text)
@@ -96,9 +107,10 @@ export async function extractPdf(file: File, onProgress?: ImportProgressListener
       structure: 'text',
       text,
       extractor: `cat-pdfjs-${pdfjs.version ?? '4'}-v1`,
-      titleHint: text.split('\n').find((line) => line.trim() && line.trim().length <= 120)?.trim(),
+      titleHint,
       pageSpans,
       warnings,
+      blocks,
     }
   } catch (reason) {
     if (reason instanceof Error && /PDF 未提取到文本|PDF 文件签名/.test(reason.message)) throw reason

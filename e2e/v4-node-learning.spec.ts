@@ -1,9 +1,11 @@
 import { expect, test, type Page } from '@playwright/test'
 import { analysisRunSchema, type AnalysisRunV1, type ArtifactEnvelopeV1, type EngineCapabilitiesV1 } from '@cat-thinking/analysis-contracts'
+import { writeFile } from 'node:fs/promises'
+import { cpus, totalmem } from 'node:os'
 
 async function seed(page: Page, legacy = false) {
   return page.evaluate(async ({ legacy }) => {
-    const { db, saveDocumentBundle } = await import('/src/store/db.ts')
+    const { saveDocumentBundle } = await import('/src/store/db.ts')
     const { buildFixture } = await import('/src/test/fixture.ts')
     const { createCourse, attachDocument } = await import('/src/learning/repository.ts')
     const { captureNodeSources, createNodePoint, beginNodeRound, reloadNodeState, saveNodeDraft, updateNodeState, connectNodePoints } = await import('/src/learning/nodeLearning.ts')
@@ -82,11 +84,80 @@ test('a clean form adopts an external update before further editing', async ({ p
   expect(saved).toBe('在已同步内容上继续')
 })
 
+test('a dirty draft survives a conflicting writer until the learner explicitly reconciles it', async ({ page }) => {
+  const ids = await seed(page); await open(page)
+  const input = page.getByLabel('我已经想到的步骤', { exact: true })
+  await input.fill('本页尚未提交的推导')
+  await page.evaluate(async ({ stateId, newer }) => {
+    const { reloadNodeState, saveNodeDraft } = await import('/src/learning/nodeLearning.ts')
+    await saveNodeDraft(await reloadNodeState(stateId), newer, '外部问题', '另一窗口的新内容')
+  }, ids)
+  await expect(page.getByRole('alert').filter({ hasText: '记录已在其他页面更新或删除' })).toBeVisible()
+  await expect(input).toHaveValue('本页尚未提交的推导')
+  await expect(page.getByRole('button', { name: '关闭课程学习工作台', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: '读取另一版本，保留本页文字', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '另一窗口的新内容' })).toBeVisible()
+  await page.getByRole('button', { name: '明确重试保存本页草稿', exact: true }).click()
+  await expect(page.getByText('草稿已保存在本机，尚未自动收录为个人理解。', { exact: true })).toBeVisible()
+  const saved = await page.evaluate(async ({ stateId, newer }) => {
+    const { reloadNodeState } = await import('/src/learning/nodeLearning.ts')
+    return (await reloadNodeState(stateId)).rounds.find((r) => r.id === newer)?.input
+  }, ids)
+  expect(saved).toBe('本页尚未提交的推导')
+})
+
 test('legacy courses keep their old default and can opt into node learning', async ({ page }) => {
   await seed(page, true); await open(page)
   await expect(page.getByRole('region', { name: '节点学习工作区' })).toHaveCount(0)
   await page.getByRole('button', { name: '节点学习', exact: true }).click()
   await expect(page.getByRole('region', { name: '节点学习工作区' })).toBeVisible()
+})
+
+test('a deleted temporary hint document does not lock unrelated node drafts', async ({ page }) => {
+  const ids = await seed(page)
+  await page.evaluate(async ({ stateId, newer }) => {
+    const { moveToTrash } = await import('/src/store/db.ts')
+    const { prepareNodeHint, reloadNodeState } = await import('/src/learning/nodeLearning.ts')
+    const support = await prepareNodeHint(await reloadNodeState(stateId), newer, 1)
+    await moveToTrash(support.docId)
+  }, ids)
+  await open(page)
+  await page.getByLabel('我已经想到的步骤', { exact: true }).fill('准备资料删除后仍可继续自己的推导')
+  await expect(page.getByText('草稿已保存在本机，尚未自动收录为个人理解。', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '准备第一级提示', exact: true }).click()
+  await expect(page.getByRole('region', { name: '第 1 级提示任务', exact: true })).toHaveCount(2)
+  const supports = await page.evaluate(async ({ stateId }) => {
+    const { reloadNodeState } = await import('/src/learning/nodeLearning.ts')
+    return (await reloadNodeState(stateId)).supports
+  }, ids)
+  expect(supports).toHaveLength(2)
+  expect(supports[0].docId).not.toBe(supports[1].docId)
+})
+
+test('candidate pagination reaches new nodes after the first 500 entries', async ({ page }) => {
+  const ids = await seed(page)
+  await page.evaluate(async ({ courseId }) => {
+    const { db } = await import('/src/store/db.ts')
+    const { loadCourseSnapshot } = await import('/src/learning/repository.ts')
+    const snapshot = await loadCourseSnapshot(courseId)
+    const row = await db.docs.get(snapshot.documents[0].docId)
+    if (!row) throw new Error('Missing fixture document')
+    const doc = JSON.parse(row.payload)
+    for (let i = 0; i < 501; i++) {
+      const id = `pagination-${i}`
+      doc.nodes[id] = { id, parent: doc.rootId, children: [], text: `分页候选 ${i}` }
+      doc.nodes[doc.rootId].children.push(id)
+    }
+    await db.docs.put({ ...row, payload: JSON.stringify(doc) })
+  }, ids)
+  await open(page)
+  await page.getByText('框架与资料', { exact: true }).click()
+  await page.getByRole('button', { name: '检查已有导图与 AI 大纲的节点候选', exact: true }).click()
+  await expect(page.getByRole('navigation', { name: '候选分页' })).toContainText('后面还有候选')
+  await expect(page.getByRole('checkbox', { name: /^分页候选 500 ·/ })).toHaveCount(0)
+  await page.getByRole('button', { name: '下一页候选', exact: true }).click()
+  await expect(page.getByRole('checkbox', { name: /^分页候选 500 ·/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: '下一页候选', exact: true })).toBeDisabled()
 })
 
 test('an empty browser can inspect and restore a V4 course package without a placeholder course', async ({ page }) => {
@@ -102,7 +173,8 @@ test('an empty browser can inspect and restore a V4 course package without a pla
   await expect(page.getByRole('button', { name: /查看关联节点.*前章定义/ })).toBeVisible()
 })
 
-test('node hint runs through the real controller, explicit viewing, source links and archived recovery with synthetic transport', async ({ page }) => {
+for (const mode of ['unviewed', 'viewed', 'background']) test(`generated hints survive export and restore in ${mode} mode using synthetic transport`, async ({ page }) => {
+  const viewedBeforeRestore = mode === 'viewed'
   let run: AnalysisRunV1 | undefined
   let artifact: ArtifactEnvelopeV1 | undefined
   let created = 0
@@ -125,6 +197,7 @@ test('node hint runs through the real controller, explicit viewing, source links
       const grounded = { id: 'grounded-step', text: '先核对前章定义中的运算条件，再尝试当前变换。', evidenceIds: ['evidence-node'], citations: [{ version: 1 as const, provenance: 'source' as const, sourceId: source.sourceId, start: 0, end: 10 }] }
       artifact = { version: 1, schemaVersion: 1, id: 'v4-summary', runId: run.id, docId: run.docId, sourceContentHashes: run.request.manifest.sources.map((s) => s.contentHash), createdAt: 1, updatedAt: 2, kind: 'summary', payload: { overview: grounded, keyPoints: [{ ...grounded, id: 'grounded-key' }], confusions: [] } }
       run = { ...run, status: 'succeeded', revision: 2, progress: 1, coverage: { input: 1, analysis: 1, chunksCompleted: 1, chunksFailed: 0, chunksTotal: 1 }, artifactStates: { summary: { status: 'succeeded', attempt: 1, artifactId: artifact.id, updatedAt: 2 } } }
+      if (mode === 'background') run = { ...run, status: 'running', progress: 0.5, artifactStates: { summary: { status: 'running', attempt: 1, updatedAt: 2 } } }
       return reply({ version: 1, run })
     }
     if (path.endsWith('/usage')) return reply({ version: 1, runId: run.id, usage: run.usage, invocationCount: 2, unresolvedCount: 0, estimatedInputTokens: 20, reservedOutputTokens: 4096, completeness: 'complete' })
@@ -137,12 +210,30 @@ test('node hint runs through the real controller, explicit viewing, source links
   await expect(generate).toBeEnabled(); expect(created).toBe(0)
   await generate.click()
   const view = page.getByRole('button', { name: '查看提示并记录辅助', exact: true })
-  await expect(view).toBeEnabled()
+  if (mode === 'background') {
+    await expect.poll(() => run?.status).toBe('running')
+    await page.getByRole('button', { name: '资料', exact: true }).click()
+    expect(run).toBeDefined(); expect(artifact).toBeDefined()
+    run = { ...run!, status: 'succeeded', revision: 3, progress: 1, artifactStates: { summary: { status: 'succeeded', attempt: 1, artifactId: artifact!.id, updatedAt: 3 } } }
+  } else await expect(view).toBeEnabled()
   await expect(page.getByText('先核对前章定义中的运算条件，再尝试当前变换。', { exact: true })).toHaveCount(0)
-  await view.click()
+  if (viewedBeforeRestore) await view.click()
+  const restoredId = await page.evaluate(async () => {
+    const { listCourses } = await import('/src/learning/repository.ts')
+    const { exportCoursePackage, previewCoursePackage, restoreCoursePackage } = await import('/src/learning/coursePackage.ts')
+    const course = (await listCourses())[0]
+    return (await restoreCoursePackage(await previewCoursePackage(await exportCoursePackage(course.id)), { name: '恢复的提示课程' })).id
+  })
+  await page.getByLabel('当前课程', { exact: true }).selectOption(restoredId)
+  if (!viewedBeforeRestore) {
+    await expect(page.getByText('先核对前章定义中的运算条件，再尝试当前变换。', { exact: true })).toHaveCount(0)
+    await view.click()
+  }
   await expect(page.getByText('先核对前章定义中的运算条件，再尝试当前变换。', { exact: true }).first()).toBeVisible()
   const recorded = await page.evaluate(async () => { const { listCourses, loadCourseSnapshot } = await import('/src/learning/repository.ts'); const snapshot = await loadCourseSnapshot((await listCourses())[0].id); return { events: snapshot.nodeWorkspace?.events.filter((e) => e.type === 'hint-viewed').length, archive: snapshot.nodeWorkspace?.supports[0].archiveId } })
   expect(recorded.events).toBe(1); expect(recorded.archive).toBeTruthy()
+  await page.getByRole('button', { name: '查看原文引用 1', exact: true }).first().click()
+  await expect(page.locator('.node-hint blockquote')).toContainText('前章定义给出运算的条')
   await page.reload(); await open(page)
   await expect(page.getByText('先核对前章定义中的运算条件，再尝试当前变换。', { exact: true }).first()).toBeVisible()
   expect(created).toBe(1)
@@ -159,4 +250,62 @@ for (const width of [320, 375, 414, 768, 1366]) test(`node workspace remains usa
   await page.screenshot({ path: info.outputPath(`v4-${width}.png`), fullPage: true })
   const box = await save.boundingBox()
   expect(box?.width).toBeGreaterThanOrEqual(44)
+})
+
+test('records navigation and visible autosave timings on a fixed 500-node course', async ({ page }, info) => {
+  test.setTimeout(120_000)
+  const ids = await seed(page)
+  await page.evaluate(async ({ courseId, stateId }) => {
+    const { db } = await import('/src/store/db.ts')
+    const { learningBase, newLearningId } = await import('/src/learning/model.ts')
+    const { reloadNodeState, updateNodeState } = await import('/src/learning/nodeLearning.ts')
+    const state = await reloadNodeState(stateId)
+    const chapters = Array.from({ length: 18 }, (_, i) => ({ id: newLearningId(), title: `规模章节 ${i + 3}` }))
+    const chapterIds = [...state.chapters, ...chapters]
+    const points = Array.from({ length: 498 }, (_, i) => ({ ...learningBase(courseId), kind: 'point' as const, title: `规模节点 ${i + 1}`, chapter: chapterIds[i % 20].title, definition: '', notes: '', aliases: [], sourceRefs: [], questionRefs: [], status: 'active' as const, goalIncluded: false }))
+    const allIds = [...state.bindings.map((b) => b.pointId), ...points.map((p) => p.id)]
+    const relations = Array.from({ length: 1000 }, (_, i) => ({ ...learningBase(courseId), kind: 'relation' as const, fromPointId: allIds[i % 500], toPointId: allIds[(i % 500 + 1 + Math.floor(i / 500)) % 500], type: 'comparison' as const, reason: '固定合成联系', confirmed: true }))
+    // Fixed synthetic storage fixture; not evidence of an import or paid-model flow.
+    await db.learningRecords.bulkAdd([...points, ...relations])
+    await updateNodeState(state, (next) => {
+      next.chapters.push(...chapters)
+      points.forEach((point, i) => {
+        next.bindings.push({ pointId: point.id, chapterId: chapterIds[i % 20].id, refs: [] })
+        next.rounds.push({ id: newLearningId(), pointId: point.id, question: '', input: '', inputRevision: 1, refs: [], status: 'active', updatedAt: 1 })
+      })
+      next.notes.push(...points.slice(0, 100).map((point) => ({ id: newLearningId(), pointId: point.id, text: '固定规模的个人理解', createdAt: 1 })))
+    })
+  }, ids)
+  await open(page)
+  const outline = page.getByRole('complementary', { name: '章节大纲' })
+  const switches: number[] = []; const saves: number[] = []
+  for (let i = 0; i < 30; i++) {
+    const title = `规模节点 ${i % 2 + 1}`
+    const started = performance.now()
+    const target = outline.getByRole('button', { name: title, exact: true })
+    await target.click()
+    await expect(target).toHaveAttribute('aria-pressed', 'true')
+    switches.push(performance.now() - started)
+  }
+  for (let i = 0; i < 30; i++) {
+    const started = performance.now()
+    await page.getByLabel('我已经想到的步骤', { exact: true }).fill(`固定规模保存样本 ${i}`)
+    await expect(page.getByText('草稿已保存在本机，尚未自动收录为个人理解。', { exact: true })).toBeVisible()
+    saves.push(performance.now() - started)
+  }
+  await page.reload(); await open(page)
+  const started = performance.now()
+  await page.getByRole('button', { name: '整章复习', exact: true }).click()
+  await expect(page.getByRole('region', { name: '整章复习' })).toBeVisible()
+  const reviewOpenMs = performance.now() - started
+  const percentile = (values: number[], p: number) => [...values].sort((a, b) => a - b)[Math.ceil(values.length * p) - 1]
+  const report = {
+    fixture: { chapters: 20, nodes: 500, relations: 1001, notes: 100, samplesPerAction: 30 },
+    environment: { cpu: cpus()[0]?.model, memoryGiB: totalmem() / 1024 ** 3, browser: await page.evaluate(() => navigator.userAgent), viewport: page.viewportSize(), build: 'Vite development, isolated IndexedDB' },
+    navigation: { p50Ms: percentile(switches, .5), p95Ms: percentile(switches, .95), samplesMs: switches },
+    visibleAutosave: { p50Ms: percentile(saves, .5), p95Ms: percentile(saves, .95), samplesMs: saves, includesDebounceMs: 500 },
+    firstReviewAfterReloadMs: reviewOpenMs,
+  }
+  await writeFile(info.outputPath('performance.json'), JSON.stringify(report, null, 2))
+  await info.attach('fixed-course-performance', { body: JSON.stringify(report), contentType: 'application/json' })
 })

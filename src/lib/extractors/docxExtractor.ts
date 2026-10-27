@@ -83,7 +83,11 @@ export function docxXmlToStructuredText(documentXml: string, stylesXml?: string)
       const text = paragraphText(element)
       if (!text) return
       const level = paragraphHeadingLevel(element, styles)
-      blocks.push(level ? `${'#'.repeat(level)} ${text}` : text)
+      const numbering = elements(element, 'numPr')[0]
+      const listLevel = Number(attribute(elements(numbering ?? element, 'ilvl')[0], 'val') || '0')
+      const numbered = numbering && attribute(elements(numbering, 'numId')[0], 'val') !== '0'
+      blocks.push(level ? `${'#'.repeat(level)} ${text}` : numbered
+        ? `${'  '.repeat(Number.isInteger(listLevel) ? Math.min(8, Math.max(0, listLevel)) : 0)}- ${text}` : text)
       return
     }
     if (name === 'tbl') {
